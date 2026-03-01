@@ -46,6 +46,10 @@ pub const CSM_CASCADE_COUNT: usize = 4;
 pub const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [16.0, 48.0, 128.0, 300.0];
 pub const CSM_SHADOW_MAP_SIZE: u32 = 2048;
 
+// Camera constants
+/// Default field of view in radians (70 degrees)
+pub const DEFAULT_FOV: f32 = 90.0 * std::f32::consts::PI / 180.0;
+
 /// Get optimal chunk generation worker count based on CPU cores
 /// Reserves cores for main thread + GPU driver, splits remaining between chunk gen and mesh building
 pub fn get_chunk_worker_count() -> usize {

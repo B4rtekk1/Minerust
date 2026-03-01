@@ -59,7 +59,12 @@ impl SubChunk {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
             self.blocks[x as usize][y as usize][z as usize] = block;
             self.mesh_dirty = true;
-            self.is_empty = block == BlockType::Air && self.is_empty;
+            // Correctly track emptiness: placing a non-Air block means subchunk is not empty.
+            // Note: we cannot cheaply reset is_empty=true here (would require full scan),
+            // so check_empty() is used for that purpose after bulk generation.
+            if block != BlockType::Air {
+                self.is_empty = false;
+            }
         }
     }
 

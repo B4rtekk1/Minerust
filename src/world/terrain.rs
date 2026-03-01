@@ -7,7 +7,7 @@ use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
 use crate::core::vertex::Vertex;
 use crate::render::mesh::{add_greedy_quad, add_quad};
-use crate::world::structures::{House, Structure};
+use crate::world::generator::ChunkGenerator;
 
 pub struct World {
     pub chunks: HashMap<(i32, i32), Chunk>,
@@ -18,13 +18,14 @@ pub struct World {
     simplex_moisture: Simplex,
     simplex_river: Simplex,
     simplex_lake: Simplex,
-    simplex_trees: Simplex,
     simplex_island: Simplex,
     simplex_cave1: Simplex,
     simplex_cave2: Simplex,
-    simplex_ore: Simplex,
     simplex_erosion: Simplex,
     pub seed: u32,
+    /// Delegated chunk generator — single source of truth for terrain generation.
+    /// Replaces the old duplicated generation methods that lived directly on World.
+    generator: ChunkGenerator,
 }
 
 impl World {
@@ -33,8 +34,6 @@ impl World {
     }
 
     pub fn new_with_seed(seed: u32) -> Self {
-        use crate::world::generator::ChunkGenerator;
-
         let generator = ChunkGenerator::new(seed);
 
         let mut world = World {
@@ -46,25 +45,24 @@ impl World {
             simplex_moisture: Simplex::new(seed.wrapping_add(4)),
             simplex_river: Simplex::new(seed.wrapping_add(5)),
             simplex_lake: Simplex::new(seed.wrapping_add(6)),
-            simplex_trees: Simplex::new(seed.wrapping_add(7)),
             simplex_island: Simplex::new(seed.wrapping_add(8)),
             simplex_cave1: Simplex::new(seed.wrapping_add(9)),
             simplex_cave2: Simplex::new(seed.wrapping_add(10)),
-            simplex_ore: Simplex::new(seed.wrapping_add(11)),
             simplex_erosion: Simplex::new(seed.wrapping_add(12)),
             seed,
+            generator,
         };
 
         let spawn_cx = 0;
         let spawn_cz = 0;
-        // Generate only a smaller initial radius for faster startup
-        // More chunks will be generated as the player moves
-        let initial_radius = 6;
+        // Ensure initial visible area matches configured render distance.
+        // Additional chunks are still generated asynchronously while exploring.
+        let initial_radius = RENDER_DISTANCE;
         for cx in (spawn_cx - initial_radius)..=(spawn_cx + initial_radius) {
             for cz in (spawn_cz - initial_radius)..=(spawn_cz + initial_radius) {
-                // Use ChunkGenerator for consistent terrain with async loader
+                // Use the stored generator for consistent terrain with the async loader
                 if !world.chunks.contains_key(&(cx, cz)) {
-                    let chunk = generator.generate_chunk(cx, cz);
+                    let chunk = world.generator.generate_chunk(cx, cz);
                     world.chunks.insert((cx, cz), chunk);
                 }
             }
@@ -310,61 +308,6 @@ impl World {
         }
     }
 
-    fn is_cave(&self, x: i32, y: i32, z: i32, surface_height: i32) -> bool {
-        if y <= 5 {
-            return false;
-        }
-
-        let fx = x as f64;
-        let fy = y as f64;
-        let fz = z as f64;
-
-        let is_entrance = self.is_cave_entrance(x, z, surface_height);
-
-        let min_surface_distance = if is_entrance { 0 } else { 8 };
-        if y >= surface_height - min_surface_distance {
-            return false;
-        }
-
-        let cave_scale = 0.05;
-        let cave1 =
-            self.simplex_cave1
-                .get([fx * cave_scale, fy * cave_scale * 0.5, fz * cave_scale]);
-        let cave2 = self.simplex_cave2.get([
-            fx * cave_scale * 0.7,
-            fy * cave_scale * 0.4,
-            fz * cave_scale * 0.7,
-        ]);
-
-        let cheese_threshold = 0.7;
-        let is_cheese_cave = cave1 > cheese_threshold && cave2 > cheese_threshold;
-        let spaghetti_scale = 0.08;
-        let spag1 = self.simplex_cave1.get([
-            fx * spaghetti_scale + 500.0,
-            fy * spaghetti_scale,
-            fz * spaghetti_scale,
-        ]);
-        let spag2 = self.simplex_cave2.get([
-            fx * spaghetti_scale + 500.0,
-            fy * spaghetti_scale,
-            fz * spaghetti_scale,
-        ]);
-        let spaghetti_threshold = 0.88;
-        let is_spaghetti_cave =
-            spag1.abs() < (1.0 - spaghetti_threshold) && spag2.abs() < (1.0 - spaghetti_threshold);
-
-        let depth_factor = if y < 30 {
-            1.0
-        } else if y < 50 {
-            0.8
-        } else {
-            0.5
-        };
-
-        (is_cheese_cave || is_spaghetti_cave)
-            && (self.position_hash_3d(x, y, z) % 100) as f64 / 100.0 < depth_factor
-    }
-
     fn is_cave_entrance(&self, x: i32, z: i32, surface_height: i32) -> bool {
         if surface_height <= SEA_LEVEL + 2 {
             return false;
@@ -406,295 +349,12 @@ impl World {
         false
     }
 
-    fn get_ore_at(&self, x: i32, y: i32, z: i32) -> Option<BlockType> {
-        let hash = self.position_hash_3d(x, y, z);
-        let ore_noise = self
-            .simplex_ore
-            .get([x as f64 * 0.1, y as f64 * 0.1, z as f64 * 0.1]);
-
-        if ore_noise < 0.3 {
-            return None;
-        }
-
-        let rarity = (hash % 1000) as f64 / 1000.0;
-
-        if y < 128 && rarity < 0.02 {
-            return Some(BlockType::Stone);
-        }
-        if y < 64 && rarity < 0.015 {
-            return Some(BlockType::Stone);
-        }
-
-        if y < 32 && rarity < 0.005 {
-            return Some(BlockType::Stone);
-        }
-        if y < 16 && rarity < 0.002 {
-            return Some(BlockType::Stone);
-        }
-
-        None
-    }
-
-    fn get_3d_density(&self, x: i32, y: i32, z: i32, biome: Biome, surface_height: i32) -> f64 {
-        let fx = x as f64;
-        let fy = y as f64;
-        let fz = z as f64;
-
-        let vertical_gradient = (surface_height as f64 - fy) / 8.0;
-
-        let density_noise = match biome {
-            Biome::Mountains => {
-                let scale = 0.02;
-                self.sample_fbm(&self.simplex_terrain, fx, fz, 3, 0.5, 2.0, scale) * 0.5
-                    + self.simplex_detail.get([fx * 0.04, fy * 0.04, fz * 0.04]) * 0.5
-            }
-            Biome::Island => {
-                let scale = 0.03;
-                self.simplex_terrain
-                    .get([fx * scale, fy * scale, fz * scale])
-                    * 0.4
-            }
-            _ => 0.0,
-        };
-
-        vertical_gradient + density_noise
-    }
-
-    fn position_hash_3d(&self, x: i32, y: i32, z: i32) -> u32 {
-        let mut hash = self.seed;
-        hash = hash.wrapping_add(x as u32).wrapping_mul(73856093);
-        hash = hash.wrapping_add(y as u32).wrapping_mul(19349663);
-        hash = hash.wrapping_add(z as u32).wrapping_mul(83492791);
-        hash ^ (hash >> 16)
-    }
-
+    /// Delegate chunk generation to the cached `ChunkGenerator`.
+    /// This is the single authoritative generation path — no duplication of
+    /// terrain logic between World and ChunkGenerator.
     fn generate_chunk(&mut self, cx: i32, cz: i32) {
-        let mut chunk = Chunk::new(cx, cz);
-        let base_x = cx * CHUNK_SIZE;
-        let base_z = cz * CHUNK_SIZE;
-
-        // Pre-compute biome and height maps for this chunk (major optimization)
-        let mut biome_map = [[Biome::Plains; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        let mut height_map = [[0i32; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                biome_map[lx as usize][lz as usize] = self.get_biome(world_x, world_z);
-                height_map[lx as usize][lz as usize] = self.get_terrain_height(world_x, world_z);
-            }
-        }
-
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                let biome = biome_map[lx as usize][lz as usize];
-                let surface_height = height_map[lx as usize][lz as usize];
-
-                let max_y = if matches!(biome, Biome::Mountains | Biome::Island) {
-                    WORLD_HEIGHT - 20
-                } else {
-                    // Ensure we iterate up to at least SEA_LEVEL to generate water correctly
-                    (surface_height + 5).max(SEA_LEVEL)
-                };
-
-                for y in 0..max_y {
-                    let mut is_solid = false;
-                    if y < surface_height {
-                        is_solid = true;
-                    }
-
-                    if matches!(biome, Biome::Mountains | Biome::Island) && y >= surface_height - 8
-                    {
-                        let density =
-                            self.get_3d_density(world_x, y, world_z, biome, surface_height);
-                        if density > 0.0 {
-                            is_solid = true;
-                        }
-                    }
-
-                    if is_solid {
-                        let block =
-                            self.get_block_for_biome(biome, y, surface_height, world_x, world_z);
-                        if block != BlockType::Air {
-                            chunk.set_block(lx, y, lz, block);
-                        }
-                    } else if y >= surface_height && y < SEA_LEVEL {
-                        if biome == Biome::Tundra && y == SEA_LEVEL - 1 {
-                            chunk.set_block(lx, y, lz, BlockType::Ice);
-                        } else {
-                            chunk.set_block(lx, y, lz, BlockType::Water);
-                        }
-                    }
-                }
-            }
-        }
-
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                let height = height_map[lx as usize][lz as usize]; // Use cached height
-
-                for y in 1..height.min(WORLD_HEIGHT - 1) {
-                    if self.is_cave(world_x, y, world_z, height) {
-                        let current = chunk.get_block(lx, y, lz);
-                        if current != BlockType::Water
-                            && current != BlockType::Bedrock
-                            && current != BlockType::Air
-                        {
-                            if y < SEA_LEVEL {
-                                chunk.set_block(lx, y, lz, BlockType::Water);
-                            } else {
-                                chunk.set_block(lx, y, lz, BlockType::Air);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        self.generate_chunk_decorations(&mut chunk, cx, cz);
-
-        for subchunk in &mut chunk.subchunks {
-            subchunk.check_empty();
-        }
-
+        let chunk = self.generator.generate_chunk(cx, cz);
         self.chunks.insert((cx, cz), chunk);
-    }
-
-    fn get_block_for_biome(
-        &self,
-        biome: Biome,
-        y: i32,
-        surface_height: i32,
-        world_x: i32,
-        world_z: i32,
-    ) -> BlockType {
-        if y == 0 {
-            return BlockType::Bedrock;
-        }
-        if y <= 4 {
-            let bedrock_chance = (5 - y) as u32 * 20;
-            let hash = self.position_hash_3d(world_x, y, world_z);
-            if (hash % 100) < bedrock_chance {
-                return BlockType::Bedrock;
-            }
-        }
-
-        let depth_from_surface = surface_height - y;
-        let dirt_depth = 3 + (self.position_hash(world_x, world_z) % 3) as i32;
-
-        match biome {
-            Biome::Ocean | Biome::River | Biome::Lake => {
-                if depth_from_surface > 4 {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Gravel
-                } else if y < surface_height {
-                    BlockType::Sand
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Beach | Biome::Island => {
-                if depth_from_surface > 6 {
-                    BlockType::Stone
-                } else if depth_from_surface > 0 {
-                    BlockType::Sand
-                } else if y == surface_height - 1 {
-                    if biome == Biome::Island && y > SEA_LEVEL {
-                        BlockType::Grass
-                    } else {
-                        BlockType::Sand
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Desert => {
-                if depth_from_surface > 10 {
-                    BlockType::Stone
-                } else if depth_from_surface > 0 {
-                    BlockType::Sand
-                } else if y == surface_height - 1 {
-                    BlockType::Sand
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Tundra => {
-                if depth_from_surface > dirt_depth + 2 {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    BlockType::Snow
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Mountains => {
-                if y > 140 {
-                    if y == surface_height - 1 {
-                        BlockType::Snow
-                    } else if depth_from_surface > 0 {
-                        BlockType::Stone
-                    } else {
-                        BlockType::Air
-                    }
-                } else if y > 110 {
-                    if depth_from_surface > 2 {
-                        BlockType::Stone
-                    } else if y == surface_height - 1 {
-                        BlockType::Grass
-                    } else {
-                        BlockType::Stone
-                    }
-                } else {
-                    if depth_from_surface > dirt_depth {
-                        BlockType::Stone
-                    } else if depth_from_surface > 1 {
-                        BlockType::Dirt
-                    } else if y == surface_height - 1 {
-                        BlockType::Grass
-                    } else {
-                        BlockType::Air
-                    }
-                }
-            }
-            Biome::Swamp => {
-                if depth_from_surface > dirt_depth {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    if y <= SEA_LEVEL {
-                        BlockType::Clay
-                    } else {
-                        BlockType::Grass
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Plains | Biome::Forest => {
-                if depth_from_surface > dirt_depth {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    BlockType::Grass
-                } else {
-                    BlockType::Air
-                }
-            }
-        }
-    }
-
-    fn is_valid_tree_ground(&self, block: BlockType) -> bool {
-        matches!(block, BlockType::Grass | BlockType::Dirt)
     }
 
     fn position_hash(&self, x: i32, z: i32) -> u32 {
@@ -702,331 +362,6 @@ impl World {
         hash = hash.wrapping_add(x as u32).wrapping_mul(73856093);
         hash = hash.wrapping_add(z as u32).wrapping_mul(19349663);
         hash ^ (hash >> 16)
-    }
-
-    fn can_place_tree(&self, chunk: &Chunk, lx: i32, y: i32, lz: i32, is_large: bool) -> bool {
-        let min_distance = if is_large { 5 } else { 3 };
-        for dx in -min_distance..=min_distance {
-            for dz in -min_distance..=min_distance {
-                let check_x = lx + dx;
-                let check_z = lz + dz;
-
-                if check_x < 0 || check_x >= CHUNK_SIZE || check_z < 0 || check_z >= CHUNK_SIZE {
-                    continue;
-                }
-
-                for dy in -1..=8 {
-                    let check_y = y + dy;
-                    if check_y < 0 || check_y >= WORLD_HEIGHT {
-                        continue;
-                    }
-                    if chunk.get_block(check_x, check_y, check_z) == BlockType::Wood {
-                        return false;
-                    }
-                }
-            }
-        }
-
-        if is_large {
-            for dx in 0..=1 {
-                for dz in 0..=1 {
-                    let check_x = lx + dx;
-                    let check_z = lz + dz;
-
-                    if check_x < 0 || check_x >= CHUNK_SIZE || check_z < 0 || check_z >= CHUNK_SIZE
-                    {
-                        return false;
-                    }
-
-                    let ground_block = chunk.get_block(check_x, y - 1, check_z);
-                    if !self.is_valid_tree_ground(ground_block) {
-                        return false;
-                    }
-
-                    for neighbor_dx in -1..=1 {
-                        for neighbor_dz in -1..=1 {
-                            let nx = check_x + neighbor_dx;
-                            let nz = check_z + neighbor_dz;
-                            if nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE {
-                                let neighbor = chunk.get_block(nx, y - 1, nz);
-                                if matches!(
-                                    neighbor,
-                                    BlockType::Stone
-                                        | BlockType::Gravel
-                                        | BlockType::Sand
-                                        | BlockType::Water
-                                        | BlockType::Ice
-                                ) {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            let ground_block = chunk.get_block(lx, y - 1, lz);
-            if !self.is_valid_tree_ground(ground_block) {
-                return false;
-            }
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    let nx = lx + dx;
-                    let nz = lz + dz;
-                    if nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE {
-                        let neighbor = chunk.get_block(nx, y - 1, nz);
-                        if matches!(
-                            neighbor,
-                            BlockType::Stone
-                                | BlockType::Gravel
-                                | BlockType::Sand
-                                | BlockType::Water
-                                | BlockType::Ice
-                        ) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-
-        true
-    }
-
-    fn generate_chunk_decorations(&self, chunk: &mut Chunk, cx: i32, cz: i32) {
-        let base_x = cx * CHUNK_SIZE;
-        let base_z = cz * CHUNK_SIZE;
-
-        let margin = 4;
-
-        for lx in margin..(CHUNK_SIZE - margin) {
-            for lz in margin..(CHUNK_SIZE - margin) {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                let biome = self.get_biome(world_x, world_z);
-                let height = self.get_terrain_height(world_x, world_z);
-
-                if height < SEA_LEVEL {
-                    continue;
-                }
-
-                let tree_noise = self
-                    .simplex_trees
-                    .get([world_x as f64 * 0.3, world_z as f64 * 0.3]);
-
-                if biome.has_trees() && tree_noise > biome.tree_density() {
-                    let hash = self.position_hash(world_x, world_z);
-                    let is_large = (hash % 100) < 25;
-
-                    if self.can_place_tree(chunk, lx, height, lz, is_large) {
-                        self.place_tree_in_chunk(chunk, lx, height, lz, biome, is_large);
-                    }
-                }
-
-                if biome == Biome::Desert {
-                    let cactus_noise = self
-                        .simplex_trees
-                        .get([world_x as f64 * 0.5 + 100.0, world_z as f64 * 0.5]);
-                    if cactus_noise > 0.8 {
-                        self.place_cactus_in_chunk(chunk, lx, height, lz);
-                    } else if cactus_noise > 0.7 {
-                        chunk.set_block(lx, height, lz, BlockType::DeadBush);
-                    }
-                }
-
-                // Temporary House Generation
-
-                // Use a cell-based approach for sparse, non-overlapping, randomized placement
-                let cell_size = 50;
-                let cx = world_x.div_euclid(cell_size);
-                let cz = world_z.div_euclid(cell_size);
-
-                let cell_hash = self.position_hash(cx, cz);
-                let offset_x = (cell_hash % (cell_size as u32)) as i32;
-                let offset_z = ((cell_hash >> 8) % (cell_size as u32)) as i32;
-
-                let target_x = cx * cell_size + offset_x;
-                let target_z = cz * cell_size + offset_z;
-
-                if world_x == target_x && world_z == target_z {
-                    let house_noise = self
-                        .simplex_trees
-                        .get([world_x as f64 * 0.02 + 2000.0, world_z as f64 * 0.02]);
-
-                    if house_noise > 0.3 {
-                        let house = House::new();
-                        let biome_name = format!("{:?}", biome);
-                        if house.structure.biomes.contains(&biome_name) {
-                            println!(
-                                "Generated House at X: {}, Y: {}, Z: {}",
-                                world_x, height, world_z
-                            );
-                            self.place_structure(chunk, lx, height, lz, &house.structure);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn place_structure(&self, chunk: &mut Chunk, lx: i32, y: i32, lz: i32, structure: &Structure) {
-        for (sx, sy, sz, block) in &structure.blocks {
-            let tx = lx + sx;
-            let ty = y + sy;
-            let tz = lz + sz;
-
-            if tx >= 0
-                && tx < CHUNK_SIZE
-                && tz >= 0
-                && tz < CHUNK_SIZE
-                && ty >= 0
-                && ty < WORLD_HEIGHT
-            {
-                // Determine logic for overwrite.
-                // For now, overwrite everything except Air if we want to preserve some things?
-                // But structure usually contains Air for hollow parts.
-                // If structure has explicit Air, we set Air (clearing terrain).
-                // If structure has block, we set block.
-                chunk.set_block(tx, ty, tz, *block);
-            }
-        }
-    }
-
-    fn place_tree_in_chunk(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        y: i32,
-        lz: i32,
-        biome: Biome,
-        is_large: bool,
-    ) {
-        let base_trunk_height = match biome {
-            Biome::Forest => 6,
-            Biome::Swamp => 7,
-            Biome::Tundra => 4,
-            _ => 5,
-        };
-
-        let trunk_height = if is_large {
-            base_trunk_height + 2
-        } else {
-            base_trunk_height
-        };
-
-        if is_large {
-            // Convert grass to dirt under the large tree trunk (2x2)
-            for dx in 0..=1 {
-                for dz in 0..=1 {
-                    let tx = lx + dx;
-                    let tz = lz + dz;
-                    if tx >= 0 && tx < CHUNK_SIZE && tz >= 0 && tz < CHUNK_SIZE {
-                        // Replace grass with dirt under trunk
-                        if chunk.get_block(tx, y - 1, tz) == BlockType::Grass {
-                            chunk.set_block(tx, y - 1, tz, BlockType::Dirt);
-                        }
-                    }
-                }
-            }
-
-            // Place trunk
-            for ty in 0..trunk_height {
-                for dx in 0..=1 {
-                    for dz in 0..=1 {
-                        let tx = lx + dx;
-                        let tz = lz + dz;
-                        if tx >= 0 && tx < CHUNK_SIZE && tz >= 0 && tz < CHUNK_SIZE {
-                            chunk.set_block(tx, y + ty, tz, BlockType::Wood);
-                        }
-                    }
-                }
-            }
-
-            let crown_center_y = y + trunk_height;
-            let crown_radius = if biome == Biome::Tundra {
-                3.0_f32
-            } else {
-                4.0_f32
-            };
-            let crown_center_x = lx as f32 + 0.5;
-            let crown_center_z = lz as f32 + 0.5;
-
-            for dx in -5..=5 {
-                for dy in -2..=5 {
-                    for dz in -5..=5 {
-                        let nlx = lx + dx;
-                        let nly = crown_center_y + dy;
-                        let nlz = lz + dz;
-
-                        if nlx < 0 || nlx >= CHUNK_SIZE || nlz < 0 || nlz >= CHUNK_SIZE {
-                            continue;
-                        }
-
-                        let fx = nlx as f32 - crown_center_x;
-                        let fz = nlz as f32 - crown_center_z;
-                        let dist = (fx * fx + (dy as f32 - 1.0).powi(2) + fz * fz).sqrt();
-
-                        if dist <= crown_radius {
-                            let existing = chunk.get_block(nlx, nly, nlz);
-                            // Only place leaves on air or other leaves
-                            if existing == BlockType::Air || existing == BlockType::Leaves {
-                                chunk.set_block(nlx, nly, nlz, BlockType::Leaves);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Convert grass to dirt under the small tree trunk
-            if chunk.get_block(lx, y - 1, lz) == BlockType::Grass {
-                chunk.set_block(lx, y - 1, lz, BlockType::Dirt);
-            }
-
-            // Place trunk
-            for ty in 0..trunk_height {
-                chunk.set_block(lx, y + ty, lz, BlockType::Wood);
-            }
-
-            let crown_center_y = y + trunk_height;
-            let crown_radius = if biome == Biome::Tundra {
-                2.0_f32
-            } else {
-                2.5_f32
-            };
-
-            for dx in -3..=3 {
-                for dy in -1..=3 {
-                    for dz in -3..=3 {
-                        if dx == 0 && dz == 0 && dy < 0 {
-                            continue;
-                        }
-                        let nlx = lx + dx;
-                        let nly = crown_center_y + dy;
-                        let nlz = lz + dz;
-
-                        if nlx < 0 || nlx >= CHUNK_SIZE || nlz < 0 || nlz >= CHUNK_SIZE {
-                            continue;
-                        }
-
-                        let dist = ((dx * dx + (dy - 1) * (dy - 1) + dz * dz) as f32).sqrt();
-                        if dist <= crown_radius {
-                            let existing = chunk.get_block(nlx, nly, nlz);
-                            // Only place leaves on air or other leaves
-                            if existing == BlockType::Air || existing == BlockType::Leaves {
-                                chunk.set_block(nlx, nly, nlz, BlockType::Leaves);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn place_cactus_in_chunk(&self, chunk: &mut Chunk, lx: i32, y: i32, lz: i32) {
-        let height = 2 + ((self.seed as i32 + lx * 17 + lz * 31) % 2);
-        for ty in 0..height {
-            chunk.set_block(lx, y + ty, lz, BlockType::Cactus);
-        }
     }
 
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
@@ -1262,7 +597,7 @@ impl World {
         // Quantize to 64 levels per channel for balance between merging and quality
         let quantize_color = |c: [f32; 3]| -> [u8; 3] {
             [
-                ((c[0] * 255.0) as u8) & 0xFC,  // 6 bits = 64 levels
+                ((c[0] * 255.0) as u8) & 0xFC, // 6 bits = 64 levels
                 ((c[1] * 255.0) as u8) & 0xFC,
                 ((c[2] * 255.0) as u8) & 0xFC,
             ]

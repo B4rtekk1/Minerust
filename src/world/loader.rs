@@ -126,9 +126,14 @@ impl ChunkLoader {
         self.pending.insert((cx, cz));
 
         // Non-blocking send - if the queue is full, skip this request for now
-        let _ = self
+        if self
             .request_tx
-            .try_send(ChunkGenRequest { cx, cz, priority });
+            .try_send(ChunkGenRequest { cx, cz, priority })
+            .is_err()
+        {
+            // Keep pending consistent with actual queued work.
+            self.pending.remove(&(cx, cz));
+        }
     }
 
     /// Request multiple chunks sorted by priority
@@ -145,11 +150,18 @@ impl ChunkLoader {
                 break; // Don't overwhelm the queue
             }
             self.pending.insert((*cx, *cz));
-            let _ = self.request_tx.try_send(ChunkGenRequest {
-                cx: *cx,
-                cz: *cz,
-                priority: *priority,
-            });
+            if self
+                .request_tx
+                .try_send(ChunkGenRequest {
+                    cx: *cx,
+                    cz: *cz,
+                    priority: *priority,
+                })
+                .is_err()
+            {
+                // Retry in later frames if queue is currently full.
+                self.pending.remove(&(*cx, *cz));
+            }
         }
     }
 

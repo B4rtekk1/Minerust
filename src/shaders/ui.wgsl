@@ -29,12 +29,10 @@ var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) tex_index: f32,
-    @location(5) roughness: f32,
-    @location(6) metallic: f32,
 };
 
 struct VertexOutput {
@@ -42,8 +40,6 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) tex_index: f32,
-    @location(3) roughness: f32,
-    @location(4) metallic: f32,
 };
 
 /// UI Vertex Shader
@@ -54,11 +50,9 @@ struct VertexOutput {
 fn vs_ui(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(model.position.xy, 0.0, 1.0);
-    out.color = model.color;
+    out.color = model.color.rgb;
     out.uv = model.uv;
     out.tex_index = model.tex_index;
-    out.roughness = model.roughness;
-    out.metallic = model.metallic;
     return out;
 }
 

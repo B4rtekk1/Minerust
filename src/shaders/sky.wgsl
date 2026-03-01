@@ -39,12 +39,10 @@ var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,  // Expected: fullscreen quad (-1..1, -1..1, 0)
-    @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) tex_index: f32,
-    @location(5) roughness: f32,
-    @location(6) metallic: f32,
 };
 
 struct VertexOutput {

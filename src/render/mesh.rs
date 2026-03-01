@@ -10,45 +10,39 @@ pub fn add_quad(
     normal: [f32; 3],
     color: [f32; 3],
     tex_index: f32,
-    roughness: f32,
-    metallic: f32,
+    _roughness: f32,
+    _metallic: f32,
 ) {
+    let packed_normal = Vertex::pack_normal(normal);
+    let packed_color = Vertex::pack_color(color);
     let base_idx = vertices.len() as u32;
     vertices.push(Vertex {
         position: v0,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 1.0],
         tex_index,
-        roughness,
-        metallic,
     });
     vertices.push(Vertex {
         position: v1,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [1.0, 1.0],
         tex_index,
-        roughness,
-        metallic,
     });
     vertices.push(Vertex {
         position: v2,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [1.0, 0.0],
         tex_index,
-        roughness,
-        metallic,
     });
     vertices.push(Vertex {
         position: v3,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 0.0],
         tex_index,
-        roughness,
-        metallic,
     });
     indices.extend_from_slice(&[
         base_idx,
@@ -72,47 +66,41 @@ pub fn add_greedy_quad(
     normal: [f32; 3],
     color: [f32; 3],
     tex_index: f32,
-    roughness: f32,
-    metallic: f32,
+    _roughness: f32,
+    _metallic: f32,
     width: f32,
     height: f32,
 ) {
+    let packed_normal = Vertex::pack_normal(normal);
+    let packed_color = Vertex::pack_color(color);
     let base_idx = vertices.len() as u32;
     vertices.push(Vertex {
         position: v0,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, height],
         tex_index,
-        roughness,
-        metallic,
     });
     vertices.push(Vertex {
         position: v1,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [width, height],
         tex_index,
-        roughness,
-        metallic,
     });
     vertices.push(Vertex {
         position: v2,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [width, 0.0],
         tex_index,
-        roughness,
-        metallic,
     });
     vertices.push(Vertex {
         position: v3,
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 0.0],
         tex_index,
-        roughness,
-        metallic,
     });
     indices.extend_from_slice(&[
         base_idx,
@@ -127,8 +115,8 @@ pub fn add_greedy_quad(
 pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     let size = 0.02;
     let thickness = 0.001;
-    let color = [1.0, 1.0, 1.0];
-    let normal = [0.0, 0.0, 1.0];
+    let packed_color = Vertex::pack_color([1.0, 1.0, 1.0]);
+    let packed_normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
 
     // Aspect ratio correction for 16:9 screens
     // The horizontal line needs to be shorter in X to appear same length as vertical
@@ -142,77 +130,61 @@ pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     // Horizontal bar (corrected for aspect ratio)
     vertices.push(Vertex {
         position: [-size_x, -thickness, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 0.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     vertices.push(Vertex {
         position: [size_x, -thickness, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [1.0, 0.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     vertices.push(Vertex {
         position: [size_x, thickness, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [1.0, 1.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     vertices.push(Vertex {
         position: [-size_x, thickness, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 1.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     // Vertical bar (use thickness_x for correct aspect ratio)
     vertices.push(Vertex {
         position: [-thickness_x, -size, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 0.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     vertices.push(Vertex {
         position: [thickness_x, -size, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [1.0, 0.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     vertices.push(Vertex {
         position: [thickness_x, size, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [1.0, 1.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     vertices.push(Vertex {
         position: [-thickness_x, size, 0.0],
-        normal,
-        color,
+        normal: packed_normal,
+        color: packed_color,
         uv: [0.0, 1.0],
         tex_index: 0.0,
-        roughness: 1.0,
-        metallic: 0.0,
     });
     indices.extend_from_slice(&[4, 5, 6, 4, 6, 7]);
 
@@ -281,16 +253,16 @@ pub fn build_player_model(x: f32, y: f32, z: f32, yaw: f32) -> (Vec<Vertex>, Vec
         ];
 
         for (face_indices, normal) in faces {
+            let packed_normal = Vertex::pack_normal(normal);
+            let packed_color = Vertex::pack_color(color);
             let base_idx = vertices.len() as u32;
             for &idx in &face_indices {
                 vertices.push(Vertex {
                     position: transformed[idx],
-                    normal,
-                    color,
+                    normal: packed_normal,
+                    color: packed_color,
                     uv: [0.0, 0.0],
                     tex_index: -1.0, // No texture, just use color
-                    roughness: 1.0,
-                    metallic: 0.0,
                 });
             }
             indices.extend_from_slice(&[

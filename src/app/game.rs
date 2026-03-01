@@ -44,10 +44,11 @@ struct Args {
 use render3d::chunk_loader::ChunkLoader;
 use render3d::render_core::csm::CsmManager;
 use render3d::{
-    BlockType, CHUNK_SIZE, Camera, DEFAULT_WORLD_FILE, DiggingState, GENERATION_DISTANCE,
-    IndirectManager, InputState, MAX_CHUNKS_PER_FRAME, MAX_MESH_BUILDS_PER_FRAME, NUM_SUBCHUNKS,
-    RENDER_DISTANCE, SUBCHUNK_HEIGHT, SavedWorld, Uniforms, Vertex, World, build_crosshair,
-    build_player_model, extract_frustum_planes, load_world, save_world,
+    BlockType, CHUNK_SIZE, Camera, DEFAULT_FOV, DEFAULT_WORLD_FILE, DiggingState,
+    GENERATION_DISTANCE, IndirectManager, InputState, MAX_CHUNKS_PER_FRAME,
+    MAX_MESH_BUILDS_PER_FRAME, NUM_SUBCHUNKS, RENDER_DISTANCE, SUBCHUNK_HEIGHT, SavedWorld,
+    Uniforms, Vertex, World, build_crosshair, build_player_model, extract_frustum_planes,
+    load_world, save_world,
 };
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
@@ -58,16 +59,11 @@ pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::new(
     0.0, 0.0, 0.5, 1.0,
 );
 
-/// Convert cgmath Vector4 frustum planes to [[f32; 4]; 6] for GPU culling shader
+/// Convert cgmath Vector4 frustum planes to [[f32; 4]; 6] for GPU culling shader.
+/// SAFETY: cgmath::Vector4<f32> is #[repr(C)] with layout identical to [f32; 4].
+#[inline(always)]
 fn frustum_planes_to_array(planes: &[cgmath::Vector4<f32>; 6]) -> [[f32; 4]; 6] {
-    [
-        [planes[0].x, planes[0].y, planes[0].z, planes[0].w],
-        [planes[1].x, planes[1].y, planes[1].z, planes[1].w],
-        [planes[2].x, planes[2].y, planes[2].z, planes[2].w],
-        [planes[3].x, planes[3].y, planes[3].z, planes[3].w],
-        [planes[4].x, planes[4].y, planes[4].z, planes[4].w],
-        [planes[5].x, planes[5].y, planes[5].z, planes[5].w],
-    ]
+    unsafe { std::mem::transmute(*planes) }
 }
 
 struct State {
@@ -127,6 +123,8 @@ struct State {
     menu_state: MenuState,
     /// Reflection mode: 0=off, 1=SSR (default)
     reflection_mode: u32,
+    /// Cached underwater state (1.0 = underwater, 0.0 = above water), updated each tick
+    is_underwater: f32,
     // Multiplayer
     network_client: Option<TcpClient>,
     remote_players: HashMap<u32, RemotePlayer>,
@@ -142,6 +140,9 @@ struct State {
     player_model_num_indices: u32,
     // Async chunk loading
     chunk_loader: ChunkLoader,
+    /// Cached player chunk coords — missing-chunk scan is skipped when unchanged
+    last_gen_player_cx: i32,
+    last_gen_player_cz: i32,
     // SSR (Screen Space Reflections) for water
     ssr_color_texture: wgpu::Texture,
     ssr_color_view: wgpu::TextureView,
@@ -1096,42 +1097,36 @@ impl State {
             multiview_mask: None,
         });
 
+        let sun_normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+        let sun_color = Vertex::pack_color([1.0, 1.0, 1.0]);
         let sun_vertices = vec![
             Vertex {
                 position: [-1.0, -1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-                color: [1.0, 1.0, 1.0],
+                normal: sun_normal,
+                color: sun_color,
                 uv: [0.0, 0.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             },
             Vertex {
                 position: [1.0, -1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-                color: [1.0, 1.0, 1.0],
+                normal: sun_normal,
+                color: sun_color,
                 uv: [1.0, 0.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             },
             Vertex {
                 position: [1.0, 1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-                color: [1.0, 1.0, 1.0],
+                normal: sun_normal,
+                color: sun_color,
                 uv: [1.0, 1.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             },
             Vertex {
                 position: [-1.0, 1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-                color: [1.0, 1.0, 1.0],
+                normal: sun_normal,
+                color: sun_color,
                 uv: [0.0, 1.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             },
         ];
         let sun_indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
@@ -1989,6 +1984,7 @@ impl State {
             game_state: GameState::Menu,
             menu_state: MenuState::default(),
             reflection_mode: 1, // Default: SSR only
+            is_underwater: 0.0,
             // Multiplayer
             network_client: None,
             remote_players: HashMap::new(),
@@ -2006,6 +2002,8 @@ impl State {
             player_model_num_indices: 0,
             // Async chunk loading
             chunk_loader,
+            last_gen_player_cx: i32::MIN,
+            last_gen_player_cz: i32::MIN,
             // SSR (Screen Space Reflections) for water
             ssr_color_texture,
             ssr_color_view,
@@ -2403,96 +2401,9 @@ impl State {
             let subchunk = &mut chunk.subchunks[sy as usize];
             let aabb = subchunk.aabb; // Copy AABB before releasing lock
 
-            // Update terrain buffers
+            // Update mesh counts (GPU buffers managed exclusively by IndirectManager)
             subchunk.num_indices = result.terrain.1.len() as u32;
-            if !result.terrain.0.is_empty() {
-                let vertex_data: &[u8] = bytemuck::cast_slice(&result.terrain.0);
-                let index_data: &[u8] = bytemuck::cast_slice(&result.terrain.1);
-
-                let needs_new_vertex_buffer = subchunk
-                    .vertex_buffer
-                    .as_ref()
-                    .map(|b| b.size() < vertex_data.len() as u64)
-                    .unwrap_or(true);
-                let needs_new_index_buffer = subchunk
-                    .index_buffer
-                    .as_ref()
-                    .map(|b| b.size() < index_data.len() as u64)
-                    .unwrap_or(true);
-
-                if needs_new_vertex_buffer {
-                    subchunk.vertex_buffer =
-                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Subchunk Vertex Buffer"),
-                            size: vertex_data.len() as u64,
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        }));
-                }
-                if needs_new_index_buffer {
-                    subchunk.index_buffer =
-                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Subchunk Index Buffer"),
-                            size: index_data.len() as u64,
-                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        }));
-                }
-
-                self.queue
-                    .write_buffer(subchunk.vertex_buffer.as_ref().unwrap(), 0, vertex_data);
-                self.queue
-                    .write_buffer(subchunk.index_buffer.as_ref().unwrap(), 0, index_data);
-            }
-
-            // Update water buffers
             subchunk.num_water_indices = result.water.1.len() as u32;
-            if !result.water.0.is_empty() {
-                let vertex_data: &[u8] = bytemuck::cast_slice(&result.water.0);
-                let index_data: &[u8] = bytemuck::cast_slice(&result.water.1);
-
-                let needs_new_vertex_buffer = subchunk
-                    .water_vertex_buffer
-                    .as_ref()
-                    .map(|b| b.size() < vertex_data.len() as u64)
-                    .unwrap_or(true);
-                let needs_new_index_buffer = subchunk
-                    .water_index_buffer
-                    .as_ref()
-                    .map(|b| b.size() < index_data.len() as u64)
-                    .unwrap_or(true);
-
-                if needs_new_vertex_buffer {
-                    subchunk.water_vertex_buffer =
-                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Subchunk Water Vertex Buffer"),
-                            size: vertex_data.len() as u64,
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        }));
-                }
-                if needs_new_index_buffer {
-                    subchunk.water_index_buffer =
-                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Subchunk Water Index Buffer"),
-                            size: index_data.len() as u64,
-                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        }));
-                }
-
-                self.queue.write_buffer(
-                    subchunk.water_vertex_buffer.as_ref().unwrap(),
-                    0,
-                    vertex_data,
-                );
-                self.queue.write_buffer(
-                    subchunk.water_index_buffer.as_ref().unwrap(),
-                    0,
-                    index_data,
-                );
-            }
-
             subchunk.mesh_dirty = false;
             aabb // Return AABB
         }; // Lock released
@@ -2541,22 +2452,31 @@ impl State {
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
+        let player_chunk_moved =
+            player_cx != self.last_gen_player_cx || player_cz != self.last_gen_player_cz;
 
         let snapshot = {
             let world = self.world.read();
 
             self.camera.update(&*world, dt, &self.input);
 
-            let mut missing_chunks = Vec::with_capacity(64);
-            for cx in (player_cx - GENERATION_DISTANCE)..=(player_cx + GENERATION_DISTANCE) {
-                for cz in (player_cz - GENERATION_DISTANCE)..=(player_cz + GENERATION_DISTANCE) {
-                    if !world.chunks.contains_key(&(cx, cz))
-                        && !self.chunk_loader.is_pending(cx, cz)
+            // Only scan for missing chunks when the player moves to a new chunk coord.
+            // The set of needed chunks is identical until the player crosses a chunk boundary.
+            let mut missing_chunks =
+                Vec::with_capacity(if player_chunk_moved { 64 } else { 0 });
+            if player_chunk_moved {
+                for cx in (player_cx - GENERATION_DISTANCE)..=(player_cx + GENERATION_DISTANCE) {
+                    for cz in
+                        (player_cz - GENERATION_DISTANCE)..=(player_cz + GENERATION_DISTANCE)
                     {
-                        let dx = cx - player_cx;
-                        let dz = cz - player_cz;
-                        let priority = dx * dx + dz * dz;
-                        missing_chunks.push((cx, cz, priority));
+                        if !world.chunks.contains_key(&(cx, cz))
+                            && !self.chunk_loader.is_pending(cx, cz)
+                        {
+                            let dx = cx - player_cx;
+                            let dz = cz - player_cz;
+                            let priority = dx * dx + dz * dz;
+                            missing_chunks.push((cx, cz, priority));
+                        }
                     }
                 }
             }
@@ -2588,6 +2508,11 @@ impl State {
             }
         };
 
+        if player_chunk_moved {
+            self.last_gen_player_cx = player_cx;
+            self.last_gen_player_cz = player_cz;
+        }
+
         let mut requests = snapshot.missing_chunks;
         requests.sort_by_key(|&(_, _, priority)| priority);
         for (cx, cz, priority) in requests.into_iter().take(MAX_CHUNKS_PER_FRAME) {
@@ -2595,7 +2520,8 @@ impl State {
         }
 
         let mut write_ops = WorldWriteOps {
-            completed_chunks: completed_chunks.into_iter()
+            completed_chunks: completed_chunks
+                .into_iter()
                 .map(|r| (r.cx, r.cz, r.chunk))
                 .collect(),
             block_break: None,
@@ -2643,14 +2569,17 @@ impl State {
                 world.set_block_player(bx, by, bz, BlockType::Air);
             }
 
-            world.update_chunks_around_player(
-                self.camera.position.x,
-                self.camera.position.z,
-            );
+            world.update_chunks_around_player(self.camera.position.x, self.camera.position.z);
         }
         for (bx, by, bz) in write_ops.mark_dirty {
             self.mark_chunk_dirty(bx, by, bz);
         }
+
+        self.is_underwater = if snapshot.eye_block == BlockType::Water {
+            1.0
+        } else {
+            0.0
+        };
 
         self.update_coords_ui();
 
@@ -2707,7 +2636,8 @@ impl State {
             });
 
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let proj = cgmath::perspective(Rad(std::f32::consts::FRAC_PI_2), aspect, 0.1, 500.0);
+        // DEFAULT_FOV is vertical FOV (like Minecraft and most games)
+        let proj = cgmath::perspective(Rad(DEFAULT_FOV), aspect, 0.1, 500.0);
         let view_mat = self.camera.view_matrix();
         let view_proj = OPENGL_TO_WGPU_MATRIX * proj * view_mat;
         let view_proj_array: [[f32; 4]; 4] = view_proj.into();
@@ -2725,8 +2655,7 @@ impl State {
 
         // Use CsmManager to compute cascade matrices with texel snapping for stability
         let mut csm = CsmManager::new();
-        //let fov_y = std::f32::consts::FRAC_PI_2; // 90 degrees
-        let fov_y = 70f32.to_radians();
+        let fov_y = DEFAULT_FOV;
         csm.update(
             &view_mat, sun_dir, 0.1,   // near
             300.0, // far (render distance)
@@ -2750,20 +2679,9 @@ impl State {
         let inv_view_proj = view_proj.invert().unwrap_or(Matrix4::identity());
         let inv_view_proj_array: [[f32; 4]; 4] = inv_view_proj.into();
 
-        // Check if camera is underwater
+        // Check if camera is underwater (cached from update())
         let eye_pos = self.camera.eye_position();
-        let world = self.world.read();
-        let eye_block = world.get_block(
-            eye_pos.x.floor() as i32,
-            eye_pos.y.floor() as i32,
-            eye_pos.z.floor() as i32,
-        );
-        drop(world);
-        let is_underwater = if eye_block == BlockType::Water {
-            1.0
-        } else {
-            0.0
-        };
+        let is_underwater = self.is_underwater;
 
         self.queue.write_buffer(
             &self.uniform_buffer,
@@ -2823,8 +2741,14 @@ impl State {
                 &shadow_frustum_array,
             );
 
+            const SHADOW_PASS_LABELS: [&str; 4] = [
+                "Shadow Pass Cascade 0",
+                "Shadow Pass Cascade 1",
+                "Shadow Pass Cascade 2",
+                "Shadow Pass Cascade 3",
+            ];
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(&format!("Shadow Pass Cascade {}", i)),
+                label: Some(SHADOW_PASS_LABELS[i]),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_cascade_views[i],
@@ -3116,9 +3040,6 @@ impl State {
             );
         }
 
-        self.chunks_rendered = chunks_rendered;
-        self.subchunks_rendered = subchunks_rendered;
-
         // ============== SSAO POST-PROCESS PASSES ==============
         if self.ssao_enabled {
             // SSAO Pass: Generate ambient occlusion from depth buffer
@@ -3231,11 +3152,11 @@ impl State {
             let bar_height = 0.015;
             let bar_y = -0.05;
 
-            let bg_color = [0.2, 0.2, 0.2];
-            let prog_color = [1.0 - progress, progress, 0.0];
+            let bg_color = Vertex::pack_color([0.2, 0.2, 0.2]);
+            let prog_color = Vertex::pack_color([1.0 - progress, progress, 0.0]);
 
             let mut vertices = Vec::with_capacity(8);
-            let normal = [0.0, 0.0, 1.0];
+            let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
 
             vertices.push(Vertex {
                 position: [-bar_width, bar_y - bar_height, 0.0],
@@ -3243,8 +3164,6 @@ impl State {
                 color: bg_color,
                 uv: [0.0, 0.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
             vertices.push(Vertex {
                 position: [bar_width, bar_y - bar_height, 0.0],
@@ -3252,8 +3171,6 @@ impl State {
                 color: bg_color,
                 uv: [1.0, 0.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
             vertices.push(Vertex {
                 position: [bar_width, bar_y + bar_height, 0.0],
@@ -3261,8 +3178,6 @@ impl State {
                 color: bg_color,
                 uv: [1.0, 1.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
             vertices.push(Vertex {
                 position: [-bar_width, bar_y + bar_height, 0.0],
@@ -3270,8 +3185,6 @@ impl State {
                 color: bg_color,
                 uv: [0.0, 1.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
 
             let prog_width = bar_width * 2.0 * progress - bar_width;
@@ -3281,8 +3194,6 @@ impl State {
                 color: prog_color,
                 uv: [0.0, 0.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
             vertices.push(Vertex {
                 position: [prog_width - 0.005, bar_y - bar_height + 0.003, 0.0],
@@ -3290,8 +3201,6 @@ impl State {
                 color: prog_color,
                 uv: [1.0, 0.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
             vertices.push(Vertex {
                 position: [prog_width - 0.005, bar_y + bar_height - 0.003, 0.0],
@@ -3299,8 +3208,6 @@ impl State {
                 color: prog_color,
                 uv: [1.0, 1.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
             vertices.push(Vertex {
                 position: [-bar_width + 0.005, bar_y + bar_height - 0.003, 0.0],
@@ -3308,8 +3215,6 @@ impl State {
                 color: prog_color,
                 uv: [0.0, 1.0],
                 tex_index: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
             });
 
             // Optimization: Reuse buffers if they exist, otherwise create them
@@ -3575,8 +3480,7 @@ impl State {
         );
     }
 
-    fn render_menu(&mut self, _encoder: &mut wgpu::CommandEncoder, _view: &wgpu::TextureView) {
-    }
+    fn render_menu(&mut self, _encoder: &mut wgpu::CommandEncoder, _view: &wgpu::TextureView) {}
 
     fn connect_to_server(&mut self) {
         connect_to_server(
@@ -3603,12 +3507,7 @@ impl State {
             &self.window,
         );
     }
-    fn render_remote_players(
-        &mut self,
-        _view_proj: &Matrix4<f32>,
-        _width: f32,
-        _height: f32,
-    ) {
+    fn render_remote_players(&mut self, _view_proj: &Matrix4<f32>, _width: f32, _height: f32) {
         // Build combined mesh for all remote players
         if !self.remote_players.is_empty() {
             let mut all_vertices = Vec::new();

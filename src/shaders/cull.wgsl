@@ -88,21 +88,12 @@ fn is_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     return true;
 }
 
-/// Project world space position to NDC depth [0, 1]
-fn project_z(pos: vec3<f32>) -> f32 {
-    let clip = cull_uniforms.view_proj * vec4<f32>(pos, 1.0);
-    return clip.z / clip.w;
-}
-
-/// Test if an AABB is occluded by the Hi-Z pyramid
-/// Returns true if visible, false if occluded
 /// Test if an AABB is occluded by the Hi-Z pyramid
 /// Returns true if visible, false if occluded
 fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     var min_uv = vec2<f32>(1.0, 1.0);
     var max_uv = vec2<f32>(0.0, 0.0);
     var min_z = 1.0;
-    var max_z = 0.0;
 
     // Unroll the 8 corners manually
     // Corner 0: min, min, min
@@ -113,7 +104,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 1: max, min, min
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_min.y, aabb_min.z, 1.0);
@@ -123,7 +113,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 2: min, max, min
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_max.y, aabb_min.z, 1.0);
@@ -133,7 +122,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 3: max, max, min
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_max.y, aabb_min.z, 1.0);
@@ -143,7 +131,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 4: min, min, max
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_min.y, aabb_max.z, 1.0);
@@ -153,7 +140,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 5: max, min, max
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_min.y, aabb_max.z, 1.0);
@@ -163,7 +149,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 6: min, max, max
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_max.y, aabb_max.z, 1.0);
@@ -173,7 +158,6 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
     // Corner 7: max, max, max
     clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_max.y, aabb_max.z, 1.0);
@@ -183,27 +167,37 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     min_uv = min(min_uv, uv);
     max_uv = max(max_uv, uv);
     min_z = min(min_z, ndc.z);
-    max_z = max(max_z, ndc.z);
 
-    // Clamp UVs to screen
+    // Clamp UVs to screen and keep ordering stable
     min_uv = clamp(min_uv, vec2<f32>(0.0), vec2<f32>(1.0));
     max_uv = clamp(max_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let uv_min = min(min_uv, max_uv);
+    let uv_max = max(min_uv, max_uv);
 
     // Calculate required mip level based on screen-space rectangle size
-    let size = (max_uv - min_uv) * cull_uniforms.hiz_size;
+    let size = (uv_max - uv_min) * cull_uniforms.hiz_size;
     let max_dim = max(size.x, size.y);
-    let mip = u32(log2(max_dim));
+    let safe_dim = max(max_dim, 1.0);
+    let max_mip = textureNumLevels(hiz_texture) - 1u;
+    let mip = min(u32(log2(safe_dim)), max_mip);
 
     // Sample four points in the Hi-Z buffer to be conservative
-    let d0 = textureSampleLevel(hiz_texture, hiz_sampler, min_uv, f32(mip)).r;
-    let d1 = textureSampleLevel(hiz_texture, hiz_sampler, max_uv, f32(mip)).r;
-    let d2 = textureSampleLevel(hiz_texture, hiz_sampler, vec2<f32>(min_uv.x, max_uv.y), f32(mip)).r;
-    let d3 = textureSampleLevel(hiz_texture, hiz_sampler, vec2<f32>(max_uv.x, min_uv.y), f32(mip)).r;
+    let d0 = textureSampleLevel(hiz_texture, hiz_sampler, uv_min, f32(mip)).r;
+    let d1 = textureSampleLevel(hiz_texture, hiz_sampler, uv_max, f32(mip)).r;
+    let d2 = textureSampleLevel(hiz_texture, hiz_sampler, vec2<f32>(uv_min.x, uv_max.y), f32(mip)).r;
+    let d3 = textureSampleLevel(hiz_texture, hiz_sampler, vec2<f32>(uv_max.x, uv_min.y), f32(mip)).r;
 
-    let hiz_min_z = min(min(d0, d1), min(d2, d3));
+    // Hi-Z stores furthest depth (max for standard Z), so aggregate with max.
+    let hiz_max_z = max(max(d0, d1), max(d2, d3));
+    let nearest_z = clamp(min_z, 0.0, 1.0);
+
+    // Fallback: if Hi-Z is effectively empty/uninitialized, skip occlusion culling.
+    if hiz_max_z <= 0.00001 {
+        return true;
+    }
     
-    // Visible if max_z (nearest point) >= hiz_min_z (furthest point in scene)
-    return max_z >= hiz_min_z;
+    // Visible if object's nearest point is not fully behind furthest known occluder.
+    return nearest_z <= hiz_max_z;
 }
 
 @compute @workgroup_size(64)

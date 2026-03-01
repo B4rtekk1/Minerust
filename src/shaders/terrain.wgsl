@@ -42,12 +42,10 @@ var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) tex_index: f32,
-    @location(5) _padding1: f32,
-    @location(6) _padding2: f32,
 };
 
 struct VertexOutput {
@@ -65,8 +63,8 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = uniforms.view_proj * vec4<f32>(model.position, 1.0);
     out.world_pos = model.position;
-    out.normal = model.normal;
-    out.color = model.color;
+    out.normal = model.normal.xyz;
+    out.color = model.color.rgb;
     out.uv = model.uv;
     out.tex_index = model.tex_index;
     // Pass view-space depth for cascade selection
