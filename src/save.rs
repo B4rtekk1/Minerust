@@ -26,8 +26,8 @@ pub struct SavedWorld {
 }
 
 impl SavedWorld {
-    pub fn from_world(
-        chunks: &HashMap<(i32, i32), crate::chunk::Chunk>,
+    pub fn from_world<S: std::hash::BuildHasher>(
+        chunks: &HashMap<(i32, i32), crate::chunk::Chunk, S>,
         seed: u32,
         player_pos: (f32, f32, f32),
         player_rot: (f32, f32),

@@ -192,6 +192,8 @@ struct State {
     hiz_pipeline: wgpu::ComputePipeline,
     hiz_bind_groups: Vec<wgpu::BindGroup>,
     hiz_bind_group_layout: wgpu::BindGroupLayout,
+    /// Next-power-of-two size derived from the render resolution (≤ 4096).
+    hiz_size: u32,
 
     // Depth resolve for SSR
     depth_resolve_pipeline: wgpu::RenderPipeline,
@@ -912,7 +914,10 @@ impl State {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
+                // Cull back faces in the shadow pass — eliminates ~50% of shadow
+                // rasterization work. Voxel geometry only exposes outward faces so
+                // this is safe and prevents self-shadowing artefacts on rear faces.
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -1835,7 +1840,10 @@ impl State {
         water_indirect_manager.init_shadow_resources(&device);
 
         // Hi-Z Initialization
-        let hiz_size = 1024u32; // Power of two for easy mips
+        // Use the next power-of-two that covers the larger screen dimension so the
+        // depth pyramid resolution tracks the actual depth buffer instead of being
+        // hard-coded to 1024.  Capped at 4096 to bound memory use.
+        let hiz_size = config.width.max(config.height).next_power_of_two().min(4096);
         let hiz_mips_count = (hiz_size as f32).log2().floor() as u32 + 1;
         let hiz_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Hi-Z Texture"),
@@ -2051,6 +2059,7 @@ impl State {
             hiz_pipeline,
             hiz_bind_groups,
             hiz_bind_group_layout,
+            hiz_size,
             // Depth Resolve
             depth_resolve_pipeline,
             depth_resolve_bind_group,
@@ -2381,6 +2390,62 @@ impl State {
                     },
                 ],
             });
+
+            // Recreate Hi-Z pyramid to match new render resolution
+            let new_hiz_size = new_size.width.max(new_size.height).next_power_of_two().min(4096);
+            if new_hiz_size != self.hiz_size {
+                self.hiz_size = new_hiz_size;
+                let hiz_mips_count = (new_hiz_size as f32).log2().floor() as u32 + 1;
+                let hiz_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Hi-Z Texture"),
+                    size: wgpu::Extent3d {
+                        width: new_hiz_size,
+                        height: new_hiz_size,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: hiz_mips_count,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R32Float,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let new_hiz_view = hiz_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let new_hiz_mips: Vec<_> = (0..hiz_mips_count)
+                    .map(|i| {
+                        hiz_texture.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some(&format!("Hi-Z Mip View {}", i)),
+                            base_mip_level: i,
+                            mip_level_count: Some(1),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
+                let new_hiz_bind_groups: Vec<_> = (0..hiz_mips_count - 1)
+                    .map(|i| {
+                        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some(&format!("Hi-Z Bind Group {}", i)),
+                            layout: &self.hiz_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&new_hiz_mips[i as usize]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&new_hiz_mips[(i + 1) as usize]),
+                                },
+                            ],
+                        })
+                    })
+                    .collect();
+                self.indirect_manager.update_bind_group(&self.device, &new_hiz_view);
+                self.water_indirect_manager.update_bind_group(&self.device, &new_hiz_view);
+                self.hiz_texture = hiz_texture;
+                self.hiz_view = new_hiz_view;
+                self.hiz_mips = new_hiz_mips;
+                self.hiz_bind_groups = new_hiz_bind_groups;
+            }
         }
     }
 
@@ -2872,7 +2937,7 @@ impl State {
             // Loop through mip levels
             for i in 0..self.hiz_bind_groups.len() {
                 hiz_pass.set_bind_group(0, &self.hiz_bind_groups[i], &[]);
-                let mip_size = (1024u32 >> (i + 1)).max(1);
+                let mip_size = (self.hiz_size >> (i + 1)).max(1);
                 let wg_count = (mip_size + 15) / 16;
                 hiz_pass.dispatch_workgroups(wg_count, wg_count, 1);
             }
@@ -2881,13 +2946,14 @@ impl State {
         // Dispatch GPU frustum and occlusion culling for indirect drawing
         let frustum_planes_array = frustum_planes_to_array(&frustum_planes);
 
+        let hiz_size_f = self.hiz_size as f32;
         self.indirect_manager.dispatch_culling(
             &mut encoder,
             &self.queue,
             &view_proj,
             &frustum_planes_array,
             self.camera.position.into(),
-            [1024.0, 1024.0], // Hi-Z size
+            [hiz_size_f, hiz_size_f],
         );
         self.water_indirect_manager.dispatch_culling(
             &mut encoder,
@@ -2895,7 +2961,7 @@ impl State {
             &view_proj,
             &frustum_planes_array,
             self.camera.position.into(),
-            [1024.0, 1024.0],
+            [hiz_size_f, hiz_size_f],
         );
 
         // Opaque Pass: Sky, Terrain, Players, Sun

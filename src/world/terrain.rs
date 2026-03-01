@@ -1,5 +1,5 @@
 use noise::{NoiseFn, Simplex};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::constants::*;
 use crate::core::biome::Biome;
@@ -10,7 +10,11 @@ use crate::render::mesh::{add_greedy_quad, add_quad};
 use crate::world::generator::ChunkGenerator;
 
 pub struct World {
-    pub chunks: HashMap<(i32, i32), Chunk>,
+    pub chunks: FxHashMap<(i32, i32), Chunk>,
+    /// Chunk coords of the player the last time chunk cleanup was run.
+    /// Cleanup only re-runs when the player moves to a different chunk.
+    last_cleanup_cx: i32,
+    last_cleanup_cz: i32,
     simplex_continents: Simplex,
     simplex_terrain: Simplex,
     simplex_detail: Simplex,
@@ -37,7 +41,9 @@ impl World {
         let generator = ChunkGenerator::new(seed);
 
         let mut world = World {
-            chunks: HashMap::new(),
+            chunks: FxHashMap::default(),
+            last_cleanup_cx: i32::MIN,
+            last_cleanup_cz: i32::MIN,
             simplex_continents: Simplex::new(seed),
             simplex_terrain: Simplex::new(seed.wrapping_add(1)),
             simplex_detail: Simplex::new(seed.wrapping_add(2)),
@@ -103,8 +109,13 @@ impl World {
         let player_cx = (player_x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (player_z / CHUNK_SIZE as f32).floor() as i32;
 
-        // Synchronous generation removed - now handled asynchronously by ChunkLoader in main.rs
-        // This prevents "dead frames" and GPU usage drops during exploration.
+        // Only run the O(N) scan when the player actually moves to a new chunk.
+        // This avoids iterating every loaded chunk entry on each chunk-arrival event.
+        if player_cx == self.last_cleanup_cx && player_cz == self.last_cleanup_cz {
+            return;
+        }
+        self.last_cleanup_cx = player_cx;
+        self.last_cleanup_cz = player_cz;
 
         let chunks_to_remove: Vec<(i32, i32)> = self
             .chunks

@@ -28,6 +28,7 @@ rayon = "1.10"
 fastnoise-lite = "1.1"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
+rustc-hash = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 num_cpus = "1.16"
