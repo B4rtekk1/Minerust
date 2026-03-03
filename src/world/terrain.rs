@@ -212,12 +212,12 @@ impl World {
             if sy > 0 && !chunk.subchunks[(sy - 1) as usize].is_fully_opaque {
                 return false;
             }
-            if sy < NUM_SUBCHUNKS as i32 - 1 && !chunk.subchunks[(sy + 1) as usize].is_fully_opaque
+            if sy < NUM_SUBCHUNKS - 1 && !chunk.subchunks[(sy + 1) as usize].is_fully_opaque
             {
                 return false;
             }
             // Borders of world height are not occluded
-            if sy == 0 || sy == NUM_SUBCHUNKS as i32 - 1 {
+            if sy == 0 || sy == NUM_SUBCHUNKS - 1 {
                 return false;
             }
 
@@ -274,15 +274,6 @@ impl World {
         let base_y = subchunk_y * SUBCHUNK_HEIGHT;
         let base_z = chunk_z * CHUNK_SIZE;
 
-        // ---------------------------------------------------------------
-        // Pre-copy blocks into a 18Ă—18Ă—18 flat array (PAD=1 on every side)
-        // so that every neighbour lookup is a simple array index â€” no
-        // HashMap or bounds-check branch in the hot meshing loop.
-        //
-        // Layout: index(x,y,z) = x * 18*18 + y * 18 + z
-        //         where x,y,z â [0,17]; local block (lx,ly,lz) â [0,15]
-        //         is at index (lx+1, ly+1, lz+1).
-        // ---------------------------------------------------------------
         const PAD: usize = 1;
         const S: usize = CHUNK_SIZE as usize + PAD * 2; // 18
         const SH: usize = SUBCHUNK_HEIGHT as usize + PAD * 2; // 18
@@ -335,7 +326,6 @@ impl World {
             get_block_fast(wx - base_x, wy - base_y, wz - base_z)
         };
 
-        // Lazy biome cache â€” filled on first use per (lx, lz) column
         let mut biome_map: [[Option<Biome>; CHUNK_SIZE as usize]; CHUNK_SIZE as usize] =
             [[None; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
 
@@ -407,8 +397,8 @@ impl World {
                         let y_f = y as f32;
                         let z = world_z as f32;
                         let color = block.color();
-                        let tex_top = block.tex_top() as f32;
-                        let tex_side = block.tex_side() as f32;
+                        let tex_top = block.tex_top();
+                        let tex_side = block.tex_side();
                         let r = block.roughness();
                         let m = block.metallic();
 
@@ -632,7 +622,7 @@ impl World {
                                 let y_f = y as f32;
                                 let z = world_z as f32;
                                 let color = block.color();
-                                let tex = block.tex_top() as f32;
+                                let tex = block.tex_top();
                                 let r = block.roughness();
                                 let m = block.metallic();
 

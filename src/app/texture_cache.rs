@@ -4,9 +4,7 @@
 
 use std::fs;
 use std::path::Path;
-use wgpu::util::DeviceExt;
 
-// Import funkcji z render3d
 use render3d::{TEXTURE_SIZE, generate_texture_atlas, load_texture_atlas_from_file};
 
 /// Cached texture atlas with pre-generated mipmaps
@@ -29,11 +27,6 @@ impl TextureAtlasCache {
     /// Load pre-generated atlas with mipmaps from cache
     fn load(&self) -> Option<Vec<u8>> {
         fs::read(&self.cache_path).ok()
-    }
-
-    /// Save generated atlas with mipmaps to cache
-    fn save(&self, data: &[u8]) -> std::io::Result<()> {
-        fs::write(&self.cache_path, data)
     }
 }
 

@@ -5,6 +5,7 @@ pub mod generator;
 pub mod loader;
 pub mod structures;
 pub mod terrain;
+mod spline;
 
 // Re-export commonly used types
 pub use generator::ChunkGenerator;

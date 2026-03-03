@@ -160,7 +160,7 @@ pub fn generate_texture_atlas() -> Vec<u8> {
                         let noise = hash(x, y, 8) as i32 - 128;
                         let base = 150 + noise / 15 - ring;
                         (
-                            (base).clamp(100, 180) as u8,
+                            base.clamp(100, 180) as u8,
                             (base - 40).clamp(60, 140) as u8,
                             (base - 80).clamp(20, 80) as u8,
                             255,

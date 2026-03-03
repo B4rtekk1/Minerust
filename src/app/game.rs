@@ -25,7 +25,7 @@ use clap::Parser;
 use multiplayer::network::{connect_to_server, update_network};
 use multiplayer::player::{RemotePlayer, queue_remote_players_labels};
 use multiplayer::protocol::Packet;
-use multiplayer::tcp::{TcpClient, TcpServer};
+use multiplayer::tcp::{TcpServer};
 use std::collections::HashMap;
 // use tokio::sync::mpsc;
 use ui::menu::{GameState, MenuField, MenuState};
@@ -84,8 +84,6 @@ struct State {
     num_crosshair_indices: u32,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    reflection_uniform_buffer: wgpu::Buffer,
-    reflection_uniform_bind_group: wgpu::BindGroup,
     shadow_bind_group: wgpu::BindGroup,
     depth_texture: wgpu::TextureView,
     msaa_texture_view: wgpu::TextureView,
@@ -126,7 +124,6 @@ struct State {
     /// Cached underwater state (1.0 = underwater, 0.0 = above water), updated each tick
     is_underwater: f32,
     // Multiplayer
-    network_client: Option<TcpClient>,
     remote_players: HashMap<u32, RemotePlayer>,
     my_player_id: u32,
     last_position_send: Instant,
@@ -164,15 +161,11 @@ struct State {
     mesh_loader: render3d::MeshLoader,
     // SSAO (Screen Space Ambient Occlusion)
     ssao_enabled: bool,
-    ssao_depth_texture: wgpu::Texture,
-    ssao_depth_view: wgpu::TextureView,
     ssao_texture: wgpu::Texture,
     ssao_texture_view: wgpu::TextureView,
     ssao_blur_texture: wgpu::Texture,
     ssao_blur_view: wgpu::TextureView,
-    ssao_noise_texture: wgpu::Texture,
     ssao_noise_view: wgpu::TextureView,
-    ssao_kernel_buffer: wgpu::Buffer,
     ssao_params_buffer: wgpu::Buffer,
     ssao_bind_group: wgpu::BindGroup,
     ssao_blur_bind_group: wgpu::BindGroup,
@@ -341,24 +334,6 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let reflection_uniform_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Reflection Uniform Buffer"),
-                contents: bytemuck::cast_slice(&[Uniforms {
-                    view_proj: Matrix4::from_scale(1.0).into(),
-                    inv_view_proj: Matrix4::from_scale(1.0).into(),
-                    csm_view_proj: [[Matrix4::from_scale(1.0).into(); 1]; 4],
-                    csm_split_distances: [16.0, 48.0, 128.0, 300.0],
-                    camera_pos: [0.0, 0.0, 0.0],
-                    time: 0.0,
-                    sun_position: [0.4, -0.2, 0.3],
-                    is_underwater: 0.0,
-                    screen_size: [1920.0, 1080.0],
-                    water_level: 63.0,
-                    reflection_mode: 1.0,
-                }]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
 
         let (texture_atlas, texture_view, _atlas_width, _atlas_height) =
             texture_cache::load_or_generate_atlas(&device, &queue);
@@ -681,33 +656,6 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
-        let reflection_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &uniform_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: reflection_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&texture_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&shadow_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
-                },
-            ],
-            label: Some("reflection_uniform_bind_group"),
-        });
-
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &shadow_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
@@ -783,47 +731,6 @@ impl State {
         });
 
         // Reflection pipeline: same as render_pipeline but with reversed culling to handle mirrored winding
-        let reflection_render_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Reflection Render Pipeline"),
-                layout: Some(&pipeline_layout),
-                cache: None,
-                vertex: wgpu::VertexState {
-                    module: &terrain_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Vertex::desc()],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &terrain_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Front), // Correct: Mirrored winding order
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: msaa_sample_count,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-            });
 
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Water Pipeline"),
@@ -1013,90 +920,6 @@ impl State {
             }),
             multisample: wgpu::MultisampleState {
                 count: msaa_sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-        });
-
-        // SSR Render Pipeline - same as render_pipeline but with sample_count: 1 for SSR textures
-        let ssr_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("SSR Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &terrain_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &terrain_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-        });
-
-        // SSR Sky Pipeline - same as sky_pipeline but with sample_count: 1 for SSR textures
-        let ssr_sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("SSR Sky Pipeline"),
-            layout: Some(&pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &sky_shader,
-                entry_point: Some("vs_sky"),
-                compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &sky_shader,
-                entry_point: Some("fs_sky"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -1294,23 +1117,6 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/composite.wgsl").into()),
         });
 
-        let ssao_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSAO Depth Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let ssao_depth_view =
-            ssao_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let ssao_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SSAO Texture"),
             size: wgpu::Extent3d {
@@ -1380,12 +1186,6 @@ impl State {
 
             ssao_kernel[i] = [x / len * scale, y / len * scale, z / len * scale, 0.0];
         }
-
-        let ssao_kernel_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("SSAO Kernel Buffer"),
-            contents: bytemuck::cast_slice(&ssao_kernel),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
 
         let mut noise_data: [u8; 64] = [0; 64];
         for i in 0..16 {
@@ -1961,8 +1761,6 @@ impl State {
             num_crosshair_indices,
             uniform_buffer,
             uniform_bind_group,
-            reflection_uniform_buffer,
-            reflection_uniform_bind_group,
             shadow_bind_group,
             depth_texture,
             msaa_texture_view,
@@ -1999,7 +1797,6 @@ impl State {
             reflection_mode: 1, // Default: SSR only
             is_underwater: 0.0,
             // Multiplayer
-            network_client: None,
             remote_players: HashMap::new(),
             my_player_id: 0,
             last_position_send: Instant::now(),
@@ -2037,15 +1834,11 @@ impl State {
             player_label_buffers: Vec::new(),
             // SSAO (Screen Space Ambient Occlusion)
             ssao_enabled: true,
-            ssao_depth_texture,
-            ssao_depth_view,
             ssao_texture,
             ssao_texture_view,
             ssao_blur_texture,
             ssao_blur_view,
-            ssao_noise_texture,
             ssao_noise_view,
-            ssao_kernel_buffer,
             ssao_params_buffer,
             ssao_bind_group,
             ssao_blur_bind_group,

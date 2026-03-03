@@ -24,7 +24,6 @@ pub struct ChunkGenerator {
     noise_island: FastNoiseLite,
     noise_cave1: FastNoiseLite,
     noise_cave2: FastNoiseLite,
-    noise_ore: FastNoiseLite,
     noise_erosion: FastNoiseLite,
     pub seed: u32,
 }
@@ -44,7 +43,6 @@ impl ChunkGenerator {
             noise_island: Self::create_noise(seed.wrapping_add(8), 0.05),
             noise_cave1: Self::create_3d_noise(seed.wrapping_add(9), 0.05),
             noise_cave2: Self::create_3d_noise(seed.wrapping_add(10), 0.035),
-            noise_ore: Self::create_3d_noise(seed.wrapping_add(11), 0.1),
             noise_erosion: Self::create_fbm_noise(seed.wrapping_add(12), 0.005),
             seed,
         }
@@ -259,7 +257,7 @@ impl ChunkGenerator {
             if moist < -0.15 {
                 return Biome::Desert;
             }
-            // Hot + moist = less plains, more swamp
+            // Hot + moist = fewer plains, more swamp
             if moist > 0.1 {
                 return Biome::Swamp;
             }
