@@ -5,7 +5,7 @@
 //! and using compute shader culling with indirect drawing.
 
 use bytemuck::{Pod, Zeroable};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::core::vertex::Vertex;
 use crate::render::frustum::AABB;
@@ -13,12 +13,11 @@ use crate::render::frustum::AABB;
 use ::std::collections::BTreeMap;
 
 /// Maximum number of subchunks that can be stored in unified buffers
-/// Maximum number of subchunks that can be stored in unified buffers
 const MAX_SUBCHUNKS: usize = 32768;
-/// Maximum vertices across all subchunks (~560MB at 56 bytes per vertex)
-const MAX_VERTICES: usize = 10_000_000;
-/// Maximum indices across all subchunks (256MB at 4 bytes per index)
-const MAX_INDICES: usize = 64_000_000;
+/// Maximum vertices across all subchunks (~280MB at 56 bytes per vertex)
+const MAX_VERTICES: usize = 5_000_000;
+/// Maximum indices across all subchunks (~120MB at 4 bytes per index)
+const MAX_INDICES: usize = 30_000_000;
 
 /// wgpu DrawIndexedIndirect command structure (matches GPU layout)
 #[repr(C)]
@@ -64,8 +63,8 @@ pub struct CullUniforms {
     pub subchunk_count: u32,
     /// Hi-Z texture size
     pub hiz_size: [f32; 2],
-    /// Padding to match WGSL alignment
-    pub _padding: [f32; 2],
+    /// Screen size for UV scaling
+    pub screen_size: [f32; 2],
 }
 
 /// Key for identifying a subchunk
@@ -113,7 +112,7 @@ pub struct IndirectManager {
     visible_count_staging: wgpu::Buffer,
 
     // Tracking allocations
-    allocations: HashMap<SubchunkKey, SubchunkAlloc>,
+    allocations: FxHashMap<SubchunkKey, SubchunkAlloc>,
     next_vertex_offset: u32,
     next_index_offset: u32,
     active_subchunk_count: u32,
@@ -147,7 +146,7 @@ impl IndirectManager {
         // Create unified vertex buffer
         let unified_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Unified Vertex Buffer"),
-            size: (MAX_VERTICES * std::mem::size_of::<Vertex>()) as u64,
+            size: (MAX_VERTICES * size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -155,7 +154,7 @@ impl IndirectManager {
         // Create unified index buffer
         let unified_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Unified Index Buffer"),
-            size: (MAX_INDICES * std::mem::size_of::<u32>()) as u64,
+            size: (MAX_INDICES * size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -163,7 +162,7 @@ impl IndirectManager {
         // Draw commands (one per possible subchunk)
         let draw_commands_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Draw Commands Buffer"),
-            size: (MAX_SUBCHUNKS * std::mem::size_of::<DrawIndexedIndirect>()) as u64,
+            size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -171,7 +170,7 @@ impl IndirectManager {
         // Visible draw commands (filtered by compute shader)
         let visible_draw_commands_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Visible Draw Commands Buffer"),
-            size: (MAX_SUBCHUNKS * std::mem::size_of::<DrawIndexedIndirect>()) as u64,
+            size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
             usage: wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST,
@@ -181,7 +180,7 @@ impl IndirectManager {
         // Subchunk metadata for GPU culling
         let subchunk_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Subchunk Metadata Buffer"),
-            size: (MAX_SUBCHUNKS * std::mem::size_of::<SubchunkGpuMeta>()) as u64,
+            size: (MAX_SUBCHUNKS * size_of::<SubchunkGpuMeta>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -206,7 +205,7 @@ impl IndirectManager {
         // Culling uniforms buffer (frustum planes + count)
         let cull_uniforms_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Uniforms Buffer"),
-            size: std::mem::size_of::<CullUniforms>() as u64,
+            size: size_of::<CullUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -319,7 +318,7 @@ impl IndirectManager {
             subchunk_meta_buffer,
             visible_count_buffer,
             visible_count_staging,
-            allocations: HashMap::new(),
+            allocations: FxHashMap::default(),
             next_vertex_offset: 0,
             next_index_offset: 0,
             active_subchunk_count: 0,
@@ -399,7 +398,7 @@ impl IndirectManager {
         for i in 0..4 {
             let visible_commands = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Shadow Visible Draw Commands Buffer {}", i)),
-                size: (MAX_SUBCHUNKS * std::mem::size_of::<DrawIndexedIndirect>()) as u64,
+                size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
                 usage: wgpu::BufferUsages::INDIRECT
                     | wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST,
@@ -415,7 +414,7 @@ impl IndirectManager {
 
             let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Shadow Cull Uniforms Buffer {}", i)),
-                size: std::mem::size_of::<CullUniforms>() as u64,
+                size: size_of::<CullUniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -463,7 +462,6 @@ impl IndirectManager {
     /// Returns true if successful, false if buffer is full
     pub fn upload_subchunk(
         &mut self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
         key: SubchunkKey,
         vertices: &[Vertex],
@@ -584,7 +582,7 @@ impl IndirectManager {
         };
 
         // Upload vertex data
-        let vertex_byte_offset = alloc.vertex_offset as u64 * std::mem::size_of::<Vertex>() as u64;
+        let vertex_byte_offset = alloc.vertex_offset as u64 * size_of::<Vertex>() as u64;
         queue.write_buffer(
             &self.unified_vertex_buffer,
             vertex_byte_offset,
@@ -592,7 +590,7 @@ impl IndirectManager {
         );
 
         // Upload index data (rebased to 0, will use base_vertex in draw command)
-        let index_byte_offset = alloc.index_offset as u64 * std::mem::size_of::<u32>() as u64;
+        let index_byte_offset = alloc.index_offset as u64 * size_of::<u32>() as u64;
         queue.write_buffer(
             &self.unified_index_buffer,
             index_byte_offset,
@@ -610,7 +608,7 @@ impl IndirectManager {
                 1, // enabled flag
             ],
         };
-        let meta_byte_offset = slot_index * std::mem::size_of::<SubchunkGpuMeta>();
+        let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
         queue.write_buffer(
             &self.subchunk_meta_buffer,
             meta_byte_offset as u64,
@@ -643,7 +641,7 @@ impl IndirectManager {
                 aabb_max: [0.0; 4],
                 draw_data: [0, 0, 0, 0], // enabled = 0
             };
-            let meta_byte_offset = alloc.slot_index * std::mem::size_of::<SubchunkGpuMeta>();
+            let meta_byte_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>();
             queue.write_buffer(
                 &self.subchunk_meta_buffer,
                 meta_byte_offset as u64,
@@ -753,7 +751,7 @@ impl IndirectManager {
                 aabb_max: [0.0; 4],
                 draw_data: [0, 0, 0, 0],
             };
-            let meta_byte_offset = alloc.slot_index * std::mem::size_of::<SubchunkGpuMeta>();
+            let meta_byte_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>();
             queue.write_buffer(
                 &self.subchunk_meta_buffer,
                 meta_byte_offset as u64,
@@ -779,6 +777,7 @@ impl IndirectManager {
         frustum_planes: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
         hiz_size: [f32; 2],
+        screen_size: [f32; 2],
     ) {
         if self.active_subchunk_count == 0 {
             return;
@@ -790,15 +789,15 @@ impl IndirectManager {
             view_proj: (*view_proj).into(),
             frustum_planes: *frustum_planes,
             camera_pos,
-            subchunk_count: self.active_subchunk_count,
+            subchunk_count: MAX_SUBCHUNKS as u32,
             hiz_size,
-            _padding: [0.0; 2],
+            screen_size,
         };
         queue.write_buffer(&self.cull_uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         if let Some(bind_group) = &self.cull_bind_group {
             let active_size = (self.active_subchunk_count as u64
-                * std::mem::size_of::<DrawIndexedIndirect>() as u64)
+                * size_of::<DrawIndexedIndirect>() as u64)
                 .next_multiple_of(4);
 
             if active_size > 0 {
@@ -812,8 +811,8 @@ impl IndirectManager {
             cpass.set_pipeline(&self.cull_pipeline);
             cpass.set_bind_group(0, bind_group, &[]);
 
-            // Optimization #1: Dispatch only for active subchunks, not MAX_SUBCHUNKS
-            let workgroup_count = (self.active_subchunk_count + 63) / 64;
+            // Dispatch for all possible slots, as they can be anywhere in the buffer
+            let workgroup_count = (MAX_SUBCHUNKS as u32 + 63) / 64;
             cpass.dispatch_workgroups(workgroup_count, 1, 1);
         }
     }
@@ -865,9 +864,9 @@ impl IndirectManager {
             view_proj: [[0.0; 4]; 4],
             frustum_planes: *frustum_planes,
             camera_pos: [0.0, 0.0, 0.0],
-            subchunk_count: self.active_subchunk_count,
+            subchunk_count: MAX_SUBCHUNKS as u32,
             hiz_size: [0.0, 0.0],
-            _padding: [0.0; 2],
+            screen_size: [0.0, 0.0],
         };
         queue.write_buffer(
             &self.shadow_uniform_buffers[cascade_idx],
@@ -876,7 +875,7 @@ impl IndirectManager {
         );
 
         let active_size = (self.active_subchunk_count as u64
-            * std::mem::size_of::<DrawIndexedIndirect>() as u64)
+            * size_of::<DrawIndexedIndirect>() as u64)
             .next_multiple_of(4);
 
         if active_size > 0 {
@@ -894,8 +893,8 @@ impl IndirectManager {
         cpass.set_pipeline(&self.cull_pipeline);
         cpass.set_bind_group(0, &self.shadow_bind_groups[cascade_idx], &[]);
 
-        // Optimization #1: Dispatch only for active subchunks, not MAX_SUBCHUNKS
-        let workgroup_count = (self.active_subchunk_count + 63) / 64;
+        // Dispatch for all possible slots
+        let workgroup_count = (MAX_SUBCHUNKS as u32 + 63) / 64;
         cpass.dispatch_workgroups(workgroup_count, 1, 1);
     }
 

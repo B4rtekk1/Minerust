@@ -80,7 +80,7 @@ fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
 
 const PI: f32 = 3.14159265359;
 const SHADOW_MAP_SIZE: f32 = 2048.0;
-const PCF_SAMPLES: i32 = 8;
+const PCF_SAMPLES: i32 = 16;
 
 /// Calculate sky color with localized sunrise/sunset gradient
 fn calculate_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
@@ -185,9 +185,16 @@ fn receiver_plane_depth_bias(shadow_uv: vec2<f32>, receiver_depth: f32) -> f32 {
     return max_offset * (abs(depth_gradient.x) + abs(depth_gradient.y));
 }
 
-fn interleaved_gradient_noise(frag_coord: vec2<f32>) -> f32 {
-    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
-    return fract(magic.z * fract(dot(frag_coord, magic.xy)));
+/// World-space stable noise — hashes the block cell of world_pos so the PCF
+/// rotation stays consistent for a given surface point regardless of camera
+/// movement or sun angle changes.  This eliminates temporal shimmer at shadow
+/// edges caused by the screen-space rotation pattern shifting every frame.
+fn world_space_noise(world_pos: vec3<f32>) -> f32 {
+    // Snap to block grid so neighbouring fragments on the same block face share
+    // the same rotation angle — removes sub-block variation that would cause
+    // aliasing in the noise pattern.
+    let cell = floor(world_pos);
+    return fract(sin(dot(cell.xz, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
 fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
@@ -216,81 +223,140 @@ fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
     return vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
 }
 
-/// Select cascade based on view-space depth
-fn select_cascade(view_depth: f32) -> i32 {
-    if view_depth < uniforms.csm_split_distances.x {
-        return 0;
-    } else if view_depth < uniforms.csm_split_distances.y {
-        return 1;
-    } else if view_depth < uniforms.csm_split_distances.z {
-        return 2;
-    }
-    return 3;
-}
-
-
-
-/// Percentage Closer Filtering (PCF) shadow calculation with rotated Vogel disk
-/// Uses pseudo-random rotation per pixel to break up banding into high-frequency noise
-fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>, sun_dir: vec3<f32>, view_depth: f32, frag_coord: vec2<f32>) -> f32 {
-    // Disable shadows if sun is below horizon
-    if sun_dir.y < 0.05 {
-        return 0.0;
-    }
-
-    // Select cascade based on view depth
-    let cascade_idx = select_cascade(view_depth);
-    
-    // Project world coordinates to shadow map UVs using selected cascade
-    let shadow_pos = uniforms.csm_view_proj[cascade_idx] * vec4<f32>(world_pos, 1.0);
+/// Sample PCF shadow for one specific cascade.
+/// Returns shadow factor in [0,1] (0 = fully shadowed, 1 = fully lit).
+fn sample_cascade_pcf(
+    world_pos: vec3<f32>,
+    cascade_idx: i32,
+    bias: f32,
+    rotation_phi: f32,
+    filter_radius: f32,
+) -> f32 {
+    let shadow_pos    = uniforms.csm_view_proj[cascade_idx] * vec4<f32>(world_pos, 1.0);
     let shadow_coords = shadow_pos.xyz / shadow_pos.w;
 
     let uv = vec2<f32>(
         shadow_coords.x * 0.5 + 0.5,
         1.0 - (shadow_coords.y * 0.5 + 0.5)
     );
-    
-    // Early out if outside shadow frustum
+
+    // Outside frustum → fully lit
     if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
         return 1.0;
     }
-    
+
     // Smooth edge fade to prevent hard cutoff at shadow map edges
     let edge_margin = 0.05;
-    let edge_fade_x = smoothstep(0.0, edge_margin, uv.x) * smoothstep(1.0, 1.0 - edge_margin, uv.x);
-    let edge_fade_y = smoothstep(0.0, edge_margin, uv.y) * smoothstep(1.0, 1.0 - edge_margin, uv.y);
-    let edge_fade = edge_fade_x * edge_fade_y;
+    let edge_fade_x  = smoothstep(0.0, edge_margin, uv.x) * smoothstep(1.0, 1.0 - edge_margin, uv.x);
+    let edge_fade_y  = smoothstep(0.0, edge_margin, uv.y) * smoothstep(1.0, 1.0 - edge_margin, uv.y);
+    let edge_fade    = edge_fade_x * edge_fade_y;
 
     let receiver_depth = shadow_coords.z;
-    
-    // Adaptive bias based on slope and distance
-    let cos_theta = max(dot(normal, sun_dir), 0.0);
-    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-    let bias = 0.001 + 0.002 * sin_theta / max(cos_theta, 0.1);
-
-    // Rotated Vogel disk PCF
-    let texel_size = 1.0 / SHADOW_MAP_SIZE;
-    let noise = interleaved_gradient_noise(frag_coord);
-    let rotation_phi = noise * 2.0 * PI;
-    let filter_radius = 4.0 * texel_size;
 
     var shadow: f32 = 0.0;
-
     for (var i: i32 = 0; i < PCF_SAMPLES; i++) {
         let offset = get_poisson_sample(i, rotation_phi) * filter_radius;
-        shadow += textureSampleCompare(
-            shadow_map,
-            shadow_sampler,
-            uv + offset,
-            cascade_idx,
-            receiver_depth - bias
-        );
+        let sample_uv = uv + offset;
+        // Taps that fall outside the shadow map frustum are in lit space — return
+        // 1.0 instead of clamping to an edge texel which gives wrong comparisons.
+        if sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0 {
+            shadow += 1.0;
+        } else {
+            shadow += textureSampleCompare(
+                shadow_map,
+                shadow_sampler,
+                sample_uv,
+                cascade_idx,
+                receiver_depth - bias
+            );
+        }
     }
-
     shadow /= f32(PCF_SAMPLES);
 
-    // Apply edge fade - blend to fully lit at edges
     return mix(1.0, shadow, edge_fade);
+}
+
+/// Select cascade and compute a blend weight at cascade boundaries.
+/// Returns vec2(cascade_index_f32, blend_to_next_cascade [0..1]).
+/// Blend zone is 10 % of each cascade's far distance —  eliminates the hard
+/// seam that causes shadows to "jump" when a fragment straddles two cascades.
+fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
+    let blend_fraction = 0.10; // size of blend zone relative to split distance
+
+    // Per-cascade split distances from uniforms
+    let split0 = uniforms.csm_split_distances.x;
+    let split1 = uniforms.csm_split_distances.y;
+    let split2 = uniforms.csm_split_distances.z;
+
+    // Cascade 0 → 1
+    let blend_start0 = split0 * (1.0 - blend_fraction);
+    if view_depth < blend_start0 {
+        return vec2<f32>(0.0, 0.0);
+    } else if view_depth < split0 {
+        let t = (view_depth - blend_start0) / (split0 - blend_start0);
+        return vec2<f32>(0.0, smoothstep(0.0, 1.0, t));
+    }
+
+    // Cascade 1 → 2
+    let blend_start1 = split1 * (1.0 - blend_fraction);
+    if view_depth < blend_start1 {
+        return vec2<f32>(1.0, 0.0);
+    } else if view_depth < split1 {
+        let t = (view_depth - blend_start1) / (split1 - blend_start1);
+        return vec2<f32>(1.0, smoothstep(0.0, 1.0, t));
+    }
+
+    // Cascade 2 → 3
+    let blend_start2 = split2 * (1.0 - blend_fraction);
+    if view_depth < blend_start2 {
+        return vec2<f32>(2.0, 0.0);
+    } else if view_depth < split2 {
+        let t = (view_depth - blend_start2) / (split2 - blend_start2);
+        return vec2<f32>(2.0, smoothstep(0.0, 1.0, t));
+    }
+
+    // Cascade 3 — last cascade, no further blending
+    return vec2<f32>(3.0, 0.0);
+}
+
+/// Percentage Closer Filtering (PCF) shadow calculation with rotated Vogel disk.
+/// Uses pseudo-random rotation per pixel to break up banding into high-frequency noise.
+/// Cascades are blended at their boundaries to eliminate seam jitter.
+fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>, sun_dir: vec3<f32>, view_depth: f32) -> f32 {
+    // Disable shadows if sun is below horizon
+    if sun_dir.y < 0.05 {
+        return 0.0;
+    }
+
+    // Adaptive bias based on surface slope
+    let cos_theta  = max(dot(normal, sun_dir), 0.0);
+    let sin_theta  = sqrt(1.0 - cos_theta * cos_theta);
+    // Raised base from 0.001 → 0.003 to cover sub-texel depth variation
+    // that survives texel-snapping when the sun rotates.
+    let bias       = 0.003 + 0.004 * sin_theta / max(cos_theta, 0.1);
+
+    // Rotated Vogel disk PCF parameters
+    // World-space noise ensures the rotation is stable for each surface point
+    // regardless of camera position, preventing temporal flicker at shadow edges.
+    let texel_size    = 1.0 / SHADOW_MAP_SIZE;
+    let noise         = world_space_noise(world_pos);
+    let rotation_phi  = noise * 2.0 * PI;
+    let filter_radius = 5.0 * texel_size;
+
+    // Cascade selection with smooth blend at boundaries
+    let cb          = select_cascade_with_blend(view_depth);
+    let cascade_idx = i32(cb.x);
+    let blend       = cb.y;
+
+    let shadow_a = sample_cascade_pcf(world_pos, cascade_idx, bias, rotation_phi, filter_radius);
+
+    // Only pay the cost of a second cascade sample when we're in the blend zone
+    if blend > 0.001 && cascade_idx < 3 {
+        let shadow_b = sample_cascade_pcf(world_pos, cascade_idx + 1, bias, rotation_phi, filter_radius);
+        return mix(shadow_a, shadow_b, blend);
+    }
+
+    return shadow_a;
 }
 
 @fragment
@@ -325,7 +391,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Primary solar shadow
     var shadow = 1.0;
     if sun_dir.y > 0.0 {
-        shadow = calculate_shadow(in.world_pos, in.normal, sun_dir, in.view_depth, in.clip_position.xy);
+        shadow = calculate_shadow(in.world_pos, in.normal, sun_dir, in.view_depth);
     }
     
     // Ambient light - add twilight boost during sunrise/sunset

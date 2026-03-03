@@ -34,3 +34,4 @@ controls:
     save_world: keyboard.F5
     load_world: keyboard.F9
     reflection_mode: keyboard.R
+    ssap_on: keyboard.O

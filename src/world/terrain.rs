@@ -1,5 +1,4 @@
-use noise::{NoiseFn, Simplex};
-use rustc_hash::FxHashMap;
+﻿use rustc_hash::FxHashMap;
 
 use crate::constants::*;
 use crate::core::biome::Biome;
@@ -15,20 +14,8 @@ pub struct World {
     /// Cleanup only re-runs when the player moves to a different chunk.
     last_cleanup_cx: i32,
     last_cleanup_cz: i32,
-    simplex_continents: Simplex,
-    simplex_terrain: Simplex,
-    simplex_detail: Simplex,
-    simplex_temperature: Simplex,
-    simplex_moisture: Simplex,
-    simplex_river: Simplex,
-    simplex_lake: Simplex,
-    simplex_island: Simplex,
-    simplex_cave1: Simplex,
-    simplex_cave2: Simplex,
-    simplex_erosion: Simplex,
     pub seed: u32,
-    /// Delegated chunk generator — single source of truth for terrain generation.
-    /// Replaces the old duplicated generation methods that lived directly on World.
+    /// Single source of truth for all terrain generation.
     generator: ChunkGenerator,
 }
 
@@ -44,17 +31,6 @@ impl World {
             chunks: FxHashMap::default(),
             last_cleanup_cx: i32::MIN,
             last_cleanup_cz: i32::MIN,
-            simplex_continents: Simplex::new(seed),
-            simplex_terrain: Simplex::new(seed.wrapping_add(1)),
-            simplex_detail: Simplex::new(seed.wrapping_add(2)),
-            simplex_temperature: Simplex::new(seed.wrapping_add(3)),
-            simplex_moisture: Simplex::new(seed.wrapping_add(4)),
-            simplex_river: Simplex::new(seed.wrapping_add(5)),
-            simplex_lake: Simplex::new(seed.wrapping_add(6)),
-            simplex_island: Simplex::new(seed.wrapping_add(8)),
-            simplex_cave1: Simplex::new(seed.wrapping_add(9)),
-            simplex_cave2: Simplex::new(seed.wrapping_add(10)),
-            simplex_erosion: Simplex::new(seed.wrapping_add(12)),
             seed,
             generator,
         };
@@ -134,245 +110,21 @@ impl World {
     }
 
     pub fn get_biome(&self, x: i32, z: i32) -> Biome {
-        let scale_continent = 0.002;
-        let scale_temp = 0.008;
-        let scale_moist = 0.01;
-        let scale_river = 0.06;
-        let scale_lake = 0.025;
-
-        let continent = self
-            .simplex_continents
-            .get([x as f64 * scale_continent, z as f64 * scale_continent]);
-        let river_noise = self
-            .simplex_river
-            .get([x as f64 * scale_river, z as f64 * scale_river]);
-        let river_value = 1.0 - river_noise.abs() * 1.5;
-
-        let lake_noise = self
-            .simplex_lake
-            .get([x as f64 * scale_lake, z as f64 * scale_lake]);
-
-        if river_value > 0.85 && continent > -0.3 {
-            return Biome::River;
-        }
-
-        if lake_noise < -0.6 && continent > -0.2 {
-            return Biome::Lake;
-        }
-
-        if continent < -0.35 {
-            let island_scale = 0.05;
-            let island_noise = self
-                .simplex_island
-                .get([x as f64 * island_scale, z as f64 * island_scale]);
-            if island_noise > 0.65 {
-                return Biome::Island;
-            }
-            return Biome::Ocean;
-        }
-
-        if continent < -0.2 {
-            return Biome::Beach;
-        }
-
-        let temp = self
-            .simplex_temperature
-            .get([x as f64 * scale_temp, z as f64 * scale_temp]);
-        let moist = self
-            .simplex_moisture
-            .get([x as f64 * scale_moist, z as f64 * scale_moist]);
-
-        if temp < -0.3 {
-            Biome::Tundra
-        } else if temp > 0.5 {
-            if moist < -0.2 {
-                Biome::Desert
-            } else {
-                Biome::Plains
-            }
-        } else {
-            if moist > 0.3 {
-                Biome::Swamp
-            } else if moist > -0.2 {
-                Biome::Forest
-            } else {
-                let mountain_noise = self
-                    .simplex_terrain
-                    .get([x as f64 * 0.005, z as f64 * 0.005]);
-                if mountain_noise > 0.4 {
-                    Biome::Mountains
-                } else {
-                    Biome::Plains
-                }
-            }
-        }
-    }
-
-    fn sample_fbm(
-        &self,
-        noise: &Simplex,
-        x: f64,
-        z: f64,
-        octaves: u32,
-        persistence: f64,
-        lacunarity: f64,
-        scale: f64,
-    ) -> f64 {
-        let mut total = 0.0;
-        let mut amplitude = 1.0;
-        let mut frequency = scale;
-        let mut max_value = 0.0;
-
-        for _ in 0..octaves {
-            total += noise.get([x * frequency, z * frequency]) * amplitude;
-            max_value += amplitude;
-            amplitude *= persistence;
-            frequency *= lacunarity;
-        }
-
-        total / max_value
+        self.generator.get_biome(x, z)
     }
 
     pub fn get_terrain_height(&self, x: i32, z: i32) -> i32 {
-        let blend_radius = 0; // No blending = faster height sampling
-        let mut total_height = 0.0;
-        let mut weights = 0.0;
-
-        for dx in -blend_radius..=blend_radius {
-            for dz in -blend_radius..=blend_radius {
-                let wx = x + dx;
-                let wz = z + dz;
-                let dist_sq = (dx * dx + dz * dz) as f64;
-                let weight = 1.0 / (1.0 + dist_sq);
-
-                let height = self.calculate_base_height_at(wx, wz);
-                total_height += height * weight;
-                weights += weight;
-            }
-        }
-
-        let base_height = total_height / weights;
-        (base_height as i32).clamp(1, WORLD_HEIGHT - 20)
-    }
-
-    fn calculate_base_height_at(&self, x: i32, z: i32) -> f64 {
-        let biome = self.get_biome(x, z);
-        let fx = x as f64;
-        let fz = z as f64;
-
-        let continental = self.sample_fbm(&self.simplex_continents, fx, fz, 3, 0.5, 2.0, 0.001);
-        let terrain = self.sample_fbm(&self.simplex_terrain, fx, fz, 3, 0.5, 2.0, 0.008);
-        let detail = self.sample_fbm(&self.simplex_detail, fx, fz, 3, 0.4, 2.0, 0.015);
-        let erosion = self.sample_fbm(&self.simplex_erosion, fx, fz, 2, 0.5, 2.0, 0.005);
-
-        match biome {
-            Biome::Ocean => {
-                let depth = (continental + 1.0) * 0.5 * 15.0 + 35.0;
-                depth + detail * 3.0
-            }
-            Biome::River => (SEA_LEVEL - 3) as f64 + detail * 2.0,
-            Biome::Lake => (SEA_LEVEL - 4) as f64 + detail * 2.0,
-            Biome::Beach => SEA_LEVEL as f64 + terrain * 2.0 + detail * 1.0,
-            Biome::Island => {
-                let island_noise = self.simplex_island.get([fx * 0.05, fz * 0.05]);
-                let island_height = (island_noise + 1.0) * 0.5 * 25.0;
-                (SEA_LEVEL as f64 + island_height + detail * 3.0).max(SEA_LEVEL as f64 - 5.0)
-            }
-            Biome::Plains => {
-                let flatness = 1.0 - erosion.abs() * 0.5;
-                let base = 66.0;
-                base + terrain * 4.0 * flatness + detail * 2.0
-            }
-            Biome::Forest => {
-                let base = 68.0;
-                base + terrain * 8.0 + detail * 3.0
-            }
-            Biome::Desert => {
-                let dune_noise = self.simplex_detail.get([fx * 0.02, fz * 0.02]);
-                let dune = (dune_noise + 1.0) * 0.5 * 8.0;
-                let base = 65.0;
-                base + terrain * 5.0 + dune + detail * 2.0
-            }
-            Biome::Tundra => {
-                let base = 68.0;
-                base + terrain * 6.0 + detail * 2.0
-            }
-            Biome::Mountains => {
-                let peaks = self.sample_fbm(
-                    &self.simplex_terrain,
-                    fx + 1000.0,
-                    fz + 1000.0,
-                    3,
-                    0.6,
-                    2.5,
-                    0.01,
-                );
-                let base = 80.0;
-                let mountain_height = (terrain + 1.0) * 0.5 * 60.0;
-                let peak_factor = (peaks + 1.0) * 0.5;
-                base + mountain_height * (0.5 + peak_factor * 0.5) + detail * 5.0
-            }
-            Biome::Swamp => {
-                let base = SEA_LEVEL as f64 + 1.0;
-                base + terrain * 2.0 + detail * 1.0
-            }
-        }
+        self.generator.get_terrain_height_pub(x, z)
     }
 
     fn is_cave_entrance(&self, x: i32, z: i32, surface_height: i32) -> bool {
-        if surface_height <= SEA_LEVEL + 2 {
-            return false;
-        }
-
-        let entrance_scale = 0.02;
-        let entrance_noise = self.simplex_cave1.get([
-            x as f64 * entrance_scale + 1000.0,
-            z as f64 * entrance_scale + 1000.0,
-        ]);
-        if entrance_noise < 0.85 {
-            return false;
-        }
-
-        let hash = self.position_hash(x, z);
-        if hash % 10 != 0 {
-            return false;
-        }
-        for check_y in (surface_height - 30).max(10)..=(surface_height - 10) {
-            let fx = x as f64;
-            let fy = check_y as f64;
-            let fz = z as f64;
-
-            let cave_scale = 0.05;
-            let cave1 =
-                self.simplex_cave1
-                    .get([fx * cave_scale, fy * cave_scale * 0.5, fz * cave_scale]);
-            let cave2 = self.simplex_cave2.get([
-                fx * cave_scale * 0.7,
-                fy * cave_scale * 0.4,
-                fz * cave_scale * 0.7,
-            ]);
-
-            if cave1 > 0.7 && cave2 > 0.7 {
-                return true;
-            }
-        }
-
-        false
+        self.generator.is_cave_entrance_pub(x, z, surface_height)
     }
 
     /// Delegate chunk generation to the cached `ChunkGenerator`.
-    /// This is the single authoritative generation path — no duplication of
-    /// terrain logic between World and ChunkGenerator.
     fn generate_chunk(&mut self, cx: i32, cz: i32) {
         let chunk = self.generator.generate_chunk(cx, cz);
         self.chunks.insert((cx, cz), chunk);
-    }
-
-    fn position_hash(&self, x: i32, z: i32) -> u32 {
-        let mut hash = self.seed;
-        hash = hash.wrapping_add(x as u32).wrapping_mul(73856093);
-        hash = hash.wrapping_add(z as u32).wrapping_mul(19349663);
-        hash ^ (hash >> 16)
     }
 
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
@@ -522,55 +274,70 @@ impl World {
         let base_y = subchunk_y * SUBCHUNK_HEIGHT;
         let base_z = chunk_z * CHUNK_SIZE;
 
-        // Cache chunk references to avoid HashMap lookups in the hot loop
-        // This eliminates ~24,576 HashMap lookups per subchunk (6 neighbors × 16³ blocks)
-        let chunk_center = self.chunks.get(&(chunk_x, chunk_z));
-        let chunk_nx = self.chunks.get(&(chunk_x - 1, chunk_z));
-        let chunk_px = self.chunks.get(&(chunk_x + 1, chunk_z));
-        let chunk_nz = self.chunks.get(&(chunk_x, chunk_z - 1));
-        let chunk_pz = self.chunks.get(&(chunk_x, chunk_z + 1));
+        // ---------------------------------------------------------------
+        // Pre-copy blocks into a 18Ă—18Ă—18 flat array (PAD=1 on every side)
+        // so that every neighbour lookup is a simple array index â€” no
+        // HashMap or bounds-check branch in the hot meshing loop.
+        //
+        // Layout: index(x,y,z) = x * 18*18 + y * 18 + z
+        //         where x,y,z â [0,17]; local block (lx,ly,lz) â [0,15]
+        //         is at index (lx+1, ly+1, lz+1).
+        // ---------------------------------------------------------------
+        const PAD: usize = 1;
+        const S: usize = CHUNK_SIZE as usize + PAD * 2; // 18
+        const SH: usize = SUBCHUNK_HEIGHT as usize + PAD * 2; // 18
 
-        // Pre-compute biome map to avoid expensive noise calculations per-block
-        let mut biome_map: [[Option<crate::biome::Biome>; CHUNK_SIZE as usize];
-            CHUNK_SIZE as usize] = [[None; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
+        let mut block_cache = [BlockType::Air; S * SH * S];
 
-        // Helper to get block from cached chunks
-        let get_block_fast = |wx: i32, wy: i32, wz: i32| -> BlockType {
+        // Fetch one block from any neighbouring chunk (HashMap access, done once per cell)
+        let fetch = |wx: i32, wy: i32, wz: i32| -> BlockType {
             if wy < 0 || wy >= WORLD_HEIGHT {
                 return BlockType::Air;
             }
-
-            let cx = if wx >= 0 {
-                wx / CHUNK_SIZE
-            } else {
-                (wx - CHUNK_SIZE + 1) / CHUNK_SIZE
-            };
-            let cz = if wz >= 0 {
-                wz / CHUNK_SIZE
-            } else {
-                (wz - CHUNK_SIZE + 1) / CHUNK_SIZE
-            };
+            let cx = wx.div_euclid(CHUNK_SIZE);
+            let cz = wz.div_euclid(CHUNK_SIZE);
             let lx = wx.rem_euclid(CHUNK_SIZE);
             let lz = wz.rem_euclid(CHUNK_SIZE);
-
-            let chunk = if cx == chunk_x && cz == chunk_z {
-                chunk_center
-            } else if cx == chunk_x - 1 && cz == chunk_z {
-                chunk_nx
-            } else if cx == chunk_x + 1 && cz == chunk_z {
-                chunk_px
-            } else if cx == chunk_x && cz == chunk_z - 1 {
-                chunk_nz
-            } else if cx == chunk_x && cz == chunk_z + 1 {
-                chunk_pz
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                chunk.get_block(lx, wy, lz)
             } else {
-                return BlockType::Air;
-            };
-
-            chunk
-                .map(|c| c.get_block(lx, wy, lz))
-                .unwrap_or(BlockType::Air)
+                // If neighbor chunk is missing, assume Water below sea level to prevent ugly side faces
+                if wy < SEA_LEVEL {
+                    BlockType::Water
+                } else {
+                    BlockType::Air
+                }
+            }
         };
+
+        for px in 0..S as i32 {
+            for py in 0..SH as i32 {
+                for pz in 0..S as i32 {
+                    let wx = base_x + px - PAD as i32;
+                    let wy = base_y + py - PAD as i32;
+                    let wz = base_z + pz - PAD as i32;
+                    block_cache[(px as usize) * SH * S + (py as usize) * S + (pz as usize)] =
+                        fetch(wx, wy, wz);
+                }
+            }
+        }
+
+        // Fast inline accessor: lx,ly,lz in [-1, CHUNK_SIZE] (i.e. padded coords)
+        let get_block_fast = |lx: i32, ly: i32, lz: i32| -> BlockType {
+            let px = (lx + PAD as i32) as usize;
+            let py = (ly + PAD as i32) as usize;
+            let pz = (lz + PAD as i32) as usize;
+            block_cache[px * SH * S + py * S + pz]
+        };
+
+        // World-coord version used in a few places below
+        let get_block_world = |wx: i32, wy: i32, wz: i32| -> BlockType {
+            get_block_fast(wx - base_x, wy - base_y, wz - base_z)
+        };
+
+        // Lazy biome cache â€” filled on first use per (lx, lz) column
+        let mut biome_map: [[Option<Biome>; CHUNK_SIZE as usize]; CHUNK_SIZE as usize] =
+            [[None; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
 
         // ============= GREEDY MESHING IMPLEMENTATION =============
         //
@@ -621,7 +388,7 @@ impl World {
                     let y = base_y + ly;
                     let world_x = base_x + lx;
                     let world_z = base_z + lz;
-                    let block = get_block_fast(world_x, y, world_z);
+                    let block = get_block_world(world_x, y, world_z);
 
                     if block == BlockType::Air {
                         continue;
@@ -646,12 +413,12 @@ impl World {
                         let m = block.metallic();
 
                         let neighbors = [
-                            get_block_fast(world_x - 1, y, world_z),
-                            get_block_fast(world_x + 1, y, world_z),
-                            get_block_fast(world_x, y - 1, world_z),
-                            get_block_fast(world_x, y + 1, world_z),
-                            get_block_fast(world_x, y, world_z - 1),
-                            get_block_fast(world_x, y, world_z + 1),
+                            get_block_world(world_x - 1, y, world_z),
+                            get_block_world(world_x + 1, y, world_z),
+                            get_block_world(world_x, y - 1, world_z),
+                            get_block_world(world_x, y + 1, world_z),
+                            get_block_world(world_x, y, world_z - 1),
+                            get_block_world(world_x, y, world_z + 1),
                         ];
 
                         // Bottom Face (-Y)
@@ -846,18 +613,18 @@ impl World {
                         let y = base_y + ly;
                         let world_x = base_x + lx;
                         let world_z = base_z + lz;
-                        let block = get_block_fast(world_x, y, world_z);
+                        let block = get_block_world(world_x, y, world_z);
 
                         // Water uses naive approach even in the greedy pass to prevent gaps
                         // caused by vertex displacement on large quads. We still draw it via IndirectManager.
                         if block == BlockType::Water {
                             let neighbors = [
-                                get_block_fast(world_x - 1, y, world_z),
-                                get_block_fast(world_x + 1, y, world_z),
-                                get_block_fast(world_x, y - 1, world_z),
-                                get_block_fast(world_x, y + 1, world_z),
-                                get_block_fast(world_x, y, world_z - 1),
-                                get_block_fast(world_x, y, world_z + 1),
+                                get_block_world(world_x - 1, y, world_z),
+                                get_block_world(world_x + 1, y, world_z),
+                                get_block_world(world_x, y - 1, world_z),
+                                get_block_world(world_x, y + 1, world_z),
+                                get_block_world(world_x, y, world_z - 1),
+                                get_block_world(world_x, y, world_z + 1),
                             ];
 
                             if block.should_render_face_against(neighbors[face_dir as usize]) {
@@ -969,7 +736,7 @@ impl World {
                             5 => (world_x, y, world_z + 1),
                             _ => unreachable!(),
                         };
-                        let neighbor = get_block_fast(nx, ny, nz);
+                        let neighbor = get_block_world(nx, ny, nz);
 
                         if !block.should_render_face_against(neighbor) {
                             continue;

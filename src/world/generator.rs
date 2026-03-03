@@ -195,7 +195,22 @@ impl ChunkGenerator {
         chunk
     }
 
-    fn get_biome(&self, x: i32, z: i32) -> Biome {
+    /// Public proxy for World::get_terrain_height delegation.
+    pub fn get_terrain_height_pub(&self, x: i32, z: i32) -> i32 {
+        self.get_terrain_height(x, z)
+    }
+
+    /// Public proxy for World::is_cave_entrance delegation.
+    pub fn is_cave_entrance_pub(&self, x: i32, z: i32, surface_height: i32) -> bool {
+        self.is_cave_entrance(x, z, surface_height)
+    }
+
+    /// Public proxy for World::position_hash delegation.
+    pub fn position_hash_pub(&self, x: i32, z: i32) -> u32 {
+        self.position_hash(x, z)
+    }
+
+    pub fn get_biome(&self, x: i32, z: i32) -> Biome {
         let fx = x as f32;
         let fz = z as f32;
 
@@ -269,7 +284,11 @@ impl ChunkGenerator {
     }
 
     fn get_terrain_height(&self, x: i32, z: i32) -> i32 {
+        // blend_radius=1 means a 3×3 neighbourhood — compute the central biome once
+        // and reuse it for all 9 sample points to avoid 9 redundant get_biome() calls
+        // (each of which does 6+ noise evaluations).
         let blend_radius = 1;
+        let center_biome = self.get_biome(x, z);
         let mut total_height = 0.0;
         let mut weights = 0.0;
 
@@ -280,7 +299,7 @@ impl ChunkGenerator {
                 let dist_sq = (dx * dx + dz * dz) as f64;
                 let weight = 1.0 / (1.0 + dist_sq);
 
-                let height = self.calculate_base_height(wx, wz);
+                let height = self.calculate_base_height_with_biome(wx, wz, center_biome);
                 total_height += height * weight;
                 weights += weight;
             }
@@ -290,8 +309,13 @@ impl ChunkGenerator {
         (base_height as i32).clamp(1, WORLD_HEIGHT - 20)
     }
 
+    #[allow(dead_code)]
     fn calculate_base_height(&self, x: i32, z: i32) -> f64 {
         let biome = self.get_biome(x, z);
+        self.calculate_base_height_with_biome(x, z, biome)
+    }
+
+    fn calculate_base_height_with_biome(&self, x: i32, z: i32, biome: Biome) -> f64 {
         let fx = x as f32;
         let fz = z as f32;
 

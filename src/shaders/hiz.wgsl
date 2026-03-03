@@ -9,7 +9,6 @@
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<r32float, write>;
-@group(0) @binding(2) var src_sampler: sampler;  // Optional: if you want filtered gather instead of loads.
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {

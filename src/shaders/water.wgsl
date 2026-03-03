@@ -12,13 +12,13 @@
 const PI: f32 = 3.14159265359;
 const TWO_PI: f32 = 6.28318530718;
 const SHADOW_MAP_SIZE: f32 = 2048.0;
-const PCF_SAMPLES: i32 = 8;
+const PCF_SAMPLES: i32 = 16;
 
 // SSR — tuned for performance/quality balance
 const SSR_MAX_STEPS: i32 = 32;
 const SSR_BINARY_STEPS: i32 = 4;       // Refinement steps (only on hit) — was 8
 const SSR_MAX_DISTANCE: f32 = 60.0;
-const SSR_THICKNESS_BASE: f32 = 0.04;
+const SSR_THICKNESS_BASE: f32 = 0.005; // Reduced from 0.04 to fix "stairs" in reflections
 const SSR_EARLY_EXIT_CONFIDENCE: f32 = 0.92;
 const SSR_EDGE_FADE: f32 = 0.08;       // Screen-edge fade fraction
 
@@ -68,8 +68,8 @@ const FOG_VISIBILITY_DAY: f32 = 250.0;
 const FOG_START_RATIO: f32 = 0.2;
 
 // Shadow bias
-const SHADOW_BASE_BIAS: f32 = 0.0005;
-const SHADOW_SLOPE_BIAS: f32 = 0.001;
+const SHADOW_BASE_BIAS: f32 = 0.003; // Matched with terrain.wgsl
+const SHADOW_SLOPE_BIAS: f32 = 0.004; // Matched with terrain.wgsl
 const SHADOW_EDGE_FADE: f32 = 0.03;
 
 // ============================================================================
@@ -309,12 +309,22 @@ fn vs_water(model: VertexInput) -> VertexOutput {
     out.original_pos = pos.xz;
 
     if model.normal.y > 0.5 {
+        // Top face: apply full Gerstner wave displacement + lower to water surface
         let waves = calculate_gerstner_dual(pos, uniforms.time, uniforms.camera_pos);
         pos.x += waves.displacement.x;
         pos.z += waves.displacement.z;
         pos.y += waves.displacement.y - WATER_LEVEL_OFFSET;
+    } else {
+        // Side faces: apply wave displacement at the top edge (uv.y == 0)
+        // This ensures the side wall matches the animated top surface.
+        let top_edge = 1.0 - model.uv.y; // 1.0 at top edge, 0.0 at bottom edge
+        if top_edge > 0.001 {
+             let waves = calculate_gerstner_dual(pos, uniforms.time, uniforms.camera_pos);
+             pos.x += waves.displacement.x * top_edge;
+             pos.z += waves.displacement.z * top_edge;
+             pos.y += (waves.displacement.y - WATER_LEVEL_OFFSET) * top_edge;
+        }
     }
-
     out.clip_position = uniforms.view_proj * vec4(pos, 1.0);
     out.world_pos = pos;
     out.normal = model.normal.xyz;
@@ -374,22 +384,30 @@ fn calculate_absorption(depth: f32) -> vec3<f32> {
     return exp(-vec3(ABSORPTION_R, ABSORPTION_G, ABSORPTION_B) * depth);
 }
 
-fn interleaved_gradient_noise(frag_coord: vec2<f32>) -> f32 {
-    let magic = vec3(0.06711056, 0.00583715, 52.9829189);
-    return fract(magic.z * fract(dot(frag_coord, magic.xy)));
+fn world_space_noise(world_pos: vec3<f32>) -> f32 {
+    let cell = floor(world_pos);
+    return fract(sin(dot(cell.xz, vec2(127.1, 311.7))) * 43758.5453);
 }
 
 fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
     var p: vec2<f32>;
     switch (idx) {
-        case 0: { p = vec2(-0.94201624, -0.39906216); }
-        case 1: { p = vec2(0.94558609, -0.76890725); }
-        case 2: { p = vec2(-0.094184101, -0.92938870); }
-        case 3: { p = vec2(0.34495938, 0.29387760); }
-        case 4: { p = vec2(-0.91588581, 0.45771432); }
-        case 5: { p = vec2(-0.81544232, -0.87912464); }
-        case 6: { p = vec2(-0.38277543, 0.27676845); }
-        case 7: { p = vec2(0.97484398, 0.75648379); }
+        case 0:  { p = vec2(-0.94201624, -0.39906216); }
+        case 1:  { p = vec2( 0.94558609, -0.76890725); }
+        case 2:  { p = vec2(-0.094184101,-0.92938870); }
+        case 3:  { p = vec2( 0.34495938,  0.29387760); }
+        case 4:  { p = vec2(-0.91588581,  0.45771432); }
+        case 5:  { p = vec2(-0.81544232, -0.87912464); }
+        case 6:  { p = vec2(-0.38277543,  0.27676845); }
+        case 7:  { p = vec2( 0.97484398,  0.75648379); }
+        case 8:  { p = vec2( 0.44323325, -0.97511554); }
+        case 9:  { p = vec2( 0.53742981, -0.47373420); }
+        case 10: { p = vec2(-0.65476012, -0.051473853); }
+        case 11: { p = vec2( 0.18395645,  0.89721549); }
+        case 12: { p = vec2(-0.097153940,-0.006734560); }
+        case 13: { p = vec2( 0.53472400,  0.73356543); }
+        case 14: { p = vec2(-0.45611231, -0.40212851); }
+        case 15: { p = vec2(-0.57321081,  0.65476012); }
         default: { p = vec2(0.0, 0.0); }
     }
     let s = sin(rotation);
@@ -397,11 +415,57 @@ fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
     return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
 }
 
-fn select_cascade(view_depth: f32) -> i32 {
-    if view_depth < uniforms.csm_split_distances.x { return 0; }
-    else if view_depth < uniforms.csm_split_distances.y { return 1; }
-    else if view_depth < uniforms.csm_split_distances.z { return 2; }
-    return 3;
+/// Sample PCF from one cascade; returns shadow factor in [0,1] (0=shadowed, 1=lit).
+fn sample_cascade_pcf(
+    world_pos: vec3<f32>,
+    cascade_idx: i32,
+    bias: f32,
+    rotation_phi: f32,
+    filter_radius: f32,
+) -> f32 {
+    let shadow_pos    = uniforms.csm_view_proj[cascade_idx] * vec4(world_pos, 1.0);
+    let shadow_coords = shadow_pos.xyz / shadow_pos.w;
+    let uv = vec2(shadow_coords.x * 0.5 + 0.5, 1.0 - (shadow_coords.y * 0.5 + 0.5));
+
+    // Outside frustum → fully lit
+    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 { return 1.0; }
+
+    let edge_factor       = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) / SHADOW_EDGE_FADE;
+    let edge_shadow_blend = clamp(edge_factor, 0.0, 1.0);
+
+    let receiver_depth = shadow_coords.z;
+    var shadow: f32 = 0.0;
+    for (var i: i32 = 0; i < PCF_SAMPLES; i++) {
+        let offset = get_poisson_sample(i, rotation_phi) * filter_radius;
+        let sample_uv = uv + offset;
+        if sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0 {
+            shadow += 1.0;
+        } else {
+            shadow += textureSampleCompare(shadow_map, shadow_sampler, sample_uv, cascade_idx, receiver_depth - bias);
+        }
+    }
+    shadow /= f32(PCF_SAMPLES);
+    return mix(1.0, shadow, edge_shadow_blend);
+}
+
+/// Select cascade index + blend weight (0=fully current, 1=fully next).
+/// 10 % blend zone eliminates hard seam jitter at cascade boundaries.
+fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
+    let bf = 0.10;
+    let s0 = uniforms.csm_split_distances.x;
+    let s1 = uniforms.csm_split_distances.y;
+    let s2 = uniforms.csm_split_distances.z;
+
+    if view_depth < s0 * (1.0 - bf) { return vec2(0.0, 0.0); }
+    else if view_depth < s0 { return vec2(0.0, smoothstep(0.0, 1.0, (view_depth - s0*(1.0-bf)) / (s0*bf))); }
+
+    if view_depth < s1 * (1.0 - bf) { return vec2(1.0, 0.0); }
+    else if view_depth < s1 { return vec2(1.0, smoothstep(0.0, 1.0, (view_depth - s1*(1.0-bf)) / (s1*bf))); }
+
+    if view_depth < s2 * (1.0 - bf) { return vec2(2.0, 0.0); }
+    else if view_depth < s2 { return vec2(2.0, smoothstep(0.0, 1.0, (view_depth - s2*(1.0-bf)) / (s2*bf))); }
+
+    return vec2(3.0, 0.0);
 }
 
 // ============================================================================
@@ -563,40 +627,28 @@ fn calculate_shadow(
     world_pos: vec3<f32>,
     normal: vec3<f32>,
     sun_dir: vec3<f32>,
-    view_depth: f32,
-    frag_coord: vec2<f32>
+    view_depth: f32
 ) -> f32 {
     if sun_dir.y < 0.05 { return 0.0; }
 
-    let cascade_idx = select_cascade(view_depth);
-    let shadow_pos = uniforms.csm_view_proj[cascade_idx] * vec4(world_pos, 1.0);
-    let shadow_coords = shadow_pos.xyz / shadow_pos.w;
-    let uv = vec2(shadow_coords.x * 0.5 + 0.5, 1.0 - (shadow_coords.y * 0.5 + 0.5));
-
-    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
-        return 1.0;
-    }
-
-    let edge_factor = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) / SHADOW_EDGE_FADE;
-    let edge_shadow_blend = clamp(edge_factor, 0.0, 1.0);
-
-    let receiver_depth = shadow_coords.z;
     let cos_theta = max(dot(normal, sun_dir), 0.0);
     let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
     let bias = SHADOW_BASE_BIAS + SHADOW_SLOPE_BIAS * sin_theta / max(cos_theta, 0.1);
 
-    let noise = interleaved_gradient_noise(frag_coord);
-    let rotation_angle = noise * TWO_PI;
-    let filter_radius = 4.0 / SHADOW_MAP_SIZE;
+    let noise        = world_space_noise(world_pos);
+    let rotation_phi = noise * TWO_PI;
+    let filter_radius = 5.0 / SHADOW_MAP_SIZE;
 
-    var shadow: f32 = 0.0;
-    for (var i: i32 = 0; i < PCF_SAMPLES; i++) {
-        let offset = get_poisson_sample(i, rotation_angle) * filter_radius;
-        shadow += textureSampleCompare(shadow_map, shadow_sampler, uv + offset, cascade_idx, receiver_depth - bias);
+    let cb          = select_cascade_with_blend(view_depth);
+    let cascade_idx = i32(cb.x);
+    let blend       = cb.y;
+
+    let shadow_a = sample_cascade_pcf(world_pos, cascade_idx, bias, rotation_phi, filter_radius);
+    if blend > 0.001 && cascade_idx < 3 {
+        let shadow_b = sample_cascade_pcf(world_pos, cascade_idx + 1, bias, rotation_phi, filter_radius);
+        return mix(shadow_a, shadow_b, blend);
     }
-    shadow /= f32(PCF_SAMPLES);
-    shadow = smoothstep(0.05, 0.95, shadow);
-    return mix(1.0, shadow, edge_shadow_blend);
+    return shadow_a;
 }
 
 // ============================================================================
@@ -676,7 +728,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     var shadow = 1.0;
     let sun_up = sun_dir.y > 0.0;
     if sun_up {
-        shadow = calculate_shadow(in.world_pos, in.normal, sun_dir, in.view_depth, in.clip_position.xy);
+        shadow = calculate_shadow(in.world_pos, in.normal, sun_dir, in.view_depth);
     }
 
     let ambient = mix(AMBIENT_NIGHT, AMBIENT_DAY, day_factor);

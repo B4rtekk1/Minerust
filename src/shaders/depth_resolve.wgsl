@@ -8,15 +8,28 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
     return vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
 }
 
+struct ResolveOutput {
+    @builtin(frag_depth) depth: f32,
+    @location(0) color: f32,
+};
+
 @fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @builtin(frag_depth) f32 {
+fn fs_main(@builtin(position) pos: vec4<f32>) -> ResolveOutput {
     let coords = vec2<i32>(pos.xy);
     
-    // Resolve MSAA depth: take MINIMUM (closest surface) for accurate SSR hits
-    // Standard Z (0=near, 1=far): min = nearest geometry
+    // Resolve MSAA depth: 
+    // - min_depth (closest) for SSR/Refractions to ensure contact
+    // - max_depth (furthest) for Hi-Z conservative occlusion culling
     var min_depth = 1.0;
+    var max_depth = 0.0;
     for (var i = 0; i < 4; i++) {
-        min_depth = min(min_depth, textureLoad(msaa_depth, coords, i));
+        let d = textureLoad(msaa_depth, coords, i);
+        min_depth = min(min_depth, d);
+        max_depth = max(max_depth, d);
     }
-    return min_depth;
+    
+    var out: ResolveOutput;
+    out.depth = min_depth;
+    out.color = max_depth;
+    return out;
 }
