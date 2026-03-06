@@ -35,8 +35,8 @@ fn vs_sun(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     let sun_dir = normalize(uniforms.sun_position);
-    // Position far away to simulate infinite distance
-    let sun_world_pos = uniforms.camera_pos + sun_dir * 450.0;
+    // Keep sun closer to camera so its billboard appears larger on screen.
+    let sun_world_pos = uniforms.camera_pos + sun_dir * 180.0;
 
     // Construct orthonormal basis for billboarding
     let forward = -sun_dir;
@@ -47,8 +47,8 @@ fn vs_sun(model: VertexInput) -> VertexOutput {
     }
     let up = cross(forward, right);
 
-    // Keep angular sun size near real-world scale (~0.5 deg apparent diameter).
-    let size = 90.0;
+    // Significantly larger stylized sun disk.
+    let size = 220.0;
 
     let offset = right * model.position.x * size + up * model.position.y * size;
     let world_pos = sun_world_pos + offset;
