@@ -57,7 +57,7 @@ gameplay:
   player_speed: 4.5
   sprint_multiplier: 3.33
   jump_height: 1.0
-  fov: 70
+fov: 90
   mouse_sensitivity: 1.0
   invert_mouse_y: false
 ```

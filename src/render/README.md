@@ -271,7 +271,7 @@ Only render chunks inside the camera's view pyramid:
 ```
        Eye
         ╱│╲
-       ╱ │ ╲  FOV (70°)
+╱ │ ╲  FOV (90°)
       ╱  │  ╲
      ╱───┼───╲
     │   visible   │

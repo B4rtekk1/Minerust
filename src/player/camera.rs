@@ -44,7 +44,7 @@ impl Camera {
     }
 
     pub fn eye_position(&self) -> Point3<f32> {
-        Point3::new(self.position.x, self.position.y + 1.62, self.position.z)
+        Point3::new(self.position.x, self.position.y + 1.8, self.position.z)
     }
 
     pub fn view_matrix(&self) -> Matrix4<f32> {
@@ -172,8 +172,8 @@ impl Camera {
     }
 
     pub fn check_collision(&self, world: &World, x: f32, y: f32, z: f32) -> bool {
-        let player_width = 0.35;
-        let player_height = 1.8;
+        let player_width = PLAYER_WIDTH;
+        let player_height = PLAYER_HEIGHT;
 
         let min_x = (x - player_width).floor() as i32;
         let max_x = (x + player_width).floor() as i32;
@@ -230,8 +230,8 @@ impl Camera {
 }
 
 pub fn check_intersection(pos: Point3<f32>, bx: i32, by: i32, bz: i32) -> bool {
-    let player_width = 0.35;
-    let player_height = 1.8;
+    let player_width = PLAYER_WIDTH;
+    let player_height = PLAYER_HEIGHT;
 
     let block_min_x = bx as f32;
     let block_max_x = (bx + 1) as f32;

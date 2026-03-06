@@ -216,6 +216,8 @@ pub fn run_game() {
                                         let mut world = state.world.write();
                                         *world = World::new_with_seed(saved.seed);
                                     }
+                                    state.indirect_manager.clear();
+                                    state.water_indirect_manager.clear();
                                     state.camera.position.x = saved.player_x;
                                     state.camera.position.y = saved.player_y;
                                     state.camera.position.z = saved.player_z;

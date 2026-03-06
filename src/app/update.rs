@@ -48,29 +48,21 @@ impl State {
             subchunk_y: sy,
         };
 
-        let terrain_uploaded = if !result.terrain.0.is_empty() && !result.terrain.1.is_empty() {
-            self.indirect_manager.upload_subchunk(
-                &self.queue,
-                key,
-                &result.terrain.0,
-                &result.terrain.1,
-                &aabb_copy,
-            )
-        } else {
-            true
-        };
+        let terrain_uploaded = self.indirect_manager.upload_subchunk(
+            &self.queue,
+            key,
+            &result.terrain.0,
+            &result.terrain.1,
+            &aabb_copy,
+        );
 
-        let water_uploaded = if !result.water.0.is_empty() && !result.water.1.is_empty() {
-            self.water_indirect_manager.upload_subchunk(
-                &self.queue,
-                key,
-                &result.water.0,
-                &result.water.1,
-                &aabb_copy,
-            )
-        } else {
-            true
-        };
+        let water_uploaded = self.water_indirect_manager.upload_subchunk(
+            &self.queue,
+            key,
+            &result.water.0,
+            &result.water.1,
+            &aabb_copy,
+        );
 
         if !terrain_uploaded || !water_uploaded {
             let mut world = self.world.write();
@@ -200,7 +192,10 @@ impl State {
             if let Some((bx, by, bz)) = write_ops.block_break {
                 world.set_block_player(bx, by, bz, BlockType::Air);
             }
-            world.update_chunks_around_player(self.camera.position.x, self.camera.position.z);
+            let removed_chunks =
+                world.update_chunks_around_player(self.camera.position.x, self.camera.position.z);
+            drop(world);
+            self.remove_chunk_gpu_data(&removed_chunks);
         }
         for (bx, by, bz) in write_ops.mark_dirty {
             self.mark_chunk_dirty(bx, by, bz);
@@ -216,6 +211,20 @@ impl State {
 
         while let Some(result) = self.mesh_loader.poll_result() {
             self.update_subchunk_mesh(result);
+        }
+    }
+
+    fn remove_chunk_gpu_data(&mut self, removed_chunks: &[(i32, i32)]) {
+        for &(cx, cz) in removed_chunks {
+            for sy in 0..NUM_SUBCHUNKS {
+                let key = render3d::render::indirect::SubchunkKey {
+                    chunk_x: cx,
+                    chunk_z: cz,
+                    subchunk_y: sy,
+                };
+                self.indirect_manager.remove_subchunk(&self.queue, key);
+                self.water_indirect_manager.remove_subchunk(&self.queue, key);
+            }
         }
     }
 

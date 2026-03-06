@@ -34,11 +34,11 @@ pub const MAX_MESH_BUILDS_PER_FRAME: usize = 6;
 pub const ASYNC_WORKER_COUNT: usize = 4;
 
 // Player constants
-pub const PLAYER_HEIGHT: f32 = 1.8;
-pub const PLAYER_CROUCH_HEIGHT: f32 = 1.5;
+pub const PLAYER_HEIGHT: f32 = 2.0;
+pub const PLAYER_CROUCH_HEIGHT: f32 = 1.7;
 pub const PLAYER_WIDTH: f32 = 0.35;
-pub const PLAYER_BASE_SPEED: f32 = 4.5;
-pub const PLAYER_SPRINT_SPEED: f32 = 15.0;
+pub const PLAYER_BASE_SPEED: f32 = 4.8;
+pub const PLAYER_SPRINT_SPEED: f32 = 16.0;
 pub const PLAYER_JUMP_HEIGHT: f32 = 1.0;
 
 // CSM (Cascaded Shadow Maps) constants
@@ -47,8 +47,12 @@ pub const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [16.0, 48.0, 128.0, 300
 pub const CSM_SHADOW_MAP_SIZE: u32 = 2048;
 
 // Camera constants
-/// Default field of view in radians (70 degrees)
-pub const DEFAULT_FOV: f32 = 90.0 * std::f32::consts::PI / 180.0;
+/// Default vertical field of view in radians (70 degrees)
+pub const DEFAULT_FOV: f32 = 70.0 * std::f32::consts::PI / 180.0;
+
+/// Block sizing
+pub const BLOCK_SIZE: f32 = 0.98;
+pub const BLOCK_OFFSET: f32 = (1.0 - BLOCK_SIZE) / 2.0;
 
 /// Get optimal chunk generation worker count based on CPU cores
 /// Reserves cores for main thread + GPU driver, splits remaining between chunk gen and mesh building

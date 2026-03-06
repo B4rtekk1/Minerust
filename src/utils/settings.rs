@@ -66,7 +66,7 @@ impl Default for GraphicsSettings {
             vsync: true,
             fullscreen: false,
             max_fps: 999,
-            fov: 70.0,
+            fov: 90.0,
             shadows: ShadowSettings::default(),
             lighting: LightingSettings::default(),
             water: WaterSettings::default(),

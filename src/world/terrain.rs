@@ -81,14 +81,14 @@ impl World {
         self.generate_chunk(cx, cz);
     }
 
-    pub fn update_chunks_around_player(&mut self, player_x: f32, player_z: f32) {
+    pub fn update_chunks_around_player(&mut self, player_x: f32, player_z: f32) -> Vec<(i32, i32)> {
         let player_cx = (player_x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (player_z / CHUNK_SIZE as f32).floor() as i32;
 
         // Only run the O(N) scan when the player actually moves to a new chunk.
         // This avoids iterating every loaded chunk entry on each chunk-arrival event.
         if player_cx == self.last_cleanup_cx && player_cz == self.last_cleanup_cz {
-            return;
+            return Vec::new();
         }
         self.last_cleanup_cx = player_cx;
         self.last_cleanup_cz = player_cz;
@@ -104,9 +104,11 @@ impl World {
             .cloned()
             .collect();
 
-        for key in chunks_to_remove {
-            self.chunks.remove(&key);
+        for key in &chunks_to_remove {
+            self.chunks.remove(key);
         }
+
+        chunks_to_remove
     }
 
     pub fn get_biome(&self, x: i32, z: i32) -> Biome {

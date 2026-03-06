@@ -3,7 +3,7 @@ player:
   id: 0
 
 graphics:
-  fov: 70
+  fov: 90
   render_distance: 16
   simulation_distance: 8
   vsync: false

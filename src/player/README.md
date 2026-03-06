@@ -63,7 +63,7 @@ Transforms camera space to normalized device coordinates (NDC):
 
 ```rust
 pub fn perspective_projection(
-    fov: f32,              // Field of view (70°)
+fov: f32,              // Field of view (90°)
     aspect_ratio: f32,     // Width / Height
     near_plane: f32,       // 0.1 (closest visible)
     far_plane: f32         // 1000.0 (farthest visible)
@@ -74,7 +74,7 @@ pub fn perspective_projection(
 
 **Field of View:**
 ```
-fov = 70° (typical)         fov = 120° (wide angle)
+fov = 90° (default)         fov = 120° (wide angle)
     ╱  ╲                       ╱     ╲
    ╱    ╲  (narrow)          ╱       ╲ (wide)
   ╱      ╲                  ╱         ╲
@@ -87,7 +87,7 @@ pub struct Camera {
     pub position: Vec3           // Eye position
     pub yaw: f32                 // Horizontal rotation (degrees)
     pub pitch: f32               // Vertical rotation (degrees)
-    pub fov: f32                 // Field of view (70° typical)
+pub fov: f32                 // Field of view (90° default)
     pub aspect_ratio: f32        // Window width/height
     pub near_plane: f32          // Closest visible (0.1)
     pub far_plane: f32           // Farthest visible (1000.0)
@@ -294,7 +294,7 @@ Velocity Y     Height
 Input: Hold Shift
     ├─ Check stamina (optional)
     ├─ Increase movement speed: ×3.3
-    ├─ FOV: Slightly increase (70° → 80°)
+├─ FOV: Slightly increase (90° → 100°)
     └─ Animation: Faster arm swing
 
 Release Shift:
@@ -409,9 +409,9 @@ Walking animation (automatic):
 
 ### FOV Zoom
 ```
-Sprinting: FOV 70° → 80° (tunnel vision reduces)
-Looking Down Sight: FOV 70° → 20° (zoom in)
-Swimming: FOV 70° → 60° (underwater distortion)
+Sprinting: FOV 90° → 100° (tunnel vision reduces)
+Looking Down Sight: FOV 90° → 20° (zoom in)
+Swimming: FOV 90° → 60° (underwater distortion)
 ```
 
 ### Camera Shake
