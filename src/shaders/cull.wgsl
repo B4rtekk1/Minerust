@@ -1,7 +1,7 @@
-    /// GPU Frustum Culling Compute Shader
+    /// GPU Frustum + Hi-Z Occlusion Culling Compute Shader (v2)
     ///
-    /// Performs frustum culling on the GPU for all subchunks in parallel.
-    /// Visible subchunks are appended to the draw commands buffer.
+    /// Performs frustum culling and Hi-Z occlusion culling on the GPU
+    /// for all subchunks in parallel.
 
     struct SubchunkMeta {
         /// AABB min (xyz), padding in w
@@ -29,223 +29,176 @@
         camera_pos: vec3<f32>,
         /// Number of active subchunks
         subchunk_count: u32,
-        /// Hi-Z texture size
+        /// Hi-Z texture size (mip 0 dimensions)
         hiz_size: vec2<f32>,
         /// Screen size for UV scaling
         screen_size: vec2<f32>,
     }
 
-    /// Culling uniforms
     @group(0) @binding(0)
     var<uniform> cull_uniforms: CullUniforms;
 
-    /// All subchunk metadata (read-only)
     @group(0) @binding(1)
     var<storage, read> subchunks: array<SubchunkMeta>;
 
-    /// Output: visible draw commands
     @group(0) @binding(2)
     var<storage, read_write> draw_commands: array<DrawIndexedIndirect>;
 
-    /// Atomic counter for visible subchunks
     @group(0) @binding(3)
     var<storage, read_write> visible_count: atomic<u32>;
 
-    /// Hi-Z Depth Pyramid (Read-only texture with mips)
     @group(0) @binding(4)
     var hiz_texture: texture_2d<f32>;
 
-    /// Hi-Z Sampler
     @group(0) @binding(5)
     var hiz_sampler: sampler;
 
-    /// Test if an AABB is visible against a frustum plane
+    // ---------------------------------------------------------------------------
+    // Frustum culling
+    // ---------------------------------------------------------------------------
+
     fn aabb_vs_plane(aabb_min: vec3<f32>, aabb_max: vec3<f32>, plane: vec4<f32>) -> bool {
-        // Get the positive vertex (furthest along the plane normal)
         let p = vec3<f32>(
             select(aabb_min.x, aabb_max.x, plane.x > 0.0),
             select(aabb_min.y, aabb_max.y, plane.y > 0.0),
             select(aabb_min.z, aabb_max.z, plane.z > 0.0),
         );
-
-        // If the positive vertex is behind the plane, AABB is fully outside
         return dot(plane.xyz, p) + plane.w >= 0.0;
     }
 
-    /// Test if an AABB is inside the frustum
-    fn is_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
-        // Add margin for conservative culling
-        let margin = vec3<f32>(2.0);
-        let expanded_min = aabb_min - margin;
-        let expanded_max = aabb_max + margin;
-
-        // Test against all 6 frustum planes
+    fn is_frustum_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
         for (var i = 0u; i < 6u; i++) {
-            if !aabb_vs_plane(expanded_min, expanded_max, cull_uniforms.frustum_planes[i]) {
+            if !aabb_vs_plane(aabb_min, aabb_max, cull_uniforms.frustum_planes[i]) {
                 return false;
             }
         }
         return true;
     }
 
-    /// Test if an AABB is occluded by the Hi-Z pyramid
-    /// Returns true if visible, false if occluded
-    /// When hiz_size is (0,0) (shadow passes), skips occlusion and returns true.
+    // ---------------------------------------------------------------------------
+    // Hi-Z occlusion culling (v2)
+    //
+    // Key corrections vs v1:
+    //  1. Mip selection uses CEIL(log2(max_pixel_dim)) so the chosen mip level
+    //     covers the whole projected rectangle in ≤ 2×2 texels — the classic
+    //     "two-level" approach.  v1 used floor(log2) which could under-select
+    //     and miss occluders, causing false rejections.
+    //  2. We sample the 4 texels that straddle the projected rect's corners on
+    //     the chosen mip via textureLoad (integer coords), not textureSampleLevel
+    //     which adds interpolation error on non-filtered textures.
+    //  3. Shadow passes pass hiz_size=(0,0) → early out.
+    //  4. Removed erroneous UV scaling by (screen_size / hiz_size) — UV [0,1]
+    //     maps directly to the Hi-Z texture regardless of screen aspect ratio
+    //     because the Hi-Z mip 0 was already written from the depth pass which
+    //     used full-screen NDC coords.
+    // ---------------------------------------------------------------------------
+
     fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
-        // Shadow passes pass hiz_size=(0,0) — skip expensive Hi-Z test entirely
+        // Shadow passes skip Hi-Z.
         if cull_uniforms.hiz_size.x < 1.0 {
             return true;
         }
-        var min_uv = vec2<f32>(1.0, 1.0);
-        var max_uv = vec2<f32>(0.0, 0.0);
-        var min_z = 1.0;
 
-        // If ANY corner is behind or on the near plane, the AABB straddles the
-        // clip boundary — projected NDC coords are unreliable, so conservatively
-        // treat the chunk as visible.
+        var min_uv  = vec2<f32>(1.0, 1.0);
+        var max_uv  = vec2<f32>(0.0, 0.0);
+        var min_z   = 1.0f;
         var any_behind = false;
 
-        // Unroll the 8 corners manually
-        // Corner 0: min, min, min
-        var clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_min.y, aabb_min.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
+        // Project all 8 AABB corners.
+        let corners = array<vec3<f32>, 8>(
+            vec3<f32>(aabb_min.x, aabb_min.y, aabb_min.z),
+            vec3<f32>(aabb_max.x, aabb_min.y, aabb_min.z),
+            vec3<f32>(aabb_min.x, aabb_max.y, aabb_min.z),
+            vec3<f32>(aabb_max.x, aabb_max.y, aabb_min.z),
+            vec3<f32>(aabb_min.x, aabb_min.y, aabb_max.z),
+            vec3<f32>(aabb_max.x, aabb_min.y, aabb_max.z),
+            vec3<f32>(aabb_min.x, aabb_max.y, aabb_max.z),
+            vec3<f32>(aabb_max.x, aabb_max.y, aabb_max.z),
+        );
+
+        for (var c = 0u; c < 8u; c++) {
+            let clip = cull_uniforms.view_proj * vec4<f32>(corners[c], 1.0);
+            if clip.w <= 0.0 {
+                any_behind = true;
+            } else {
+                let ndc = clip.xyz / clip.w;
+                // NDC [-1,1] → UV [0,1], flip Y (NDC +Y = up, UV +Y = down).
+                let uv  = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
+                min_uv  = min(min_uv, uv);
+                max_uv  = max(max_uv, uv);
+                // min_z = nearest depth (smallest NDC z = closest to camera).
+                min_z   = min(min_z, ndc.z);
+            }
         }
 
-        // Corner 1: max, min, min
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_min.y, aabb_min.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // Corner 2: min, max, min
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_max.y, aabb_min.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // Corner 3: max, max, min
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_max.y, aabb_min.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // Corner 4: min, min, max
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_min.y, aabb_max.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // Corner 5: max, min, max
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_min.y, aabb_max.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // Corner 6: min, max, max
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_min.x, aabb_max.y, aabb_max.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // Corner 7: max, max, max
-        clip = cull_uniforms.view_proj * vec4<f32>(aabb_max.x, aabb_max.y, aabb_max.z, 1.0);
-        if clip.w <= 0.0 { any_behind = true; } else {
-            var ndc = clip.xyz / clip.w;
-            var uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-            min_uv = min(min_uv, uv);
-            max_uv = max(max_uv, uv);
-            min_z = min(min_z, ndc.z);
-        }
-
-        // If any corner was behind the near plane, NDC-derived bounding box is
-        // incomplete/invalid — conservatively mark as visible.
+        // Any corner behind near plane → straddles clip boundary → conservative visible.
         if any_behind { return true; }
 
-        // If the projected screen-space box doesn't overlap [0,1] at all,
-        // the AABB is fully off-screen — frustum culling should have caught this,
-        // but guard here to avoid sampling garbage UVs.
-        if max_uv.x < 0.0 || min_uv.x > 1.0 || max_uv.y < 0.0 || min_uv.y > 1.0 {
+        // Fully off-screen → frustum culling should have handled this already.
+        if max_uv.x <= 0.0 || min_uv.x >= 1.0 || max_uv.y <= 0.0 || min_uv.y >= 1.0 {
             return false;
         }
 
-        // Clamp UVs to visible screen area — safe because we already handled the
-        // "partially behind" case above.
-        min_uv = clamp(min_uv, vec2<f32>(0.0), vec2<f32>(1.0));
-        max_uv = clamp(max_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+        // Clamp to [0,1].
+        let uv_lo = clamp(min_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+        let uv_hi = clamp(max_uv, vec2<f32>(0.0), vec2<f32>(1.0));
 
-        // Scale UVs to account for square Hi-Z texture vs screen aspect
-        let uv_scale = cull_uniforms.screen_size / cull_uniforms.hiz_size;
-        let uv_min = min(min_uv, max_uv) * uv_scale;
-        let uv_max = max(min_uv, max_uv) * uv_scale;
+        // --- Mip selection (v2: ceil log2) ---
+        //
+        // We want the coarsest mip where the projected rectangle fits in ≤ 2×2
+        // texels.  That is: mip = ceil( log2( max_pixel_dim ) ).
+        // This guarantees a single 2×2 textureLoad covers the whole AABB
+        // projection → conservative & fast.
+        let max_mip_f   = f32(textureNumLevels(hiz_texture) - 1u);
+        let pixel_dim   = (uv_hi - uv_lo) * cull_uniforms.hiz_size;
+        let max_dim     = max(pixel_dim.x, pixel_dim.y);
 
-        // Calculate required mip level based on screen-space rectangle size
-        let size = (uv_max - uv_min) * cull_uniforms.hiz_size;
-        let max_dim = max(size.x, size.y);
-        let safe_dim = max(max_dim, 1.0);
-        let max_mip = textureNumLevels(hiz_texture) - 1u;
-        let mip = min(u32(log2(safe_dim)), max_mip);
+        // ceil(log2(x)) for x >= 1: log2(x-epsilon) rounded up.
+        // For very small objects (< 1 px) clamp to mip 0 to avoid log2(0).
+        let mip_f = select(ceil(log2(max(max_dim, 1.0))), 0.0, max_dim < 1.0);
+        let mip   = u32(clamp(mip_f, 0.0, max_mip_f));
 
-        // Sample four points in the Hi-Z buffer to be conservative
-        let d0 = textureSampleLevel(hiz_texture, hiz_sampler, uv_min, f32(mip)).r;
-        let d1 = textureSampleLevel(hiz_texture, hiz_sampler, uv_max, f32(mip)).r;
-        let d2 = textureSampleLevel(hiz_texture, hiz_sampler, vec2<f32>(uv_min.x, uv_max.y), f32(mip)).r;
-        let d3 = textureSampleLevel(hiz_texture, hiz_sampler, vec2<f32>(uv_max.x, uv_min.y), f32(mip)).r;
+        // --- Sample 4 texels straddling the rectangle corners at chosen mip ---
+        //
+        // Convert UV to integer texel coords at the selected mip level.
+        let mip_size = vec2<f32>(textureDimensions(hiz_texture, mip));
+        let lo_px    = vec2<i32>(uv_lo * mip_size);
+        let hi_px    = vec2<i32>(uv_hi * mip_size);
+        let mip_max  = vec2<i32>(mip_size) - vec2<i32>(1);
 
-        // Hi-Z stores furthest depth (max for standard Z), so aggregate with max.
-        let hiz_max_z = max(max(d0, d1), max(d2, d3));
-        let nearest_z = clamp(min_z, 0.0, 1.0);
+        let t00 = textureLoad(hiz_texture, clamp(lo_px,                         vec2<i32>(0), mip_max), i32(mip)).r;
+        let t10 = textureLoad(hiz_texture, clamp(vec2<i32>(hi_px.x, lo_px.y),  vec2<i32>(0), mip_max), i32(mip)).r;
+        let t01 = textureLoad(hiz_texture, clamp(vec2<i32>(lo_px.x, hi_px.y),  vec2<i32>(0), mip_max), i32(mip)).r;
+        let t11 = textureLoad(hiz_texture, clamp(hi_px,                         vec2<i32>(0), mip_max), i32(mip)).r;
 
-        // Fallback: if Hi-Z is effectively empty/uninitialized, skip occlusion culling.
-        if hiz_max_z <= 0.00001 {
+        // Hi-Z stores furthest (max) depth → occluder depth is the max of all 4.
+        let occluder_z = max(max(t00, t10), max(t01, t11));
+
+        // Skip culling if Hi-Z buffer is uninitialised / all-zero.
+        if occluder_z <= 0.00001 {
             return true;
         }
 
-        // Visible if object's nearest point is not fully behind furthest known occluder.
-        // Add epsilon to prevent self-occlusion artifacts.
-        return nearest_z <= hiz_max_z + 0.00001;
+        // AABB is occluded if its nearest point is BEHIND all occluders.
+        // Small epsilon guards against self-occlusion at mip seams.
+        let nearest_z = clamp(min_z, 0.0, 1.0);
+        return nearest_z <= occluder_z + 0.0001;
     }
+
+    // ---------------------------------------------------------------------------
+    // Main dispatch
+    // ---------------------------------------------------------------------------
 
     @compute @workgroup_size(64)
     fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let idx = global_id.x;
 
-        // Bounds check
         if idx >= cull_uniforms.subchunk_count {
             return;
         }
 
         let subchunk = subchunks[idx];
 
-        // Check if this slot is enabled
         if subchunk.draw_data.w == 0u {
             return;
         }
@@ -253,20 +206,21 @@
         let aabb_min = subchunk.aabb_min.xyz;
         let aabb_max = subchunk.aabb_max.xyz;
 
-        // Frustum test first (cheap)
-        if is_visible(aabb_min, aabb_max) {
-            // Occlusion test (only for main pass, not shadow)
-            // Note: shadow pass should skip this or pass identity Hi-Z
-            if is_occlusion_visible(aabb_min, aabb_max) {
-                // Atomically get slot in output array
-                let slot = atomicAdd(&visible_count, 1u);
-
-                // Write draw command
-                draw_commands[slot].index_count = subchunk.draw_data.x;
-                draw_commands[slot].instance_count = 1u;
-                draw_commands[slot].first_index = subchunk.draw_data.y;
-                draw_commands[slot].base_vertex = i32(subchunk.draw_data.z);
-                draw_commands[slot].first_instance = 0u;
-            }
+        // 1. Frustum test (cheap).
+        if !is_frustum_visible(aabb_min, aabb_max) {
+            return;
         }
+
+        // 2. Hi-Z occlusion test.
+        if !is_occlusion_visible(aabb_min, aabb_max) {
+            return;
+        }
+
+        // Write draw command.
+        let slot = atomicAdd(&visible_count, 1u);
+        draw_commands[slot].index_count    = subchunk.draw_data.x;
+        draw_commands[slot].instance_count = 1u;
+        draw_commands[slot].first_index    = subchunk.draw_data.y;
+        draw_commands[slot].base_vertex    = i32(subchunk.draw_data.z);
+        draw_commands[slot].first_instance = 0u;
     }

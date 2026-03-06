@@ -160,10 +160,13 @@ impl State {
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
 
-        // --- Shadow pass: compute upload + dispatch first for all cascades ---
-        // Precompute frustum arrays for all cascades
+        // Dynamic cascade count based on render distance for performance
+        let active_cascades = render3d::get_active_cascade_count(RENDER_DISTANCE);
+
+        // --- Shadow pass: compute upload + dispatch first for active cascades ---
+        // Precompute frustum arrays for active cascades only
         let mut shadow_frustum_arrays = [[[0f32; 4]; 6]; 4];
-        for i in 0..4 {
+        for i in 0..active_cascades {
             let cascade_matrix: [[f32; 4]; 4] = csm.cascades[i].view_proj.into();
             let mut shadow_uniform_data = [0f32; 64];
             shadow_uniform_data[0..16].copy_from_slice(cascade_matrix.as_flattened());
@@ -180,8 +183,8 @@ impl State {
             shadow_frustum_arrays[i] = frustum_planes_to_array(&shadow_frustum);
         }
 
-        // Dispatch ALL shadow culling compute passes first (allows GPU overlap)
-        for i in 0..4 {
+        // Dispatch shadow culling compute passes for active cascades (allows GPU overlap)
+        for i in 0..active_cascades {
             self.indirect_manager.dispatch_shadow_culling(
                 &mut encoder,
                 &self.queue,
@@ -196,14 +199,14 @@ impl State {
             );
         }
 
-        // Then execute ALL shadow render passes (after all culling is dispatched)
+        // Then execute shadow render passes for active cascades (after all culling is dispatched)
         const SHADOW_PASS_LABELS: [&str; 4] = [
             "Shadow Pass Cascade 0",
             "Shadow Pass Cascade 1",
             "Shadow Pass Cascade 2",
             "Shadow Pass Cascade 3",
         ];
-        for i in 0..4 {
+        for i in 0..active_cascades {
             let offset = (i * 256) as u32;
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(SHADOW_PASS_LABELS[i]),

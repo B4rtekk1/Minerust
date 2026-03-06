@@ -1,35 +1,64 @@
-/// Hi-Z Depth Downsample Shader
+/// Hi-Z Depth Pyramid Downsample Shader (v2 — conservative, odd-size safe)
 ///
-/// Takes the previous mip level and downsamples it to the next level 
-/// by taking the MAXIMUM (furthest) depth in a 2x2 area for standard depth buffer.
-/// This ensures a conservative occlusion test.
-/// 
+/// Downsamples a depth mip level to the next by taking the MAX depth (furthest)
+/// in a 2×2 (or 3×3 edge) footprint — conservative for occlusion culling.
+///
+/// Key improvements over v1:
+///  - Handles odd-sized source textures correctly: when src_size is odd in
+///    either axis, an extra row/column is included so no depth sample is lost.
+///  - Uses textureLoad (integer coords) for full precision — no sampler rounding.
+///  - Still single pass per mip level; efficient 16×16 workgroup.
+///
 /// Assumptions: Standard depth (0=near, 1=far), clear(1.0), compare Less.
-/// For reversed-Z, switch to min() and adjust game code accordingly.
+/// For reversed-Z, change max() → min().
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<r32float, write>;
 
+/// Clamp-to-edge textureLoad helper.
+fn load(pos: vec2<i32>, src_max: vec2<i32>) -> f32 {
+    return textureLoad(src_tex, clamp(pos, vec2<i32>(0), src_max), 0).r;
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let dst_size = textureDimensions(dst_tex);
-    let src_size = textureDimensions(src_tex);  // Add for edge handling.
+    let dst_size = vec2<i32>(textureDimensions(dst_tex));
+    let src_size = vec2<i32>(textureDimensions(src_tex));
+    let src_max  = src_size - vec2<i32>(1);
 
-    if id.x >= dst_size.x || id.y >= dst_size.y {
+    if i32(id.x) >= dst_size.x || i32(id.y) >= dst_size.y {
         return;
     }
 
-    let src_pos = vec2<i32>(id.xy * 2u);
-    
-    // Gather 4 samples with bounds check (clamp to edge).
-    let d00 = textureLoad(src_tex, clamp(src_pos, vec2<i32>(0), vec2<i32>(src_size) - 1), 0).r;
-    let d10 = textureLoad(src_tex, clamp(src_pos + vec2<i32>(1, 0), vec2<i32>(0), vec2<i32>(src_size) - 1), 0).r;
-    let d01 = textureLoad(src_tex, clamp(src_pos + vec2<i32>(0, 1), vec2<i32>(0), vec2<i32>(src_size) - 1), 0).r;
-    let d11 = textureLoad(src_tex, clamp(src_pos + vec2<i32>(1, 1), vec2<i32>(0), vec2<i32>(src_size) - 1), 0).r;
+    // Base 2×2 footprint in the source mip.
+    let base = vec2<i32>(id.xy) * 2;
 
-    // For standard depth: furthest = MAX depth.
-    let furthest_d = max(max(d00, d10), max(d01, d11));
+    var d = max(
+        max(load(base,                       src_max),
+            load(base + vec2<i32>(1, 0),     src_max)),
+        max(load(base + vec2<i32>(0, 1),     src_max),
+            load(base + vec2<i32>(1, 1),     src_max))
+    );
 
-    // Store only R channel.
-    textureStore(dst_tex, vec2<i32>(id.xy), vec4<f32>(furthest_d, 0.0, 0.0, 1.0));
+    // If the source width is odd, the rightmost dst column needs an extra
+    // source column; similarly for odd height.  This prevents leaking
+    // geometry through the pyramid at the pyramid boundaries.
+    if (src_size.x & 1) != 0 {
+        d = max(d, max(
+            load(base + vec2<i32>(2, 0), src_max),
+            load(base + vec2<i32>(2, 1), src_max)
+        ));
+    }
+    if (src_size.y & 1) != 0 {
+        d = max(d, max(
+            load(base + vec2<i32>(0, 2), src_max),
+            load(base + vec2<i32>(1, 2), src_max)
+        ));
+    }
+    // Corner when both axes are odd.
+    if (src_size.x & 1) != 0 && (src_size.y & 1) != 0 {
+        d = max(d, load(base + vec2<i32>(2, 2), src_max));
+    }
+
+    textureStore(dst_tex, vec2<i32>(id.xy), vec4<f32>(d, 0.0, 0.0, 1.0));
 }

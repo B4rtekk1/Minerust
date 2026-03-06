@@ -472,6 +472,34 @@ impl IndirectManager {
         indices: &[u32],
         aabb: &AABB,
     ) -> bool {
+        // Early out for empty subchunks - remove if previously existed
+        if vertices.is_empty() || indices.is_empty() {
+            if let Some(old_alloc) = self.allocations.remove(&key) {
+                // Reclaim space
+                if old_alloc.vertex_count > 0 {
+                    Self::add_free_block(
+                        &mut self.free_vertex_blocks,
+                        FreeBlock {
+                            offset: old_alloc.vertex_offset,
+                            count: old_alloc.vertex_count,
+                        },
+                    );
+                }
+                if old_alloc.index_count > 0 {
+                    Self::add_free_block(
+                        &mut self.free_index_blocks,
+                        FreeBlock {
+                            offset: old_alloc.index_offset,
+                            count: old_alloc.index_count,
+                        },
+                    );
+                }
+                self.free_slots.push(old_alloc.slot_index);
+                self.active_subchunk_count = self.active_subchunk_count.saturating_sub(1);
+            }
+            return true;
+        }
+
         // Remove old allocation if exists and add to free-lists
         if let Some(old_alloc) = self.allocations.remove(&key) {
             // Reclaim space by adding to free-lists
@@ -496,9 +524,6 @@ impl IndirectManager {
             self.free_slots.push(old_alloc.slot_index);
         }
 
-        if vertices.is_empty() || indices.is_empty() {
-            return true; // Empty is considered success (nothing to upload)
-        }
 
         let vertex_count = vertices.len() as u32;
         let index_count = indices.len() as u32;

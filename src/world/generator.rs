@@ -25,6 +25,8 @@ pub struct ChunkGenerator {
     noise_island: FastNoiseLite,
     noise_cave1: FastNoiseLite,
     noise_cave2: FastNoiseLite,
+    /// Third cave noise — spaghetti tunnel axis B
+    noise_cave3: FastNoiseLite,
     noise_erosion: FastNoiseLite,
     /// Domain warp noises for organic terrain deformation
     noise_warp_x: FastNoiseLite,
@@ -35,6 +37,9 @@ pub struct ChunkGenerator {
     noise_pv: FastNoiseLite,
     /// Extra decoration noise (flowers, rocks, dead bushes)
     noise_decor: FastNoiseLite,
+    /// Cave domain-warp noises (organic, non-repeating shapes)
+    noise_cave_warp_x: FastNoiseLite,
+    noise_cave_warp_z: FastNoiseLite,
     pub seed: u32,
 }
 
@@ -53,12 +58,16 @@ impl ChunkGenerator {
             noise_island: Self::create_noise(seed.wrapping_add(8), 0.045),
             noise_cave1: Self::create_3d_noise(seed.wrapping_add(9), 0.045),
             noise_cave2: Self::create_3d_noise(seed.wrapping_add(10), 0.032),
+            noise_cave3: Self::create_3d_noise(seed.wrapping_add(11), 0.038),
             noise_erosion: Self::create_fbm_noise(seed.wrapping_add(12), 0.004),
             noise_warp_x: Self::create_fbm_noise(seed.wrapping_add(20), 0.005),
             noise_warp_z: Self::create_fbm_noise(seed.wrapping_add(21), 0.005),
             noise_ridged: Self::create_ridged_noise(seed.wrapping_add(22), 0.009),
             noise_pv: Self::create_fbm_noise(seed.wrapping_add(23), 0.004),
             noise_decor: Self::create_noise(seed.wrapping_add(24), 0.15),
+            // Cave domain-warp: low-frequency FBm for organic cave shapes
+            noise_cave_warp_x: Self::create_fbm_noise(seed.wrapping_add(30), 0.018),
+            noise_cave_warp_z: Self::create_fbm_noise(seed.wrapping_add(31), 0.018),
             seed,
         }
     }
@@ -411,8 +420,35 @@ impl ChunkGenerator {
     }
 
     /// Cave check with pre-computed entrance flag.
+    ///
+    /// Uses smooth distance-based metrics instead of hard thresholds to produce
+    /// rounded, organic caverns without jagged edges:
+    ///
+    ///  - **Cheese caves**: treat two noise fields as XZ/XY pseudodistances and
+    ///    carve when their *product* exceeds a threshold — gives smooth ellipsoidal
+    ///    chambers.
+    ///  - **Spaghetti tunnels**: treat (n1, n2) as a 2-D displacement from a
+    ///    virtual tunnel axis; carve when `sqrt(n1²+n2²) < radius` — produces
+    ///    circular cross-sections.
+    ///  - **Domain warping**: offset the sample coordinates with a separate FBm
+    ///    noise before querying cave noises — prevents grid-aligned repetition and
+    ///    adds natural meanders.
+    ///  - **Depth gradient**: deterministic smooth falloff near the surface instead
+    ///    of per-voxel random jitter.
     fn is_cave(&self, x: i32, y: i32, z: i32, surface_height: i32, is_entrance: bool) -> bool {
         if y <= 5 {
+            return false;
+        }
+
+        // --- Surface proximity guard ---
+        let min_surface_dist = if is_entrance {
+            // Blend from 3 (at surface) to 7 (deep) so the opening looks natural
+            let t = ((surface_height - y) as f32 / 8.0).clamp(0.0, 1.0);
+            (3.0 + t * 4.0) as i32
+        } else {
+            7
+        };
+        if y >= surface_height - min_surface_dist {
             return false;
         }
 
@@ -420,48 +456,63 @@ impl ChunkGenerator {
         let fy = y as f32;
         let fz = z as f32;
 
-        let entrance_gradient = if is_entrance {
-            let dist_from_surface = (surface_height - y) as f32;
-            (dist_from_surface / 6.0).clamp(0.0, 1.0)
+        // --- Domain warp: shift (fx, fz) with low-frequency FBm ---
+        // Amplitude ~20 blocks gives organic, non-repeating cave shapes.
+        let warp_amp = 20.0_f32;
+        let wx = fx + self.noise_cave_warp_x.get_noise_3d(fx * 0.022, fy * 0.014, fz * 0.022) * warp_amp;
+        let wy = fy + self.noise_cave_warp_z.get_noise_3d(fx * 0.022 + 100.0, fy * 0.014, fz * 0.022 + 100.0) * warp_amp * 0.4;
+        let wz = fz + self.noise_cave_warp_x.get_noise_3d(fx * 0.022 + 200.0, fy * 0.014, fz * 0.022 + 200.0) * warp_amp;
+
+        // --- Depth factor: smooth gradient, fully deterministic ---
+        // More caves deep down, fewer near sea-level.
+        let depth_factor = if y < 15 {
+            1.0_f32
+        } else if y < 40 {
+            1.0 - (y as f32 - 15.0) / 60.0   // ~0.58 at y=40
         } else {
-            0.0
-        };
+            0.58 - (y as f32 - 40.0) / 180.0  // ~0.36 at y=100
+        }.max(0.25);
 
-        let min_surface_distance = if is_entrance {
-            (3.0 - entrance_gradient * 3.0) as i32
-        } else {
-            7
-        };
+        // ── CHEESE CAVES ─────────────────────────────────────────────────────
+        // Sample two independent noise fields with the warped coordinates.
+        // Using low-frequency noise (longer horizontal scale than vertical)
+        // gives squashed, room-like chambers.
+        let c1 = self.noise_cave1.get_noise_3d(wx * 0.038, wy * 0.016, wz * 0.038);
+        let c2 = self.noise_cave2.get_noise_3d(wx * 0.028 + 400.0, wy * 0.013 + 400.0, wz * 0.028 + 400.0);
 
-        if y >= surface_height - min_surface_distance {
-            return false;
-        }
+        // Carve when *both* fields are positive and their product is large.
+        // This is equivalent to carving the intersection of two smooth blobs —
+        // the result is rounded chambers without jagged noise spikes.
+        let cheese_product = c1.max(0.0) * c2.max(0.0);
+        // Scale threshold by depth: deeper → bigger chambers allowed.
+        let cheese_threshold = 0.18 * (1.0 - depth_factor * 0.25);
+        let is_cheese = cheese_product > cheese_threshold;
 
-        // Cheese caves (large hollow areas)
-        let cave1 = self.noise_cave1.get_noise_3d(fx * 0.045, fy * 0.022, fz * 0.045);
-        let cave2 = self.noise_cave2.get_noise_3d(fx * 0.032, fy * 0.018, fz * 0.032);
-        let cheese_threshold = if is_entrance { 0.58 } else { 0.65 };
-        let is_cheese = cave1 > cheese_threshold && cave2 > cheese_threshold;
+        // ── SPAGHETTI TUNNELS ─────────────────────────────────────────────────
+        // Model a tunnel as a 1-D curve through space.  We sample two *different*
+        // noise fields (s1, s2) and interpret them as offsets in a 2-D plane
+        // perpendicular to the tunnel direction.  Distance from the axis is
+        // sqrt(s1² + s2²); carve when that distance is below the tunnel radius.
+        //
+        // Using *different* frequencies for the two components gives oval rather
+        // than perfectly circular tunnels, which looks more natural.
+        let s1 = self.noise_cave1.get_noise_3d(wx * 0.065 + 500.0, wy * 0.055, wz * 0.065);
+        let s2 = self.noise_cave3.get_noise_3d(wx * 0.065 + 900.0, wy * 0.055, wz * 0.065);
+        let tunnel_dist = (s1 * s1 + s2 * s2).sqrt();
+        // Base radius: 0.10 gives ~2-block-wide tunnels; scale with depth.
+        let spag_radius = (0.09 + depth_factor * 0.04).min(0.14);
+        let is_spaghetti = tunnel_dist < spag_radius;
 
-        // Spaghetti / worm tunnels
-        let spag1 = self.noise_cave1.get_noise_3d(fx * 0.075 + 500.0, fy * 0.075, fz * 0.075);
-        let spag2 = self.noise_cave2.get_noise_3d(fx * 0.075 + 500.0, fy * 0.075, fz * 0.075);
-        let is_spaghetti = spag1.abs() < 0.10 && spag2.abs() < 0.10;
+        // ── LARGE WORM TUNNELS ────────────────────────────────────────────────
+        // A second, wider tunnel type that snakes more slowly through the world.
+        // Gives Minecraft-style "ravine-like" deep passages.
+        let w1 = self.noise_cave2.get_noise_3d(wx * 0.040 + 800.0, wy * 0.032, wz * 0.040);
+        let w2 = self.noise_cave3.get_noise_3d(wx * 0.040 + 1200.0, wy * 0.032, wz * 0.040);
+        let worm_dist = (w1 * w1 + w2 * w2).sqrt();
+        let worm_radius = (0.06 + depth_factor * 0.03).min(0.10);
+        let is_worm = worm_dist < worm_radius && y < 55;
 
-        // Noodle tunnels (thin, winding)
-        let noodle = self.noise_cave1.get_noise_3d(fx * 0.10 + 1200.0, fy * 0.10, fz * 0.10);
-        let is_noodle = noodle.abs() < 0.055;
-
-        let depth_factor = if y < 20 {
-            1.0f32
-        } else if y < 45 {
-            0.90
-        } else {
-            0.65
-        };
-
-        (is_cheese || is_spaghetti || is_noodle)
-            && (self.position_hash_3d(x, y, z) % 100) as f32 / 100.0 < depth_factor
+        is_cheese || is_spaghetti || is_worm
     }
 
     fn is_cave_entrance(&self, x: i32, z: i32, surface_height: i32) -> bool {

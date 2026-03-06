@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use render3d::{
-    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME, RENDER_DISTANCE,
+    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME, MAX_MESH_BUILDS_PER_FRAME,
     SUBCHUNK_HEIGHT, NUM_SUBCHUNKS,
 };
 
@@ -108,7 +108,8 @@ impl State {
                 }
             }
 
-            let (raycast_result, target_block) = if self.mouse_captured && self.input.left_mouse {
+            let (raycast_result, target_block) = if self.mouse_captured
+                && (self.input.left_mouse || self.input.right_mouse) {
                 let raycast = self.camera.raycast(&*world, 5.0);
                 if let Some((bx, by, bz, _, _, _)) = raycast {
                     let block = world.get_block(bx, by, bz);
@@ -155,26 +156,31 @@ impl State {
             mark_dirty: Vec::new(),
         };
 
-        if let Some(target_block) = snapshot.target_block {
-            if let Some((bx, by, bz, _, _, _)) = snapshot.raycast_result {
-                let target = (bx, by, bz);
-                let break_time = target_block.break_time();
+        if self.input.left_mouse {
+            if let Some(target_block) = snapshot.target_block {
+                if let Some((bx, by, bz, _, _, _)) = snapshot.raycast_result {
+                    let target = (bx, by, bz);
+                    let break_time = target_block.break_time();
 
-                if break_time.is_finite() && break_time > 0.0 {
-                    if self.digging.target == Some(target) {
-                        self.digging.progress += dt;
-                        if self.digging.progress >= break_time {
-                            write_ops.block_break = Some((bx, by, bz));
-                            write_ops.mark_dirty.push((bx, by, bz));
-                            self.digging.target = None;
+                    if break_time.is_finite() && break_time > 0.0 {
+                        if self.digging.target == Some(target) {
+                            self.digging.progress += dt;
+                            if self.digging.progress >= break_time {
+                                write_ops.block_break = Some((bx, by, bz));
+                                write_ops.mark_dirty.push((bx, by, bz));
+                                self.digging.target = None;
+                                self.digging.progress = 0.0;
+                            }
+                        } else {
+                            self.digging.target = Some(target);
                             self.digging.progress = 0.0;
+                            self.digging.break_time = break_time;
                         }
-                    } else {
-                        self.digging.target = Some(target);
-                        self.digging.progress = 0.0;
-                        self.digging.break_time = break_time;
                     }
                 }
+            } else {
+                self.digging.target = None;
+                self.digging.progress = 0.0;
             }
         } else {
             self.digging.target = None;
@@ -209,8 +215,14 @@ impl State {
 
         self.update_coords_ui();
 
-        while let Some(result) = self.mesh_loader.poll_result() {
-            self.update_subchunk_mesh(result);
+        // Limit mesh updates per frame to prevent FPS spikes
+        let max_mesh_updates = MAX_MESH_BUILDS_PER_FRAME;
+        for _ in 0..max_mesh_updates {
+            if let Some(result) = self.mesh_loader.poll_result() {
+                self.update_subchunk_mesh(result);
+            } else {
+                break;
+            }
         }
     }
 

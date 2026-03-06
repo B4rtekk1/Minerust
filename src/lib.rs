@@ -66,7 +66,7 @@ pub mod save;
 
 // Re-exports
 pub use constants::*;
-pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
+pub use constants::{get_chunk_worker_count, get_mesh_worker_count, get_active_cascade_count};
 pub use core::{Biome, BlockType, Chunk, SubChunk, Uniforms, Vertex};
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
