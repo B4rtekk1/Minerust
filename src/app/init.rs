@@ -765,7 +765,7 @@ impl State {
             contents: bytemuck::cast_slice(&sun_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let sun_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let sun_index_buffer = device.  create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Sun Index Buffer"),
             contents: bytemuck::cast_slice(&sun_indices),
             usage: wgpu::BufferUsages::INDEX,
@@ -776,6 +776,7 @@ impl State {
         let spawn = world.read().find_spawn_point();
         let camera = Camera::new(spawn);
         tracing::info!("World generated! Spawn: {:?}", spawn);
+
 
         let seed = world.read().seed;
         let chunk_loader = ChunkLoader::new(seed);

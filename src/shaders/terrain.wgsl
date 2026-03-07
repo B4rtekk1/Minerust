@@ -421,6 +421,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Calculate view direction from camera to this fragment (for localized sky gradient)
     let view_dir = normalize(in.world_pos - uniforms.camera_pos);
 
+    // Horizontal view direction (y=0) used for fog color to avoid sunset bleeding
+    // through terrain: fog color should reflect the horizon sky in the horizontal
+    // direction toward the fragment, not the actual (possibly upward) view angle.
+    let view_dir_horiz_raw = vec3<f32>(view_dir.x, 0.0, view_dir.z);
+    let view_dir_horiz = select(
+        normalize(view_dir_horiz_raw),
+        view_dir,
+        length(view_dir_horiz_raw) < 0.0001
+    );
+
     // --- LIGHTING MODEL ---
 
     // Time-of-day factors
@@ -430,8 +440,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Twilight factor - active during sunrise/sunset transition
     let twilight_factor = smoothstep(-0.1, 0.15, sun_dir.y) * smoothstep(0.4, 0.0, sun_dir.y);
 
-    // Calculate sky color with localized sunset effect based on view direction
-    let sky_color = calculate_sky_color(view_dir, sun_dir);
+    // Calculate sky color with localized sunset effect based on horizontal view direction.
+    // Using view_dir_horiz (y=0) ensures fog color matches the horizon sky toward the
+    // fragment rather than the angled view ray — this prevents the sunset glow from
+    // bleeding through terrain when looking at distant mountains during sunset.
+    let sky_color = calculate_sky_color(view_dir_horiz, sun_dir);
 
     // Primary solar shadow — pass pre-computed plane_bias from derivatives above
     var shadow = 1.0;

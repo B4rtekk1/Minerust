@@ -121,7 +121,7 @@ fn star_field(view_dir: vec3<f32>, time: f32) -> f32 {
 
     // Per-star twinkle with unique phase
     let twinkle_phase = h * 6.2831;
-    let twinkle_speed = mix(1.5, 4.0, hash3(p + 0.5));
+    let twinkle_speed = mix(1.5, 4.0, hash3(p +     0.5));
     let twinkle = 0.75 + 0.25 * sin(time * twinkle_speed + twinkle_phase);
 
     return brightness * twinkle * horizon_fade;

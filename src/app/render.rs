@@ -94,7 +94,9 @@ impl State {
             });
 
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let proj = cgmath::perspective(Rad(DEFAULT_FOV), aspect, 0.1, 500.0);
+        // far plane: RENDER_DISTANCE=12 chunks × 16 blocks + diagonal overhead ≈ 320 blocks
+        let far_plane = (RENDER_DISTANCE as f32 * CHUNK_SIZE as f32 * 1.5).max(400.0);
+        let proj = cgmath::perspective(Rad(DEFAULT_FOV), aspect, 0.1, far_plane);
         let view_mat = self.camera.view_matrix();
         let view_proj = OPENGL_TO_WGPU_MATRIX * proj * view_mat;
         let view_proj_array: [[f32; 4]; 4] = view_proj.into();

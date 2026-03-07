@@ -53,26 +53,6 @@ impl World {
         world
     }
 
-    pub fn print_nearby_cave_entrances(&self, center_x: i32, center_z: i32, radius: i32) {
-        let mut found = 0;
-
-        for x in (center_x - radius)..=(center_x + radius) {
-            for z in (center_z - radius)..=(center_z + radius) {
-                let height = self.get_terrain_height(x, z);
-                if self.is_cave_entrance(x, z, height) {
-                    println!("Caves entrances: X={}, Y={}, Z={}", x, height - 1, z);
-                    found += 1;
-                }
-            }
-        }
-
-        if found == 0 {
-            println!("Cave entrances not found in this area.");
-            println!("Try digging down or look for caves above!");
-        } else {
-            println!("Found {} cave entrances", found);
-        }
-    }
 
     pub fn ensure_chunk_generated(&mut self, cx: i32, cz: i32) {
         if self.chunks.contains_key(&(cx, cz)) {
