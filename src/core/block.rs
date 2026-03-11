@@ -110,7 +110,7 @@ impl BlockType {
             BlockType::Air => 0.0,
             BlockType::Grass => 0.6,
             BlockType::Dirt => 0.5,
-            BlockType::Stone => 0.1,
+            BlockType::Stone => 2.5,
             BlockType::Sand => 0.5,
             BlockType::Water => 0.0,
             BlockType::Wood => 2.0,

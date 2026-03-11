@@ -19,7 +19,6 @@ impl House {
         for y in 1..=3 {
             for x in 0..5 {
                 for z in 0..5 {
-                    // Only outer ring
                     if x == 0 || x == 4 || z == 0 || z == 4 {
                         structure.blocks.push((x, y, z, BlockType::Wood));
                     } else {

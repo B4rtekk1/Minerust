@@ -292,3 +292,4 @@ impl MetalMemoryDetector {
         (self.recommended, self.available)
     }
 }
+
