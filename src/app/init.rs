@@ -37,7 +37,7 @@ impl State {
         let window = Arc::new(window);
         let size = window.inner_size();
 
-        let backend = wgpu::Backends::DX12; // DX12 is faster on windows than vulkan
+        let backend = wgpu::Backends::all(); // DX12 is faster on windows than vulkan
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: backend,
