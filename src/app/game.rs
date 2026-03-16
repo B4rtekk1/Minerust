@@ -3,7 +3,7 @@ use std::time::Instant;
 use clap::Parser;
 use winit::{
     dpi::PhysicalPosition,
-    event::{DeviceEvent, ElementState, Event, KeyEvent, WindowEvent},
+    event::{DeviceEvent, ElementState, Event, KeyEvent, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, WindowBuilder},
@@ -262,7 +262,34 @@ pub fn run_game() {
                                 }
                                 Err(e) => println!("Error loading: {}", e),
                             },
+                            KeyCode::Digit1 if pressed => { state.hotbar_slot = 0; state.hotbar_dirty = true; }
+                            KeyCode::Digit2 if pressed => { state.hotbar_slot = 1; state.hotbar_dirty = true; }
+                            KeyCode::Digit3 if pressed => { state.hotbar_slot = 2; state.hotbar_dirty = true; }
+                            KeyCode::Digit4 if pressed => { state.hotbar_slot = 3; state.hotbar_dirty = true; }
+                            KeyCode::Digit5 if pressed => { state.hotbar_slot = 4; state.hotbar_dirty = true; }
+                            KeyCode::Digit6 if pressed => { state.hotbar_slot = 5; state.hotbar_dirty = true; }
+                            KeyCode::Digit7 if pressed => { state.hotbar_slot = 6; state.hotbar_dirty = true; }
+                            KeyCode::Digit8 if pressed => { state.hotbar_slot = 7; state.hotbar_dirty = true; }
+                            KeyCode::Digit9 if pressed => { state.hotbar_slot = 8; state.hotbar_dirty = true; }
                             _ => {}
+                        }
+                    }
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::MouseWheel { delta, .. },
+                    ..
+                } => {
+                    if state.game_state != GameState::Menu {
+                        let scroll = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y,
+                            MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
+                        };
+                        let slots = crate::ui::ui::HOTBAR_SLOTS.len() as i32;
+                        let new_slot = (state.hotbar_slot as i32 - scroll.signum() as i32)
+                            .rem_euclid(slots) as usize;
+                        if new_slot != state.hotbar_slot {
+                            state.hotbar_slot = new_slot;
+                            state.hotbar_dirty = true;
                         }
                     }
                 }

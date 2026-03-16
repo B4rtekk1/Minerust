@@ -102,6 +102,9 @@ pub struct State {
     pub viewport: Viewport,
     pub fps_buffer: glyphon::Buffer,
     pub menu_buffer: glyphon::Buffer,
+    pub hotbar_label_buffer: glyphon::Buffer,
+    pub hotbar_label_width: f32,
+    pub last_hotbar_slot: usize,
     pub player_label_buffers: Vec<glyphon::Buffer>,
     pub mesh_loader: render3d::MeshLoader,
     pub composite_pipeline: wgpu::RenderPipeline,
@@ -121,6 +124,12 @@ pub struct State {
     pub depth_resolve_bind_group: wgpu::BindGroup,
     pub supports_indirect_count: bool,
     pub csm: CsmManager,
+    /// Aktualnie wybrany slot hotbara (0-8)
+    pub hotbar_slot: usize,
+    pub hotbar_vertex_buffer: Option<wgpu::Buffer>,
+    pub hotbar_index_buffer: Option<wgpu::Buffer>,
+    pub hotbar_num_indices: u32,
+    pub hotbar_dirty: bool,
 }
 
 pub struct WorldSnapshot {

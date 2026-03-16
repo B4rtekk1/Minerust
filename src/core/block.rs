@@ -183,4 +183,25 @@ impl BlockType {
             _ => 0.0,
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            BlockType::Air => "Air",
+            BlockType::Grass => "Grass",
+            BlockType::Dirt => "Dirt",
+            BlockType::Stone => "Stone",
+            BlockType::Sand => "Sand",
+            BlockType::Water => "Water",
+            BlockType::Wood => "Wood",
+            BlockType::Leaves => "Leaves",
+            BlockType::Bedrock => "Bedrock",
+            BlockType::Snow => "Snow",
+            BlockType::Gravel => "Gravel",
+            BlockType::Clay => "Clay",
+            BlockType::Ice => "Ice",
+            BlockType::Cactus => "Cactus",
+            BlockType::DeadBush => "Dead Bush",
+            BlockType::WoodStairs => "Wood Stairs",
+        }
+    }
 }

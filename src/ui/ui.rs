@@ -1,5 +1,109 @@
-use render3d::Vertex;
+use render3d::{BlockType, Vertex};
 use wgpu::util::DeviceExt;
+
+pub const HOTBAR_SLOTS: [BlockType; 9] = [
+    BlockType::Grass,
+    BlockType::Dirt,
+    BlockType::Stone,
+    BlockType::Sand,
+    BlockType::Wood,
+    BlockType::Leaves,
+    BlockType::Gravel,
+    BlockType::Clay,
+    BlockType::Ice,
+];
+
+pub fn block_type_to_index(
+    block: BlockType,
+) -> Option<f32> {
+    HOTBAR_SLOTS.iter().position(|&b| b == block).map(|i| i as f32)
+}
+
+
+pub fn build_hotbar(
+    device: &wgpu::Device,
+    selected_slot: usize,
+    aspect: f32,
+) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    let slot_count = HOTBAR_SLOTS.len() as f32;
+    let slot_size = 0.08_f32;
+    let slot_h = slot_size * aspect;
+    let gap = 0.004_f32;
+    let total_w = slot_count * slot_size + (slot_count - 1.0) * gap;
+    let start_x = -total_w * 0.5;
+    let bottom_y = -0.95_f32;
+
+    let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    let mut add_quad = |x0: f32,
+                        y0: f32,
+                        x1: f32,
+                        y1: f32,
+                        color: [u8; 4]| {
+        let base = vertices.len() as u32;
+        for (px, py) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+            vertices.push(Vertex {
+                position: [px, py, 0.0],
+                normal,
+                color,
+                uv: [0.0, 0.0],
+                tex_index: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    for i in 0..HOTBAR_SLOTS.len() {
+        let x0 = start_x + i as f32 * (slot_size + gap);
+        let x1 = x0 + slot_size;
+        let y0 = bottom_y;
+        let y1 = y0 + slot_h;
+
+        let border_color = if i == selected_slot {
+            Vertex::pack_color([1.0, 1.0, 1.0])
+        } else {
+            Vertex::pack_color([0.4, 0.4, 0.4])
+        };
+        let border = 0.004;
+        add_quad(x0, y0, x1, y1, border_color);
+
+        let bg_color = if i == selected_slot {
+            Vertex::pack_color([0.25, 0.25, 0.25])
+        } else {
+            Vertex::pack_color([0.12, 0.12, 0.12])
+        };
+        add_quad(
+            x0 + border,
+            y0 + border * aspect,
+            x1 - border,
+            y1 - border * aspect,
+            bg_color,
+        );
+
+        let block = HOTBAR_SLOTS[i];
+        let [r, g, b] = block.color();
+        let block_color = Vertex::pack_color([r, g, b]);
+        let pad = slot_size * 0.18;
+        let pad_h = pad * aspect;
+        add_quad(x0 + pad, y0 + pad_h, x1 - pad, y1 - pad_h, block_color);
+    }
+
+    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Hotbar VB"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    });
+    let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Hotbar IB"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    (vb, ib, indices.len() as u32)
+}
+
 pub fn update_coords_ui(
     device: &wgpu::Device,
     camera_pos: cgmath::Point3<f32>,

@@ -37,7 +37,7 @@ impl State {
         let window = Arc::new(window);
         let size = window.inner_size();
 
-        let backend = wgpu::Backends::all(); // DX12 is faster on windows than vulkan
+        let backend = wgpu::Backends::DX12; // DX12 is faster on windows than vulkan
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: backend,
@@ -834,6 +834,7 @@ impl State {
         );
         let fps_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(40.0, 48.0));
         let menu_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0));
+        let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
 
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Resolve Shader"),
@@ -1206,6 +1207,9 @@ impl State {
             viewport,
             fps_buffer,
             menu_buffer,
+            hotbar_label_buffer,
+            hotbar_label_width: 0.0,
+            last_hotbar_slot: usize::MAX,
             player_label_buffers: Vec::new(),
             composite_pipeline,
             composite_bind_group,
@@ -1224,6 +1228,11 @@ impl State {
             depth_resolve_bind_group,
             supports_indirect_count,
             csm: render3d::render_core::csm::CsmManager::new(),
+            hotbar_slot: 0,
+            hotbar_vertex_buffer: None,
+            hotbar_index_buffer: None,
+            hotbar_num_indices: 0,
+            hotbar_dirty: true,
         }
     }
 

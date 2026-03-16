@@ -1,0 +1,30 @@
+[
+    {
+        "name": "help",
+        "description": "Shows a list of available commands or detailed information about a specific command.",
+        "usage": "help [command_name]",
+        "aliases": ["?", "h"]
+    },
+    {
+        "name": "save",
+        "description": "Saves the current game state.",
+        "usage": "save",
+        "aliases": ["s"]
+    },
+    {
+        "name": "load",
+        "description": "Loads game state.",
+        "usage": "load Optional: [save_path]",
+        "aliases": ["l"]
+    },
+    {
+        "name": "quit",
+        "description": "Save and exit the game.",
+        "usage": "quit",
+        "aliases": ["exit", "q"]
+    },
+    {
+        "name": ""
+    }
+]
+

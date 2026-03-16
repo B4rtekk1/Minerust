@@ -1,5 +1,6 @@
 pub mod camera;
 pub mod input;
+mod player_stats;
 
 // Re-export commonly used types
 pub use camera::Camera;

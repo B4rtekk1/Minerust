@@ -53,6 +53,7 @@ pub mod chunk_loader {
 
 pub mod constants;
 pub mod save;
+mod commands;
 
 // Re-exports
 pub use constants::*;

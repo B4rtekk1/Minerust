@@ -1,5 +1,7 @@
-use render3d::{BlockType, camera::check_intersection};
+use render3d::camera::check_intersection;
 use winit::event::MouseButton;
+
+use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
 
@@ -29,9 +31,10 @@ impl State {
                     }
                 }
 
+                let block_to_place = HOTBAR_SLOTS[self.hotbar_slot];
                 self.world
                     .write()
-                    .set_block_player(px, py, pz, BlockType::Stone);
+                    .set_block_player(px, py, pz, block_to_place);
                 self.mark_chunk_dirty(px, py, pz);
             }
         }

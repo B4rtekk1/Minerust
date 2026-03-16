@@ -559,6 +559,30 @@ impl State {
                     ui_pass.draw_indexed(0..self.coords_num_indices, 0, 0..1);
                 }
             }
+
+            if self.game_state != GameState::Menu {
+                if self.hotbar_dirty || self.hotbar_vertex_buffer.is_none() {
+                    let aspect = self.config.width as f32 / self.config.height as f32;
+                    let (vb, ib, count) = crate::ui::ui::build_hotbar(
+                        &self.device,
+                        self.hotbar_slot,
+                        aspect,
+                    );
+                    self.hotbar_vertex_buffer = Some(vb);
+                    self.hotbar_index_buffer = Some(ib);
+                    self.hotbar_num_indices = count;
+                    self.hotbar_dirty = false;
+                }
+                if let (Some(vb), Some(ib)) =
+                    (&self.hotbar_vertex_buffer, &self.hotbar_index_buffer)
+                {
+                    if self.hotbar_num_indices > 0 {
+                        ui_pass.set_vertex_buffer(0, vb.slice(..));
+                        ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                        ui_pass.draw_indexed(0..self.hotbar_num_indices, 0, 0..1);
+                    }
+                }
+            }
         }
 
         if self.digging.target.is_some() && self.digging.break_time > 0.0 {
@@ -721,6 +745,29 @@ impl State {
                 Some(self.config.height as f32),
             );
 
+            if self.game_state != GameState::Menu && self.last_hotbar_slot != self.hotbar_slot {
+                let block = crate::ui::ui::HOTBAR_SLOTS[self.hotbar_slot];
+                let label = block.display_name();
+                self.hotbar_label_buffer.set_text(
+                    &mut self.font_system,
+                    label,
+                    &Attrs::new()
+                        .family(Family::SansSerif)
+                        .color(Color::rgb(255, 238, 200)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.hotbar_label_buffer.set_size(
+                    &mut self.font_system,
+                    Some(self.config.width as f32),
+                    Some(self.config.height as f32),
+                );
+                let font_size = 22.0;
+                let char_width = font_size * 0.6;
+                self.hotbar_label_width = label.chars().count() as f32 * char_width;
+                self.last_hotbar_slot = self.hotbar_slot;
+            }
+
             let labels = if self.game_state == GameState::Menu {
                 self.prepare_menu_text();
                 Vec::new()
@@ -789,6 +836,24 @@ impl State {
                     custom_glyphs: &[],
                 });
             } else {
+                let label_width = self.hotbar_label_width.min(self.config.width as f32);
+                let label_left = (self.config.width as f32 - label_width) * 0.5;
+                let label_top = (self.config.height as f32 - 170.0).max(0.0);
+                text_areas.push(TextArea {
+                    buffer: &self.hotbar_label_buffer,
+                    left: label_left,
+                    top: label_top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(255, 255, 255),
+                    custom_glyphs: &[],
+                });
+
                 for (i, label) in labels.iter().enumerate() {
                     text_areas.push(TextArea {
                         buffer: &self.player_label_buffers[i],
