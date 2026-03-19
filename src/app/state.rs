@@ -9,9 +9,9 @@ use winit::window::Window;
 use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
 use crate::ui::menu::{GameState, MenuState};
-use render3d::chunk_loader::ChunkLoader;
-use render3d::render_core::csm::CsmManager;
-use render3d::{Camera, DiggingState, IndirectManager, InputState, World};
+use minerust::chunk_loader::ChunkLoader;
+use minerust::render_core::csm::CsmManager;
+use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
 pub struct State {
     pub surface: wgpu::Surface<'static>,
@@ -101,12 +101,21 @@ pub struct State {
     pub text_renderer: TextRenderer,
     pub viewport: Viewport,
     pub fps_buffer: glyphon::Buffer,
-    pub menu_buffer: glyphon::Buffer,
+    pub menu_title_buffer: glyphon::Buffer,
+    pub menu_subtitle_buffer: glyphon::Buffer,
+    pub menu_server_label_buffer: glyphon::Buffer,
+    pub menu_server_value_buffer: glyphon::Buffer,
+    pub menu_username_label_buffer: glyphon::Buffer,
+    pub menu_username_value_buffer: glyphon::Buffer,
+    pub menu_tips_buffer: glyphon::Buffer,
+    pub menu_connect_button_buffer: glyphon::Buffer,
+    pub menu_singleplayer_button_buffer: glyphon::Buffer,
+    pub menu_status_buffer: glyphon::Buffer,
     pub hotbar_label_buffer: glyphon::Buffer,
     pub hotbar_label_width: f32,
     pub last_hotbar_slot: usize,
     pub player_label_buffers: Vec<glyphon::Buffer>,
-    pub mesh_loader: render3d::MeshLoader,
+    pub mesh_loader: minerust::MeshLoader,
     pub composite_pipeline: wgpu::RenderPipeline,
     pub composite_bind_group: wgpu::BindGroup,
     pub scene_color_texture: wgpu::Texture,
@@ -124,23 +133,23 @@ pub struct State {
     pub depth_resolve_bind_group: wgpu::BindGroup,
     pub supports_indirect_count: bool,
     pub csm: CsmManager,
-    /// Aktualnie wybrany slot hotbara (0-8)
     pub hotbar_slot: usize,
     pub hotbar_vertex_buffer: Option<wgpu::Buffer>,
     pub hotbar_index_buffer: Option<wgpu::Buffer>,
     pub hotbar_num_indices: u32,
     pub hotbar_dirty: bool,
+    pub cursor_position: Option<(f32, f32)>,
 }
 
 pub struct WorldSnapshot {
     pub missing_chunks: Vec<(i32, i32, i32)>,
     pub raycast_result: Option<(i32, i32, i32, i32, i32, i32)>,
-    pub target_block: Option<render3d::BlockType>,
-    pub eye_block: render3d::BlockType,
+    pub target_block: Option<minerust::BlockType>,
+    pub eye_block: minerust::BlockType,
 }
 
 pub struct WorldWriteOps {
-    pub completed_chunks: Vec<(i32, i32, render3d::Chunk)>,
+    pub completed_chunks: Vec<(i32, i32, minerust::Chunk)>,
     pub block_break: Option<(i32, i32, i32)>,
     pub mark_dirty: Vec<(i32, i32, i32)>,
 }

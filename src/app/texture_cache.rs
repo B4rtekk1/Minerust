@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use render3d::{TEXTURE_SIZE, generate_texture_atlas, load_texture_atlas_from_file};
+use minerust::{TEXTURE_SIZE, generate_texture_atlas, load_texture_atlas_from_file};
 
 struct TextureAtlasCache {
     cache_path: String,

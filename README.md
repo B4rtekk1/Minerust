@@ -1,4 +1,4 @@
-# 🎮 Render3D - High-Performance Voxel Rendering Engine
+# 🎮 Minerust - High-Performance Voxel Rendering Engine
 
 <div align="center">
 

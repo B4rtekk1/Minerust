@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use render3d::{
+use minerust::{
     BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME, MAX_MESH_BUILDS_PER_FRAME,
     NUM_SUBCHUNKS, SUBCHUNK_HEIGHT,
 };
@@ -23,7 +23,7 @@ impl State {
         }
     }
 
-    pub fn update_subchunk_mesh(&mut self, result: render3d::mesh_loader::MeshResult) {
+    pub fn update_subchunk_mesh(&mut self, result: minerust::mesh_loader::MeshResult) {
         let cx = result.cx;
         let cz = result.cz;
         let sy = result.sy;
@@ -42,7 +42,7 @@ impl State {
             aabb
         };
 
-        let key = render3d::render::indirect::SubchunkKey {
+        let key = minerust::render::indirect::SubchunkKey {
             chunk_x: cx,
             chunk_z: cz,
             subchunk_y: sy,
@@ -227,7 +227,7 @@ impl State {
     fn remove_chunk_gpu_data(&mut self, removed_chunks: &[(i32, i32)]) {
         for &(cx, cz) in removed_chunks {
             for sy in 0..NUM_SUBCHUNKS {
-                let key = render3d::render::indirect::SubchunkKey {
+                let key = minerust::render::indirect::SubchunkKey {
                     chunk_x: cx,
                     chunk_z: cz,
                     subchunk_y: sy,

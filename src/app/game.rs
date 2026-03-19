@@ -9,7 +9,7 @@ use winit::{
     window::{CursorGrabMode, WindowBuilder},
 };
 
-use render3d::{
+use minerust::{
     CHUNK_SIZE, DEFAULT_WORLD_FILE, SUBCHUNK_HEIGHT, SavedWorld, World, load_world, save_world,
 };
 
@@ -305,7 +305,13 @@ pub fn run_game() {
                     state.last_input_time = Instant::now();
                     let pressed = btn_state == ElementState::Pressed;
 
-                    if pressed && !state.mouse_captured {
+                    if state.game_state == GameState::Menu {
+                        if pressed && button == winit::event::MouseButton::Left {
+                            if let Some((x, y)) = state.cursor_position {
+                                state.handle_menu_click(x, y);
+                            }
+                        }
+                    } else if pressed && !state.mouse_captured {
                         state.mouse_captured = true;
                         let _ = state
                             .window
@@ -319,6 +325,12 @@ pub fn run_game() {
                     } else {
                         state.handle_mouse_input(button, pressed);
                     }
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::CursorMoved { position, .. },
+                    ..
+                } => {
+                    state.cursor_position = Some((position.x as f32, position.y as f32));
                 }
                 Event::DeviceEvent {
                     event: DeviceEvent::MouseMotion { delta },

@@ -12,8 +12,8 @@ use winit::window::Window;
 
 use crate::app::texture_cache;
 use crate::ui::menu::{GameState, MenuState};
-use render3d::chunk_loader::ChunkLoader;
-use render3d::{
+use minerust::chunk_loader::ChunkLoader;
+use minerust::{
     Camera, DiggingState, IndirectManager, InputState, Uniforms, Vertex, World, build_crosshair,
 };
 
@@ -795,7 +795,7 @@ impl State {
         let seed = world.read().seed;
         let chunk_loader = ChunkLoader::new(seed);
         let mesh_loader =
-            render3d::MeshLoader::new(Arc::clone(&world), render3d::get_mesh_worker_count());
+            minerust::MeshLoader::new(Arc::clone(&world), minerust::get_mesh_worker_count());
 
         let (crosshair_vertices, crosshair_indices) = build_crosshair();
         let num_crosshair_indices = crosshair_indices.len() as u32;
@@ -833,7 +833,22 @@ impl State {
             },
         );
         let fps_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(40.0, 48.0));
-        let menu_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0));
+        let menu_title_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(44.0, 52.0));
+        let menu_subtitle_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 30.0));
+        let menu_server_label_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+        let menu_server_value_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0));
+        let menu_username_label_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+        let menu_username_value_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0));
+        let menu_tips_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+        let menu_connect_button_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
+        let menu_singleplayer_button_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
+        let menu_status_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
         let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
 
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1206,7 +1221,16 @@ impl State {
             text_renderer,
             viewport,
             fps_buffer,
-            menu_buffer,
+            menu_title_buffer,
+            menu_subtitle_buffer,
+            menu_server_label_buffer,
+            menu_server_value_buffer,
+            menu_username_label_buffer,
+            menu_username_value_buffer,
+            menu_tips_buffer,
+            menu_connect_button_buffer,
+            menu_singleplayer_button_buffer,
+            menu_status_buffer,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,
             last_hotbar_slot: usize::MAX,
@@ -1227,12 +1251,13 @@ impl State {
             depth_resolve_pipeline,
             depth_resolve_bind_group,
             supports_indirect_count,
-            csm: render3d::render_core::csm::CsmManager::new(),
+            csm: minerust::render_core::csm::CsmManager::new(),
             hotbar_slot: 0,
             hotbar_vertex_buffer: None,
             hotbar_index_buffer: None,
             hotbar_num_indices: 0,
             hotbar_dirty: true,
+            cursor_position: None,
         }
     }
 

@@ -2,17 +2,57 @@ use cgmath::{InnerSpace, Matrix4, Rad, SquareMatrix};
 use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
-use render3d::{
+use minerust::{
     CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, Uniforms, Vertex, build_player_model,
     extract_frustum_planes,
 };
 
 use crate::multiplayer::player::queue_remote_players_labels;
-use crate::ui::menu::GameState;
+use crate::ui::menu::{GameState, MenuField, MenuLayout, Rect};
 
 use super::init::OPENGL_TO_WGPU_MATRIX;
 use super::init::frustum_planes_to_array;
 use super::state::State;
+
+fn px_to_ndc_x(x: f32, width: f32) -> f32 {
+    (x / width) * 2.0 - 1.0
+}
+
+fn px_to_ndc_y(y: f32, height: f32) -> f32 {
+    1.0 - (y / height) * 2.0
+}
+
+fn push_rect(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    rect: Rect,
+    color: [u8; 4],
+    width: f32,
+    height: f32,
+) {
+    let base = vertices.len() as u32;
+    let x0 = px_to_ndc_x(rect.x, width);
+    let y0 = px_to_ndc_y(rect.y, height);
+    let x1 = px_to_ndc_x(rect.x + rect.w, width);
+    let y1 = px_to_ndc_y(rect.y + rect.h, height);
+    let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+
+    for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+        vertices.push(Vertex {
+            position: [x, y, 0.0],
+            normal,
+            color,
+            uv: [0.0, 0.0],
+            tex_index: 0.0,
+        });
+    }
+
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn rgba(color: [f32; 4]) -> [u8; 4] {
+    Vertex::pack_color_rgba(color)
+}
 
 impl State {
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -158,7 +198,7 @@ impl State {
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
-        let active_cascades = render3d::get_active_cascade_count(RENDER_DISTANCE);
+        let active_cascades = minerust::get_active_cascade_count(RENDER_DISTANCE);
 
         let mut shadow_frustum_arrays = [[[0f32; 4]; 6]; 4];
         for i in 0..active_cascades {
@@ -821,10 +861,24 @@ impl State {
             });
 
             if self.game_state == GameState::Menu {
+                let layout = MenuLayout::new(self.config.width, self.config.height);
+                let title_x = layout.header.x + 10.0;
+                let title_y = layout.header.y + 6.0;
+                let subtitle_x = layout.header.x + 10.0;
+                let subtitle_y = layout.header.y + 56.0;
+                let server_label_y = layout.server_label.y - 6.0;
+                let username_label_y = layout.username_label.y - 6.0;
+                let server_value_y = layout.server_field.y + 12.0;
+                let username_value_y = layout.username_field.y + 12.0;
+                let tips_y = layout.quick_card.y + 86.0;
+                let button_text_y = layout.connect_button.y + 15.0;
+                let single_text_y = layout.singleplayer_button.y + 15.0;
+                let status_y = layout.status_pill.y + 8.0;
+
                 text_areas.push(TextArea {
-                    buffer: &self.menu_buffer,
-                    left: 0.0,
-                    top: 0.0,
+                    buffer: &self.menu_title_buffer,
+                    left: title_x,
+                    top: title_y,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
@@ -832,7 +886,146 @@ impl State {
                         right: self.config.width as i32,
                         bottom: self.config.height as i32,
                     },
-                    default_color: Color::rgb(255, 255, 255),
+                    default_color: Color::rgb(242, 227, 187),
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_subtitle_buffer,
+                    left: subtitle_x,
+                    top: subtitle_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(186, 201, 214),
+                    custom_glyphs: &[],
+                });
+
+                text_areas.push(TextArea {
+                    buffer: &self.menu_server_label_buffer,
+                    left: layout.server_label.x + 2.0,
+                    top: server_label_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(140, 153, 167),
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_server_value_buffer,
+                    left: layout.server_field.x + 16.0,
+                    top: server_value_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(248, 250, 252),
+                    custom_glyphs: &[],
+                });
+
+                text_areas.push(TextArea {
+                    buffer: &self.menu_username_label_buffer,
+                    left: layout.username_label.x + 2.0,
+                    top: username_label_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(140, 153, 167),
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_username_value_buffer,
+                    left: layout.username_field.x + 16.0,
+                    top: username_value_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(248, 250, 252),
+                    custom_glyphs: &[],
+                });
+
+                text_areas.push(TextArea {
+                    buffer: &self.menu_tips_buffer,
+                    left: layout.quick_card.x + 20.0,
+                    top: tips_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(171, 189, 202),
+                    custom_glyphs: &[],
+                });
+
+                let connect_estimate = 7.0 * 10.5;
+                let single_estimate = 12.0 * 10.5;
+                text_areas.push(TextArea {
+                    buffer: &self.menu_connect_button_buffer,
+                    left: layout.connect_button.x + (layout.connect_button.w - connect_estimate) * 0.5,
+                    top: button_text_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(245, 249, 255),
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_singleplayer_button_buffer,
+                    left: layout.singleplayer_button.x
+                        + (layout.singleplayer_button.w - single_estimate) * 0.5,
+                    top: single_text_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(220, 228, 236),
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_status_buffer,
+                    left: layout.status_pill.x + 16.0,
+                    top: status_y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: if self.menu_state.error_message.is_some() {
+                        Color::rgb(255, 124, 124)
+                    } else if self.menu_state.status_message.is_some() {
+                        Color::rgb(124, 224, 208)
+                    } else {
+                        Color::rgb(219, 229, 239)
+                    },
                     custom_glyphs: &[],
                 });
             } else {
@@ -914,52 +1107,481 @@ impl State {
     }
 
     pub fn prepare_menu_text(&mut self) {
-        use crate::ui::menu::MenuField;
-        let mut text = String::new();
-        text.push_str("MULTIPLAYER\n\n");
-        text.push_str(
-            "Click a field to edit, Tab to switch, Enter to connect, Esc to play solo\n\n\n",
-        );
+        let selected = self.menu_state.selected_field;
 
-        let addr_selected = self.menu_state.selected_field == MenuField::ServerAddress;
-        if addr_selected {
-            text.push_str("> ");
-        }
-        text.push_str(&format!(
-            "Server Address: {}\n",
-            self.menu_state.server_address
-        ));
+        let title = "Render 3D";
+        let subtitle = "Voxel sandbox with multiplayer and custom UI";
+        let server_label = if selected == MenuField::ServerAddress {
+            "SERVER ADDRESS  •  active"
+        } else {
+            "SERVER ADDRESS"
+        };
+        let username_label = if selected == MenuField::Username {
+            "USERNAME  •  active"
+        } else {
+            "USERNAME"
+        };
+        let server_value = self.menu_state.server_address.as_str();
+        let username_value = self.menu_state.username.as_str();
+        let tips = "TAB switch field\nENTER connect\nESC singleplayer\nF11 fullscreen";
+        let connect_button = "CONNECT";
+        let singleplayer_button = "SINGLEPLAYER";
 
-        let user_selected = self.menu_state.selected_field == MenuField::Username;
-        if user_selected {
-            text.push_str("> ");
-        }
-        text.push_str(&format!("Username: {}\n\n", self.menu_state.username));
-
-        text.push_str("[ENTER] Connect to Server\n");
-        text.push_str("[ESC] Play Singleplayer\n\n");
-
-        if let Some(ref err) = self.menu_state.error_message {
-            text.push_str(&format!("Error: {}\n", err));
+        let status_text = if let Some(ref err) = self.menu_state.error_message {
+            format!("ERROR: {}", err)
         } else if let Some(ref status) = self.menu_state.status_message {
-            text.push_str(&format!("Status: {}\n", status));
-        }
+            format!("STATUS: {}", status)
+        } else {
+            "READY: ENTER joins multiplayer, ESC starts solo".to_string()
+        };
 
-        self.menu_buffer.set_text(
+        self.menu_title_buffer.set_text(
             &mut self.font_system,
-            &text,
+            title,
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,
             None,
         );
-        self.menu_buffer.set_size(
+        self.menu_title_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_subtitle_buffer.set_text(
+            &mut self.font_system,
+            subtitle,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_subtitle_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_server_label_buffer.set_text(
+            &mut self.font_system,
+            server_label,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_server_label_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_server_value_buffer.set_text(
+            &mut self.font_system,
+            server_value,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_server_value_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_username_label_buffer.set_text(
+            &mut self.font_system,
+            username_label,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_username_label_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_username_value_buffer.set_text(
+            &mut self.font_system,
+            username_value,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_username_value_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_tips_buffer.set_text(
+            &mut self.font_system,
+            tips,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_tips_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_connect_button_buffer.set_text(
+            &mut self.font_system,
+            connect_button,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_connect_button_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_singleplayer_button_buffer.set_text(
+            &mut self.font_system,
+            singleplayer_button,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_singleplayer_button_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_status_buffer.set_text(
+            &mut self.font_system,
+            &status_text,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_status_buffer.set_size(
             &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );
     }
 
-    pub fn render_menu(&mut self, _encoder: &mut wgpu::CommandEncoder, _view: &wgpu::TextureView) {}
+    pub fn render_menu(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        let layout = MenuLayout::new(self.config.width, self.config.height);
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let panel = layout.panel;
+        let hovered = self
+            .cursor_position
+            .and_then(|(x, y)| layout.hit_test(x, y));
+
+        let mut vertices = Vec::with_capacity(96);
+        let mut indices = Vec::with_capacity(144);
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+            },
+            rgba([0.03, 0.05, 0.08, 0.94]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: panel.x - 10.0,
+                y: panel.y - 10.0,
+                w: panel.w + 20.0,
+                h: panel.h + 20.0,
+            },
+            rgba([0.05, 0.1, 0.16, 0.55]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            panel,
+            rgba([0.07, 0.09, 0.12, 0.96]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: panel.x,
+                y: panel.y,
+                w: panel.w,
+                h: 6.0,
+            },
+            rgba([0.95, 0.72, 0.24, 1.0]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: panel.x + 20.0,
+                y: panel.y + 18.0,
+                w: 180.0,
+                h: 34.0,
+            },
+            rgba([0.12, 0.16, 0.21, 0.95]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: panel.x + 16.0,
+                y: panel.y + 16.0,
+                w: 8.0,
+                h: 40.0,
+            },
+            rgba([0.97, 0.74, 0.24, 1.0]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: layout.quick_card.x,
+                y: layout.quick_card.y,
+                w: layout.quick_card.w,
+                h: layout.quick_card.h,
+            },
+            rgba([0.11, 0.14, 0.18, 0.98]),
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: layout.quick_card.x,
+                y: layout.quick_card.y,
+                w: 4.0,
+                h: layout.quick_card.h,
+            },
+            rgba([0.35, 0.8, 0.78, 1.0]),
+            width,
+            height,
+        );
+
+        let field_color = if self.menu_state.selected_field == MenuField::ServerAddress {
+            rgba([0.13, 0.2, 0.27, 1.0])
+        } else {
+            rgba([0.1, 0.13, 0.17, 1.0])
+        };
+        let username_color = if self.menu_state.selected_field == MenuField::Username {
+            rgba([0.13, 0.2, 0.27, 1.0])
+        } else {
+            rgba([0.1, 0.13, 0.17, 1.0])
+        };
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            layout.server_field,
+            rgba([0.02, 0.03, 0.04, 1.0]),
+            width,
+            height,
+        );
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: layout.server_field.x + 2.0,
+                y: layout.server_field.y + 2.0,
+                w: layout.server_field.w - 4.0,
+                h: layout.server_field.h - 4.0,
+            },
+            field_color,
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            layout.username_field,
+            rgba([0.02, 0.03, 0.04, 1.0]),
+            width,
+            height,
+        );
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: layout.username_field.x + 2.0,
+                y: layout.username_field.y + 2.0,
+                w: layout.username_field.w - 4.0,
+                h: layout.username_field.h - 4.0,
+            },
+            username_color,
+            width,
+            height,
+        );
+
+        let connect_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Connect)) {
+            rgba([0.24, 0.52, 0.84, 1.0])
+        } else {
+            rgba([0.2, 0.45, 0.74, 1.0])
+        };
+        let single_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Singleplayer)) {
+            rgba([0.19, 0.22, 0.28, 1.0])
+        } else {
+            rgba([0.16, 0.19, 0.24, 1.0])
+        };
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            layout.connect_button,
+            rgba([0.16, 0.33, 0.55, 1.0]),
+            width,
+            height,
+        );
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: layout.connect_button.x + 2.0,
+                y: layout.connect_button.y + 2.0,
+                w: layout.connect_button.w - 4.0,
+                h: layout.connect_button.h - 4.0,
+            },
+            connect_fill,
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            layout.singleplayer_button,
+            rgba([0.1, 0.11, 0.14, 1.0]),
+            width,
+            height,
+        );
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            Rect {
+                x: layout.singleplayer_button.x + 2.0,
+                y: layout.singleplayer_button.y + 2.0,
+                w: layout.singleplayer_button.w - 4.0,
+                h: layout.singleplayer_button.h - 4.0,
+            },
+            single_fill,
+            width,
+            height,
+        );
+
+        push_rect(
+            &mut vertices,
+            &mut indices,
+            layout.status_pill,
+            rgba([0.08, 0.1, 0.13, 0.96]),
+            width,
+            height,
+        );
+
+        let selected_field_x = match self.menu_state.selected_field {
+            MenuField::ServerAddress => Some(layout.server_field),
+            MenuField::Username => Some(layout.username_field),
+            MenuField::None => None,
+        };
+        if let Some(field) = selected_field_x {
+            push_rect(
+                &mut vertices,
+                &mut indices,
+                Rect {
+                    x: field.x - 2.0,
+                    y: field.y - 2.0,
+                    w: field.w + 4.0,
+                    h: 3.0,
+                },
+                rgba([0.97, 0.74, 0.24, 1.0]),
+                width,
+                height,
+            );
+        }
+
+        let active_field = match self.menu_state.selected_field {
+            MenuField::ServerAddress => Some((layout.server_field, self.menu_state.server_address.as_str())),
+            MenuField::Username => Some((layout.username_field, self.menu_state.username.as_str())),
+            MenuField::None => None,
+        };
+
+        if let Some((field, value)) = active_field {
+            let char_count = value.chars().count() as f32;
+            let cursor_x = (field.x + 16.0 + char_count * 11.0).min(field.x + field.w - 12.0);
+            push_rect(
+                &mut vertices,
+                &mut indices,
+                Rect {
+                    x: cursor_x,
+                    y: field.y + 8.0,
+                    w: 2.0,
+                    h: field.h - 16.0,
+                },
+                rgba([0.97, 0.74, 0.24, 0.95]),
+                width,
+                height,
+            );
+        }
+
+        if !vertices.is_empty() {
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Menu UI VB"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Menu UI IB"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Menu UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.crosshair_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+    }
 
     pub fn render_remote_players(&mut self, _view_proj: &Matrix4<f32>, _width: f32, _height: f32) {}
 }

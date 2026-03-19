@@ -21,9 +21,9 @@ const FRESNEL_R0: f32 = 0.02;
 const REFRACTION_STRENGTH: f32 = 0.025;
 const REFRACTION_MIX: f32 = 0.55;
 
-const ABSORPTION_R: f32 = 0.45;
-const ABSORPTION_G: f32 = 0.07;
-const ABSORPTION_B: f32 = 0.04;
+const ABSORPTION_R: f32 = 0.08;
+const ABSORPTION_G: f32 = 0.02;
+const ABSORPTION_B: f32 = 0.01;
 const SCATTER_COLOR: vec3<f32> = vec3<f32>(0.04, 0.16, 0.22);
 const SHALLOW_COLOR: vec3<f32> = vec3<f32>(0.1, 0.4, 0.35);
 

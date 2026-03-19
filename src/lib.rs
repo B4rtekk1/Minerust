@@ -55,10 +55,9 @@ pub mod constants;
 pub mod save;
 mod commands;
 
-// Re-exports
 pub use constants::*;
 pub use constants::{get_active_cascade_count, get_chunk_worker_count, get_mesh_worker_count};
-pub use core::{Biome, BlockType, Chunk, SubChunk, Uniforms, Vertex};
+pub use core::{Biome, BlockType, Chunk, SubChunk, Uniforms, Vertex, GameItem};
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
     AABB, DrawIndexedIndirect, IndirectManager, MeshLoader, SubchunkKey, add_greedy_quad, add_quad,

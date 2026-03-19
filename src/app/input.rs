@@ -1,11 +1,24 @@
-use render3d::camera::check_intersection;
+use minerust::camera::check_intersection;
 use winit::event::MouseButton;
 
+use crate::ui::menu::{MenuField, MenuHit, MenuLayout};
 use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
 
 impl State {
+    pub fn handle_menu_click(&mut self, x: f32, y: f32) {
+        let layout = MenuLayout::new(self.config.width, self.config.height);
+
+        match layout.hit_test(x, y) {
+            Some(MenuHit::ServerAddress) => self.menu_state.select_field(MenuField::ServerAddress),
+            Some(MenuHit::Username) => self.menu_state.select_field(MenuField::Username),
+            Some(MenuHit::Connect) => self.connect_to_server(),
+            Some(MenuHit::Singleplayer) => self.game_state = crate::ui::menu::GameState::Playing,
+            None => self.menu_state.select_field(MenuField::None),
+        }
+    }
+
     pub fn handle_mouse_input(&mut self, button: MouseButton, pressed: bool) {
         match button {
             MouseButton::Left => self.input.left_mouse = pressed,

@@ -1,7 +1,7 @@
 pub mod camera;
 pub mod input;
 mod player_stats;
+mod inventory;
 
-// Re-export commonly used types
 pub use camera::Camera;
 pub use input::{DiggingState, InputState};

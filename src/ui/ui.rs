@@ -1,4 +1,4 @@
-use render3d::{BlockType, Vertex};
+use minerust::{BlockType, Vertex};
 use wgpu::util::DeviceExt;
 
 pub const HOTBAR_SLOTS: [BlockType; 9] = [

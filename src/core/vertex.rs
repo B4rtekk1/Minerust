@@ -30,6 +30,16 @@ impl Vertex {
         ]
     }
 
+    #[inline]
+    pub fn pack_color_rgba(c: [f32; 4]) -> [u8; 4] {
+        [
+            (c[0].clamp(0.0, 1.0) * 255.0) as u8,
+            (c[1].clamp(0.0, 1.0) * 255.0) as u8,
+            (c[2].clamp(0.0, 1.0) * 255.0) as u8,
+            (c[3].clamp(0.0, 1.0) * 255.0) as u8,
+        ]
+    }
+
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: size_of::<Vertex>() as wgpu::BufferAddress,

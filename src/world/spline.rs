@@ -28,7 +28,6 @@ impl TerrainSpline {
             return self.points[0].output;
         }
 
-        // Safe: already checked that points.len() >= 2
         let first = &self.points[0];
         let last = &self.points[self.points.len() - 1];
 
