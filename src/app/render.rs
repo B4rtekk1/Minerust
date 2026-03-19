@@ -1109,7 +1109,7 @@ impl State {
     pub fn prepare_menu_text(&mut self) {
         let selected = self.menu_state.selected_field;
 
-        let title = "Render 3D";
+        let title = "Minerust";
         let subtitle = "Voxel sandbox with multiplayer and custom UI";
         let server_label = if selected == MenuField::ServerAddress {
             "SERVER ADDRESS  •  active"

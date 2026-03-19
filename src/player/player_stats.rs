@@ -1,4 +1,4 @@
-pub struct PlayerStats {
+pub struct PlayerInfo {
     pub health: f32,
     pub hunger: f32,
     pub saturation: f32,
@@ -7,7 +7,7 @@ pub struct PlayerStats {
     pub level: u32,
 }
 
-impl PlayerStats {
+impl PlayerInfo {
     pub fn new() -> Self {
         Self {
             health: 20.0,
@@ -32,5 +32,6 @@ impl PlayerStats {
         // 1 level: 40exp
         // 2 level: 90exp
         // 3 level: 160exp
+        //10 le
     }
 }
