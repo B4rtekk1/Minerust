@@ -27,6 +27,7 @@ impl PlayerInfo {
         }
     }
 
+    /// ![](https://raw.githubusercontent.com/B4rtekk1/Minerust/main/assets_docs/exp_equation.png)
     pub fn experience_to_next_level(&self) -> f32 {
         (self.level as f32 + 1.0).powf(2.0) * 10.0
         // 1 level: 40exp
