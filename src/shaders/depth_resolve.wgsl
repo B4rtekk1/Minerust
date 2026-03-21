@@ -1,3 +1,5 @@
+override MSAA_SAMPLES: i32 = 4;
+
 @group(0) @binding(0) var msaa_depth: texture_depth_multisampled_2d;
 
 @vertex
@@ -16,16 +18,13 @@ struct ResolveOutput {
 fn fs_main(@builtin(position) pos: vec4<f32>) -> ResolveOutput {
     let coords = vec2<i32>(pos.xy);
 
-    var min_depth = 1.0;
-    var max_depth = 0.0;
-    for (var i = 0; i < 4; i++) {
-        let d = textureLoad(msaa_depth, coords, i);
-        min_depth = min(min_depth, d);
-        max_depth = max(max_depth, d);
-    }
-    
+    let d0 = textureLoad(msaa_depth, coords, 0);
+    let d1 = textureLoad(msaa_depth, coords, 1);
+    let d2 = textureLoad(msaa_depth, coords, 2);
+    let d3 = textureLoad(msaa_depth, coords, 3);
+
     var out: ResolveOutput;
-    out.depth = min_depth;
-    out.color = max_depth;
+    out.depth = min(min(d0, d1), min(d2, d3));
+    out.color = max(max(d0, d1), max(d2, d3));
     return out;
 }

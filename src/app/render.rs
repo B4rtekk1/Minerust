@@ -330,7 +330,6 @@ impl State {
             let cascade_matrix: [[f32; 4]; 4] = csm.cascades[i].view_proj.into();
             let mut shadow_uniform_data = [0f32; 64]; // 64 × 4 bytes = 256 bytes
             shadow_uniform_data[0..16].copy_from_slice(cascade_matrix.as_flattened());
-            shadow_uniform_data[16] = time; // available in the shadow vertex shader
 
             self.queue.write_buffer(
                 &self.shadow_cascade_buffer,
