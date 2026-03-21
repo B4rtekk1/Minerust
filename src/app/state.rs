@@ -160,6 +160,14 @@ pub struct State {
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub texture_sampler: wgpu::Sampler,
+    /// Neutral flow-map texture used by the water shader.
+    /// Owned by `State` so the texture stays alive as long as the view.
+    #[allow(dead_code)]
+    pub flow_map_texture: wgpu::Texture,
+    /// View of the neutral flow-map texture.
+    pub flow_map_view: wgpu::TextureView,
+    /// Sampler used when reading the flow-map texture in the water shader.
+    pub flow_sampler: wgpu::Sampler,
 
     // -------------------------------------------------------------------------
     // Hi-Z (hierarchical depth) occlusion culling

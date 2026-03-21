@@ -166,6 +166,14 @@ impl State {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&self.flow_map_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::Sampler(&self.flow_sampler),
+                    },
                 ],
                 label: Some("water_bind_group"),
             });

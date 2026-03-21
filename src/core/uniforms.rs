@@ -22,10 +22,9 @@ pub struct Uniforms {
 
     /// Cascaded Shadow Map view-projection matrices.
     ///
-    /// Layout: `[cascade_index][4x4 matrix]` — currently 1 sub-frustum per
-    /// cascade, 4 cascades total. Each matrix transforms world-space into the
-    /// light-space clip space of that cascade.
-    pub csm_view_proj: [[[[f32; 4]; 4]; 1]; 4],
+    /// Layout: one `mat4x4` per cascade, 4 cascades total. Each matrix
+    /// transforms world-space into the light-space clip space of that cascade.
+    pub csm_view_proj: [[[f32; 4]; 4]; 4],
 
     /// World-space depth at which each CSM cascade ends.
     ///
@@ -81,4 +80,13 @@ pub struct Uniforms {
     ///
     /// Not intended for use in shaders.
     pub _pad1_moon: f32,
+
+    /// Current moon light intensity in the range `[0.0, 1.0]`.
+    pub moon_intensity: f32,
+    /// Normalized wind direction in XZ space `[x, z]`.
+    pub wind_dir: [f32; 2],
+    /// Multiplier applied to the water wave phase speed.
+    pub wind_speed: f32,
+    /// Explicit padding to keep the struct 16-byte aligned.
+    pub _pad: f32,
 }

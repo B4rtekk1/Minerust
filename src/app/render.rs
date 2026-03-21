@@ -3,7 +3,7 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, Uniforms, Vertex, build_player_model,
+    CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, build_player_model,
     extract_frustum_planes,
 };
 
@@ -250,11 +250,10 @@ impl State {
         let sun_y = sun_angle.sin();  // +1 = overhead noon, −1 = midnight
         let sun_z = sun_angle.cos();
         let sun_dir = cgmath::Vector3::new(sun_x, sun_y, sun_z).normalize();
+        let moon_intensity = (-sun_dir.y).clamp(0.0, 1.0);
 
-        // The moon is always exactly opposite the sun on the Y-Z plane.
-        let moon_x = 0.0f32;
-        let moon_y = -sun_y;
-        let moon_z = -sun_z;
+        // The moon is always opposite the sun direction.
+        let moon_position = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
 
         // ── CSM (Cascaded Shadow Maps) update ─────────────────────────────── //
         // `CsmManager::update` computes the four tight orthographic light-space
@@ -264,11 +263,11 @@ impl State {
         csm.update(&view_mat, sun_dir, 0.1, 300.0, aspect, fov_y);
 
         // Pack cascade view-projection matrices into the uniform struct format.
-        let csm_view_proj: [[[[f32; 4]; 4]; 1]; 4] = [
-            [csm.cascades[0].view_proj.into()],
-            [csm.cascades[1].view_proj.into()],
-            [csm.cascades[2].view_proj.into()],
-            [csm.cascades[3].view_proj.into()],
+        let csm_view_proj: [[[f32; 4]; 4]; 4] = [
+            csm.cascades[0].view_proj.into(),
+            csm.cascades[1].view_proj.into(),
+            csm.cascades[2].view_proj.into(),
+            csm.cascades[3].view_proj.into(),
         ];
         // Split distances tell the terrain shader which cascade to sample for
         // a given fragment based on its camera-space depth.
@@ -301,10 +300,14 @@ impl State {
                 sun_position: [sun_x, sun_y, sun_z],
                 is_underwater,
                 screen_size: [self.config.width as f32, self.config.height as f32],
-                water_level: 63.0,
+                water_level: SEA_LEVEL as f32 - 1.0,
                 reflection_mode: self.reflection_mode as f32,
-                moon_position: [moon_x, moon_y, moon_z],
+                moon_position,
                 _pad1_moon: 0.0,
+                moon_intensity,
+                wind_dir: [0.8, 0.6],
+                wind_speed: 1.0,
+                _pad: 0.0,
             }]),
         );
 

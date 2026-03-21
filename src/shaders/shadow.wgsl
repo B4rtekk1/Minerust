@@ -15,8 +15,5 @@ struct VertexInput {
 
 @vertex
 fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
-    // Depth-only shadow pass for terrain geometry. The visible terrain pass
-    // does not apply any vertex deformation here, so the shadow map must use
-    // the same positions to avoid swimming / offset shadows.
     return uniforms.cascade_view_proj * vec4<f32>(model.position, 1.0);
 }

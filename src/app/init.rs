@@ -14,7 +14,8 @@ use crate::app::texture_cache;
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    Camera, DiggingState, IndirectManager, InputState, Uniforms, Vertex, World, build_crosshair,
+    Camera, DiggingState, IndirectManager, InputState, SEA_LEVEL, Uniforms, Vertex, World,
+    build_crosshair,
 };
 
 use super::state::State;
@@ -286,7 +287,7 @@ impl State {
                 view_proj: Matrix4::from_scale(1.0).into(),
                 inv_view_proj: Matrix4::from_scale(1.0).into(),
                 // `csm_view_proj` holds four 4×4 matrices – one per cascade.
-                csm_view_proj: [[Matrix4::from_scale(1.0).into(); 1]; 4],
+                csm_view_proj: [Matrix4::from_scale(1.0).into(); 4],
                 // Split distances (world-space) for the four CSM cascades.
                 // Tune these to balance shadow resolution vs. coverage range.
                 csm_split_distances: [16.0, 48.0, 128.0, 300.0],
@@ -296,11 +297,15 @@ impl State {
                 is_underwater: 0.0,
                 screen_size: [1920.0, 1080.0],
                 // Y coordinate (in world blocks) of the water surface.
-                water_level: 63.0,
+                water_level: SEA_LEVEL as f32 - 1.0,
                 // 1.0 = SSR enabled, 0.0 = flat reflection fallback.
                 reflection_mode: 1.0,
                 moon_position: [-0.4, 0.2, -0.3],
                 _pad1_moon: 0.0,
+                moon_intensity: 0.0,
+                wind_dir: [0.8, 0.6],
+                wind_speed: 1.0,
+                _pad: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -533,14 +538,63 @@ impl State {
             ..Default::default()
         });
 
+        // Neutral flow map so the shader can enable distortion without an
+        // extra asset dependency.
+        let flow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Flow Map Texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &flow_map_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[128, 128, 128, 255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let flow_map_view = flow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let flow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Flow Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         // ------------------------------------------------------------------ //
         // Water bind group layout & bind group
         // ------------------------------------------------------------------ //
 
-        // Extends the terrain layout with three additional SSR bindings:
+        // Extends the terrain layout with SSR and flow-map bindings:
         //   5 – SSR color texture (fragment)
         //   6 – SSR depth texture  (fragment)
         //   7 – SSR sampler        (fragment)
+        //   8 – flow map texture   (fragment)
+        //   9 – flow sampler       (fragment)
         let water_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("water_bind_group_layout"),
@@ -617,6 +671,22 @@ impl State {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -654,6 +724,14 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::Sampler(&ssr_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&flow_map_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&flow_sampler),
                 },
             ],
             label: Some("water_bind_group"),
@@ -1580,6 +1658,9 @@ impl State {
             ssr_depth_texture,
             ssr_depth_view,
             ssr_sampler,
+            flow_map_texture,
+            flow_map_view,
+            flow_sampler,
             water_bind_group,
             water_bind_group_layout,
             surface_format,
