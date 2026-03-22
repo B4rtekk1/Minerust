@@ -139,3 +139,61 @@ impl Vertex {
         }
     }
 }
+
+/// A dedicated vertex format for the block outline shader.
+///
+/// The outline shader reuses the `normal` slot to store the opposite endpoint
+/// of the line segment plus a `side` flag in `.w`. Unlike [`Vertex`], this
+/// attribute must remain full `f32` precision because it carries world-space
+/// positions.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct OutlineVertex {
+    /// World-space position of this segment endpoint.
+    pub position: [f32; 3],
+    /// Opposite endpoint of the segment in `.xyz`, and `side` in `.w`.
+    pub other: [f32; 4],
+    /// Packed RGBA outline color.
+    pub color: [u8; 4],
+    /// `uv.x` stores the half-width in pixels; `uv.y` is unused.
+    pub uv: [f32; 2],
+    /// Unused by the shader, kept for layout parity.
+    pub tex_index: f32,
+}
+
+impl OutlineVertex {
+    /// Returns the wgpu vertex layout used by the outline pipeline.
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: size_of::<OutlineVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 28,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Unorm8x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32,
+                },
+            ],
+        }
+    }
+}

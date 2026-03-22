@@ -10,15 +10,15 @@ const SSR_EDGE_FADE:     f32 = 0.06;
 const SSR_FADE_DISTANCE: f32 = 300.0;
 
 const SHADOW_MAP_SIZE: f32 = 2048.0;
-const PCF_SAMPLES:     i32 = 8;
+const PCF_SAMPLES:     i32 = 16;
 
 
 const LOD_FAR: f32 = 300.0;
 
-const WATER_COLOR_SHALLOW: vec3<f32> = vec3<f32>(0.04, 0.28, 0.38);
-const WATER_COLOR_DEEP:    vec3<f32> = vec3<f32>(0.01, 0.10, 0.22);
-const WATER_OPACITY:       f32 = 0.45;
-const FRESNEL_R0:          f32 = 0.02;
+const WATER_COLOR_SHALLOW: vec3<f32> = vec3<f32>(0.035, 0.24, 0.34);
+const WATER_COLOR_DEEP:    vec3<f32> = vec3<f32>(0.008, 0.075, 0.18);
+const WATER_OPACITY:       f32 = 0.40;
+const FRESNEL_R0:          f32 = 0.018;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
 const WATER_ROUGHNESS_MIN: f32 = 0.03;
 const WATER_ROUGHNESS_MAX: f32 = 0.14;
@@ -243,6 +243,37 @@ fn fbm_normal_perturb(p: vec2<f32>, t: f32) -> vec2<f32> {
     return s1 + s2 + s3;
 }
 
+fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity: f32) -> vec3<f32> {
+    let h = clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0);
+    let sun_h = sun_dir.y;
+    let day = smoothstep(-0.02, 0.22, sun_h);
+    let night = smoothstep(0.10, -0.10, sun_h);
+    let dusk = 1.0 - smoothstep(0.02, 0.34, abs(sun_h));
+
+    let zenith_day = vec3<f32>(0.18, 0.44, 0.88);
+    let horizon_day = vec3<f32>(0.66, 0.82, 0.98);
+    let zenith_night = vec3<f32>(0.002, 0.005, 0.015);
+    let horizon_night = vec3<f32>(0.010, 0.014, 0.034);
+    let dusk_low = vec3<f32>(0.96, 0.40, 0.18);
+    let dusk_high = vec3<f32>(0.24, 0.10, 0.28);
+
+    var sky = mix(horizon_day, zenith_day, pow(h, 0.82)) * day;
+    sky += mix(horizon_night, zenith_night, pow(h, 0.74)) * night;
+    sky += mix(dusk_low, dusk_high, pow(h, 1.08)) * dusk * 0.50;
+
+    let horizon_band = 1.0 - smoothstep(0.0, 0.32, abs(view_dir.y));
+    sky += vec3<f32>(0.16, 0.22, 0.30) * horizon_band * (0.48 * day + 0.18 * dusk);
+
+    let sun_glow = pow(max(dot(view_dir, sun_dir), 0.0), 24.0) * (0.8 + 0.4 * dusk);
+    sky += mix(vec3<f32>(1.0, 0.74, 0.48), vec3<f32>(1.0, 0.95, 0.90), day) * sun_glow * 0.28;
+
+    if moon_intensity > 0.01 {
+        sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * night * (0.18 + 0.22 * horizon_band);
+    }
+
+    return sky;
+}
+
 fn sample_depth(uv: vec2<f32>) -> f32 {
     let sz = vec2<i32>(uniforms.screen_size);
     let px = clamp(vec2<i32>(uv * uniforms.screen_size), vec2<i32>(0), sz - vec2<i32>(1));
@@ -339,9 +370,16 @@ fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
 
     let bias  = 0.003;
     let texel = 1.0 / SHADOW_MAP_SIZE;
+    let rot   = hash21(world_pos.xz) * TAU;
+    let s     = sin(rot);
+    let c     = cos(rot);
     var acc   = 0.0;
     for (var i: i32 = 0; i < PCF_SAMPLES; i++) {
-        let offset = POISSON8[i] * texel * 3.0;
+        let p = POISSON8[i];
+        let offset = vec2(
+            p.x * c - p.y * s,
+            p.x * s + p.y * c,
+        ) * texel * 2.0;
         acc += textureSampleCompare(shadow_map, shadow_sampler, uv + offset, 0, sc.z - bias);
     }
     return acc / f32(PCF_SAMPLES);
@@ -398,11 +436,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     var refl_dir   = reflect(-view_dir, normal);
     refl_dir.y     = max(refl_dir.y, 0.001);
 
-    let sky_height = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
-    let sky_day    = mix(vec3(0.55, 0.75, 0.98), vec3(0.20, 0.40, 0.85), sky_height) * day;
-    let sky_night  = mix(vec3(0.012, 0.012, 0.025), vec3(0.001, 0.001, 0.008), sky_height)
-                     * (1.0 - day);
-    var refl_color = sky_day + sky_night;
+    var refl_color = sky_reflection_color(refl_dir, sun_dir, uniforms.moon_intensity);
 
     if uniforms.reflection_mode != 0.0 {
         let ssr_fade = clamp(1.0 - dist / SSR_FADE_DISTANCE, 0.0, 1.0);
@@ -416,15 +450,16 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     refl_color *= 1.0 - grazing * 0.18;
-    let reflection_mix = clamp(fresnel * (0.72 - grazing * 0.22), 0.0, 0.75);
+    let reflection_mix = clamp(fresnel * (0.78 - grazing * 0.20), 0.0, 0.80);
     water_color = mix(water_color, refl_color, reflection_mix);
 
     if sun_dir.y > 0.0 {
         let jac_rough   = clamp(1.0 - in.jacobian, 0.0, 1.0);
-        let roughness   = mix(WATER_ROUGHNESS_MIN, WATER_ROUGHNESS_MAX, jac_rough);
+        let roughness   = mix(WATER_ROUGHNESS_MIN, WATER_ROUGHNESS_MAX, jac_rough)
+                        * mix(1.0, 0.82, 1.0 - day);
         let spec        = ggx_spec_simple(normal, view_dir, sun_dir, roughness);
-        let spec_color  = mix(vec3(1.0, 0.97, 0.88), vec3(1.0, 0.82, 0.55), 1.0 - day);
-        water_color    += spec_color * spec * 1.6 * day * shadow;
+        let spec_color  = mix(vec3(1.0, 0.97, 0.88), vec3(1.0, 0.84, 0.58), 1.0 - day);
+        water_color    += spec_color * spec * mix(1.45, 1.8, day) * shadow;
 
         if uniforms.moon_intensity > 0.01 && day < 0.2 {
             let moon_dir  = normalize(uniforms.moon_position);
@@ -445,10 +480,10 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let delta_xz = in.world_pos.xz - uniforms.camera_pos.xz;
     let dist_xz  = sqrt(dot(delta_xz, delta_xz));
     let fog_t    = clamp((dist_xz - FOG_NEAR) / (FOG_FAR - FOG_NEAR), 0.0, 1.0);
-    let fog_col  = mix(vec3(0.001, 0.001, 0.008), refl_color, day);
+    let fog_col  = mix(vec3(0.004, 0.010, 0.024), refl_color, 0.85 * day + 0.15 * (1.0 - day));
     water_color  = mix(water_color, fog_col, fog_t * fog_t);
 
-    let alpha = WATER_OPACITY + fresnel * 0.28;
+    let alpha = WATER_OPACITY + fresnel * 0.30;
 
     return vec4(water_color, clamp(alpha, 0.0, 1.0));
 }

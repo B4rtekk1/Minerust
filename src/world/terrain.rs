@@ -65,7 +65,7 @@ impl World {
     /// Creates a new world with the default seed (`2137`) and pre-generates
     /// the initial render-distance ring of chunks around the origin.
     pub fn new() -> Self {
-        Self::new_with_seed(2137)
+        Self::new_with_seed(42)
     }
 
     /// Creates a new world with the given `seed` and pre-generates the initial

@@ -34,10 +34,7 @@ Tested on windows 11, might not work on windows 10. You can clone repo and try c
 
 ## DEMO
 
-
-https://github.com/user-attachments/assets/306f1229-8aa5-43d7-90c9-7e312252fc4a
-
-
+<https://github.com/user-attachments/assets/306f1229-8aa5-43d7-90c9-7e312252fc4a>
 
 ## ✨ Features
 
@@ -53,6 +50,7 @@ https://github.com/user-attachments/assets/306f1229-8aa5-43d7-90c9-7e312252fc4a
 | **Culling** | CPU AABB + GPU frustum culling for optimal performance |
 
 **Technical Highlights:**
+
 - **Indirect Drawing**: Single `draw_indirect` call for entire terrain
 - **Greedy Meshing**: Automatic face merging reduces geometry by 75%+
 - **Zero-Copy Uploads**: Lock-free async mesh generation to GPU
@@ -70,6 +68,7 @@ https://github.com/user-attachments/assets/306f1229-8aa5-43d7-90c9-7e312252fc4a
 | **Height** | 256 blocks (16 subchunks × 16 blocks) |
 
 **Generation Pipeline:**
+
 - Multi-threaded async generation (FastNoise-Lite)
 - Deterministic seeding (same seed = same world)
 - Mesh building decoupled from rendering loop
@@ -113,6 +112,7 @@ cargo run
 ### First Launch
 
 Upon startup, the engine will:
+
 1. Initialize GPU device and surfaces
 2. Generate initial world chunks
 3. Load textures and shaders
@@ -179,16 +179,19 @@ Present to Screen
 ### Memory Layout
 
 **Unified Vertex Buffer**
+
 ```
 [Chunk 0] [Chunk 1] [Chunk 2] ... [Max 10M vertices]
 ```
 
 **Unified Index Buffer**
+
 ```
 [Chunk 0] [Chunk 1] [Chunk 2] ... [Max 256M indices]
 ```
 
 **Indirect Buffer** (Draw Commands)
+
 ```
 [DrawIndirectArgs × Num Active Chunks]
 ↓

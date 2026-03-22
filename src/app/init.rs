@@ -14,8 +14,8 @@ use crate::app::texture_cache;
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    Camera, DiggingState, IndirectManager, InputState, SEA_LEVEL, Uniforms, Vertex, World,
-    build_crosshair,
+    build_crosshair, Camera, DiggingState, IndirectManager, InputState, OutlineVertex,
+    ShadowConfig, Uniforms, Vertex, World, CSM_SHADOW_MAP_SIZE, SEA_LEVEL,
 };
 
 use super::state::State;
@@ -256,6 +256,11 @@ impl State {
             // alpha blending; no depth test.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/ui.wgsl").into()),
         });
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Outline Shader"),
+            // Draws the targeted block outline in world space.
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/outline.wgsl").into()),
+        });
         let sun_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sun Shader"),
             // Renders the sun / moon disc billboard oriented toward the camera.
@@ -306,6 +311,7 @@ impl State {
                 wind_dir: [0.8, 0.6],
                 wind_speed: 1.0,
                 _pad: 0.0,
+                rain_factor: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -408,6 +414,16 @@ impl State {
             ..Default::default()
         });
 
+        let shadow_config_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Shadow Config Buffer"),
+            contents: bytemuck::cast_slice(&[ShadowConfig {
+                shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
+                pcf_samples: 16,
+                _pad: [0; 2],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         // ------------------------------------------------------------------ //
         // Bind group layouts
         // ------------------------------------------------------------------ //
@@ -419,6 +435,7 @@ impl State {
         //   2 – Atlas sampler (fragment)
         //   3 – Shadow map array (fragment, depth texture for comparison)
         //   4 – Shadow comparison sampler (fragment)
+        //   5 – Shadow config buffer (fragment)
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("uniform_bind_group_layout"),
@@ -463,6 +480,16 @@ impl State {
                         binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
                         count: None,
                     },
                 ],
@@ -760,6 +787,10 @@ impl State {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: shadow_config_buffer.as_entire_binding(),
+                },
             ],
             label: Some("uniform_bind_group"),
         });
@@ -885,7 +916,51 @@ impl State {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false, // read-only depth test
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: msaa_sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+        });
+
+        // --- Block outline overlay ---
+        // Alpha-blended line list drawn on top of the scene for the block
+        // currently under the crosshair.
+        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Outline Pipeline"),
+            layout: Some(&pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &outline_shader,
+                entry_point: Some("vs_outline"),
+                compilation_options: Default::default(),
+                buffers: &[OutlineVertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_shader,
+                entry_point: Some("fs_outline"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1588,6 +1663,7 @@ impl State {
             config,
             render_pipeline,
             water_pipeline,
+            outline_pipeline,
             sun_pipeline,
             sky_pipeline,
             shadow_pipeline,
@@ -1598,6 +1674,7 @@ impl State {
             crosshair_index_buffer,
             num_crosshair_indices,
             uniform_buffer,
+            shadow_config_buffer,
             uniform_bind_group,
             shadow_bind_group,
             depth_texture,
@@ -1609,6 +1686,7 @@ impl State {
             world,
             mesh_loader,
             camera,
+            highlighted_block: None,
             input: InputState::default(),
             digging: DiggingState::default(),
             window,

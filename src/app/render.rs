@@ -3,8 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, build_player_model,
-    extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex,
+    World, build_block_outline, build_player_model, extract_frustum_planes,
 };
 
 use crate::multiplayer::player::queue_remote_players_labels;
@@ -94,6 +94,26 @@ fn push_rect(
 /// converting to `u8`.
 fn rgba(color: [f32; 4]) -> [u8; 4] {
     Vertex::pack_color_rgba(color)
+}
+
+/// Computes which faces of the highlighted block should be outlined.
+///
+/// The outline follows the same face-visibility rules as block meshing so the
+/// overlay only draws exposed faces.
+fn visible_outline_faces(world: &World, bx: i32, by: i32, bz: i32) -> [bool; 6] {
+    let block = world.get_block(bx, by, bz);
+    if block == BlockType::Air {
+        return [false; 6];
+    }
+
+    [
+        block.should_render_face_against(world.get_block(bx + 1, by, bz)),
+        block.should_render_face_against(world.get_block(bx - 1, by, bz)),
+        block.should_render_face_against(world.get_block(bx, by + 1, bz)),
+        block.should_render_face_against(world.get_block(bx, by - 1, bz)),
+        block.should_render_face_against(world.get_block(bx, by, bz + 1)),
+        block.should_render_face_against(world.get_block(bx, by, bz - 1)),
+    ]
 }
 
 impl State {
@@ -308,6 +328,7 @@ impl State {
                 wind_dir: [0.8, 0.6],
                 wind_speed: 1.0,
                 _pad: 0.0,
+                rain_factor: 0.0,
             }]),
         );
 
@@ -739,6 +760,63 @@ impl State {
                     0,
                     self.water_indirect_manager.active_count(),
                 );
+            }
+        }
+
+        // ── Block outline pass ───────────────────────────────────────────── //
+        // Draw the targeted block outline before the composite pass so the
+        // resolved scene color includes the visible edges. The pass uses the
+        // MSAA color target and the main depth buffer so hidden edges are
+        // rejected by depth testing instead of being painted over the scene.
+        {
+            let mut outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Block Outline Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.msaa_texture_view,
+                    resolve_target: Some(&self.scene_color_view),
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            if let Some((bx, by, bz)) = self.highlighted_block {
+                let visible_faces = {
+                    let world = self.world.read();
+                    visible_outline_faces(&*world, bx, by, bz)
+                };
+                let (outline_vertices, outline_indices) =
+                    build_block_outline(bx, by, bz, visible_faces);
+                if !outline_vertices.is_empty() && !outline_indices.is_empty() {
+                    let outline_vb =
+                        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Block Outline VB"),
+                            contents: bytemuck::cast_slice(&outline_vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                    let outline_ib =
+                        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Block Outline IB"),
+                            contents: bytemuck::cast_slice(&outline_indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+                    outline_pass.set_pipeline(&self.outline_pipeline);
+                    outline_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    outline_pass.set_vertex_buffer(0, outline_vb.slice(..));
+                    outline_pass.set_index_buffer(outline_ib.slice(..), wgpu::IndexFormat::Uint32);
+                    outline_pass.draw_indexed(0..outline_indices.len() as u32, 0, 0..1);
+                }
             }
         }
 

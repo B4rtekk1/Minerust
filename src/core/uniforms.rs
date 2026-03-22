@@ -89,4 +89,26 @@ pub struct Uniforms {
     pub wind_speed: f32,
     /// Explicit padding to keep the struct 16-byte aligned.
     pub _pad: f32,
+
+    /// Rain intensity in the range `[0.0, 1.0]`.
+    ///
+    /// Used by the sky shader to desaturate the atmosphere and dim the sun
+    /// / cloud response under overcast conditions.
+    pub rain_factor: f32,
+}
+
+/// Small shadow-specific configuration uploaded separately from the main
+/// per-frame uniform block.
+///
+/// This keeps shadow quality knobs isolated from the large `Uniforms` struct
+/// and matches the `ShadowConfig` block used by `terrain.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ShadowConfig {
+    /// Shadow map resolution in texels for one cascade face.
+    pub shadow_map_size: f32,
+    /// Number of PCF taps used when filtering the shadow map.
+    pub pcf_samples: u32,
+    /// Explicit padding so the buffer remains 16 bytes wide.
+    pub _pad: [u32; 2],
 }

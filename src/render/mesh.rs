@@ -1,4 +1,4 @@
-use crate::core::vertex::Vertex;
+use crate::core::vertex::{OutlineVertex, Vertex};
 
 /// Adds a single quad (two triangles) to the vertex and index buffers.
 ///
@@ -227,6 +227,106 @@ pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
+/// Builds a screen-space thick outline for a single block at `(x, y, z)`.
+///
+/// Only the exposed (visible) faces are outlined — faces that have no
+/// solid neighbour in the given direction. Each edge is emitted as a small
+/// quad so the shader can expand it into a thick line in screen space.
+///
+/// # Arguments
+/// * `x`, `y`, `z` - Block grid position.
+/// * `visible_faces` - A bitmask or six booleans indicating which of the
+///   six faces (+X, -X, +Y, -Y, +Z, -Z) have no solid neighbour.
+pub fn build_block_outline(
+    x: i32,
+    y: i32,
+    z: i32,
+    visible_faces: [bool; 6], // [+X, -X, +Y, -Y, +Z, -Z]
+) -> (Vec<OutlineVertex>, Vec<u32>) {
+    let pad = 0.005; // smaller pad for face outlines
+    let min_x = x as f32 - pad;
+    let min_y = y as f32 - pad;
+    let min_z = z as f32 - pad;
+    let max_x = x as f32 + 1.0 + pad;
+    let max_y = y as f32 + 1.0 + pad;
+    let max_z = z as f32 + 1.0 + pad;
+
+    let packed_color = Vertex::pack_color_rgba([1.0, 0.9, 0.2, 0.95]);
+    let half_width_px = 1.5;
+
+    // Each face: 4 corners + 4 edges forming a square outline.
+    // Order: [+X, -X, +Y, -Y, +Z, -Z]
+    let face_corners: [[[f32; 3]; 4]; 6] = [
+        // +X face
+        [[max_x, min_y, min_z], [max_x, max_y, min_z], [max_x, max_y, max_z], [max_x, min_y, max_z]],
+        // -X face
+        [[min_x, min_y, max_z], [min_x, max_y, max_z], [min_x, max_y, min_z], [min_x, min_y, min_z]],
+        // +Y face
+        [[min_x, max_y, min_z], [min_x, max_y, max_z], [max_x, max_y, max_z], [max_x, max_y, min_z]],
+        // -Y face
+        [[min_x, min_y, max_z], [min_x, min_y, min_z], [max_x, min_y, min_z], [max_x, min_y, max_z]],
+        // +Z face
+        [[min_x, min_y, max_z], [max_x, min_y, max_z], [max_x, max_y, max_z], [min_x, max_y, max_z]],
+        // -Z face
+        [[max_x, min_y, min_z], [min_x, min_y, min_z], [min_x, max_y, min_z], [max_x, max_y, min_z]],
+    ];
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    let mut push_segment = |a: [f32; 3], b: [f32; 3]| {
+        let base = vertices.len() as u32;
+        vertices.push(OutlineVertex {
+            position: a,
+            other: [b[0], b[1], b[2], -1.0],
+            color: packed_color,
+            uv: [half_width_px, 0.0],
+            tex_index: 0.0,
+        });
+        vertices.push(OutlineVertex {
+            position: a,
+            other: [b[0], b[1], b[2], 1.0],
+            color: packed_color,
+            uv: [half_width_px, 0.0],
+            tex_index: 0.0,
+        });
+        vertices.push(OutlineVertex {
+            position: b,
+            other: [a[0], a[1], a[2], -1.0],
+            color: packed_color,
+            uv: [half_width_px, 0.0],
+            tex_index: 0.0,
+        });
+        vertices.push(OutlineVertex {
+            position: b,
+            other: [a[0], a[1], a[2], 1.0],
+            color: packed_color,
+            uv: [half_width_px, 0.0],
+            tex_index: 0.0,
+        });
+        indices.extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base,
+            base + 2,
+            base + 3,
+        ]);
+    };
+
+    for (face_idx, &visible) in visible_faces.iter().enumerate() {
+        if !visible {
+            continue;
+        }
+        let corners = &face_corners[face_idx];
+        push_segment(corners[0], corners[1]);
+        push_segment(corners[1], corners[2]);
+        push_segment(corners[2], corners[3]);
+        push_segment(corners[3], corners[0]);
+    }
+
+    (vertices, indices)
+}
 /// Builds a simple block-based player model at the given world position and yaw.
 ///
 /// The model consists of eight axis-aligned boxes (head, torso, two arms, two

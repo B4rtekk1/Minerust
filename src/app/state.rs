@@ -67,6 +67,8 @@ pub struct State {
     pub render_pipeline: wgpu::RenderPipeline,
     /// Transparent water render pipeline (blended over opaque geometry).
     pub water_pipeline: wgpu::RenderPipeline,
+    /// 3-D block outline overlay pipeline.
+    pub outline_pipeline: wgpu::RenderPipeline,
     /// Sun disc render pipeline.
     pub sun_pipeline: wgpu::RenderPipeline,
     /// Sky background render pipeline.
@@ -102,6 +104,9 @@ pub struct State {
 
     /// Uniform buffer containing per-frame data (view-proj, sun direction, etc.).
     pub uniform_buffer: wgpu::Buffer,
+    /// Small shadow settings buffer shared with the terrain shader.
+    #[allow(dead_code)]
+    pub shadow_config_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
     /// Bind group that exposes the shadow cascade array to the main render pass.
@@ -197,6 +202,8 @@ pub struct State {
     pub world: Arc<parking_lot::RwLock<World>>,
     /// First-person camera (position, yaw, pitch, velocity).
     pub camera: Camera,
+    /// Block currently under the crosshair and within reach, if any.
+    pub highlighted_block: Option<(i32, i32, i32)>,
     /// Snapshot of keyboard and mouse button state updated each event.
     pub input: InputState,
     /// Block-breaking progress tracker for the currently targeted block.

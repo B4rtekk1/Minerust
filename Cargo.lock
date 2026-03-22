@@ -369,9 +369,9 @@ checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 
 [[package]]
 name = "bytemuck"
-version = "1.24.0"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 dependencies = [
  "bytemuck_derive",
 ]
@@ -1153,9 +1153,9 @@ dependencies = [
 
 [[package]]
 name = "image"
-version = "0.25.9"
+version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6506c6c10786659413faa717ceebcb8f70731c0a60cbae39795fdf114519c1a"
+checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
@@ -1171,8 +1171,8 @@ dependencies = [
  "rayon",
  "rgb",
  "tiff",
- "zune-core 0.5.0",
- "zune-jpeg 0.5.8",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1459,7 +1459,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bytemuck",
- "bytes",
  "cgmath",
  "clap",
  "crossbeam-channel",
@@ -1503,9 +1502,9 @@ dependencies = [
 
 [[package]]
 name = "moxcms"
-version = "0.7.11"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac9557c559cd6fc9867e122e20d2cbefc9ca29d80d027a8e39310920ed2f0a97"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
@@ -1750,9 +1749,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.3"
+version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "once_cell_polyfill"
@@ -2066,9 +2065,9 @@ dependencies = [
 
 [[package]]
 name = "ravif"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef69c1990ceef18a116855938e74793a5f7496ee907562bd0857b6ac734ab285"
+checksum = "e52310197d971b0f5be7fe6b57530dcd27beb35c1b013f29d66c1ad73fbbcc45"
 dependencies = [
  "avif-serialize",
  "imgref",
@@ -2541,16 +2540,16 @@ dependencies = [
 
 [[package]]
 name = "tiff"
-version = "0.10.3"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9605de7fee8d9551863fd692cce7637f548dbd9db9180fcc07ccc6d26c336f"
+checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
 dependencies = [
  "fax",
  "flate2",
  "half",
  "quick-error",
  "weezl",
- "zune-jpeg 0.4.21",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2595,9 +2594,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.48.0"
+version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
 dependencies = [
  "bytes",
  "libc",
@@ -2694,9 +2693,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.22"
+version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "matchers",
  "nu-ansi-term",
@@ -3748,12 +3747,6 @@ dependencies = [
 
 [[package]]
 name = "zune-core"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f423a2c17029964870cfaabb1f13dfab7d092a62a29a89264f4d36990ca414a"
-
-[[package]]
-name = "zune-core"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "111f7d9820f05fd715df3144e254d6fc02ee4088b0644c0ffd0efc9e6d9d2773"
@@ -3769,18 +3762,9 @@ dependencies = [
 
 [[package]]
 name = "zune-jpeg"
-version = "0.4.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
-dependencies = [
- "zune-core 0.4.12",
-]
-
-[[package]]
-name = "zune-jpeg"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35aee689668bf9bd6f6f3a6c60bb29ba1244b3b43adfd50edd554a371da37d5"
 dependencies = [
- "zune-core 0.5.0",
+ "zune-core",
 ]

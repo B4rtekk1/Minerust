@@ -1,37 +1,30 @@
 struct Uniforms {
-    view_proj:          mat4x4<f32>,
-    inv_view_proj:      mat4x4<f32>,
-    csm_view_proj:      array<mat4x4<f32>, 4>,
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    csm_view_proj: array<mat4x4<f32>, 4>,
     csm_split_distances: vec4<f32>,
-    camera_pos:         vec3<f32>,
-    time:               f32,
-    sun_position:       vec3<f32>,
-    is_underwater:      f32,
-    _screen_size:       vec2<f32>,
-    _water_level:       f32,
-    _reflection_mode:   f32,
-    moon_position:      vec3<f32>,
-    _pad1:              f32,
+    camera_pos: vec3<f32>,
+    time: f32,
+    sun_position: vec3<f32>,
+    is_underwater: f32,
+    _screen_size: vec2<f32>,
+    _water_level: f32,
+    _reflection_mode: f32,
+    moon_position: vec3<f32>,
+    _pad1: f32,
 };
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var texture_atlas:   texture_2d_array<f32>;
-@group(0) @binding(2) var texture_sampler: sampler;
-@group(0) @binding(3) var shadow_map:      texture_depth_2d;
-@group(0) @binding(4) var shadow_sampler:  sampler_comparison;
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
 
-
-const PI:        f32 = 3.14159265359;
-const INV_16PI:  f32 = 0.01989436789;
-const INV_8PI:   f32 = 0.03978873578;
-const TWO_PI:    f32 = 6.28318530718;
-
+const TAU: f32 = 6.28318530718;
+const PI: f32 = 3.14159265359;
 
 struct VertexInput {
-    @location(0) position:  vec3<f32>,
-    @location(1) normal:    vec4<f32>,
-    @location(2) color:     vec4<f32>,
-    @location(3) uv:        vec2<f32>,
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
     @location(4) tex_index: f32,
 };
 
@@ -49,268 +42,229 @@ fn vs_sky(model: VertexInput) -> VertexOutput {
 }
 
 fn get_view_direction(ndc_xy: vec2<f32>) -> vec3<f32> {
-    let clip     = vec4<f32>(ndc_xy, 1.0, 1.0);
-    let world_h  = uniforms.inv_view_proj * clip;
+    let clip = vec4<f32>(ndc_xy, 1.0, 1.0);
+    let world_h = uniforms.inv_view_proj * clip;
     return normalize(world_h.xyz / world_h.w - uniforms.camera_pos);
 }
 
-fn hash3(p: vec3<f32>) -> f32 {
-    return fract(sin(dot(p, vec3<f32>(127.1, 311.7, 74.3))) * 43758.5453);
+fn hash11(p: f32) -> f32 {
+    return fract(sin(p * 127.1) * 43758.5453);
+}
+
+fn hash21(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
 fn rayleigh_phase(cos_theta: f32) -> f32 {
-    return 3.0 * INV_16PI * (1.0 + cos_theta * cos_theta);
+    return 0.75 * (1.0 + cos_theta * cos_theta);
 }
 
 fn mie_phase(cos_theta: f32, g: f32) -> f32 {
-    let g2    = g * g;
-    let denom = pow(max(1.0 + g2 - 2.0 * g * cos_theta, 0.0001), 1.5);
-    return 3.0 * INV_8PI * ((1.0 - g2) * (1.0 + cos_theta * cos_theta))
-           / ((2.0 + g2) * denom);
+    let g2 = g * g;
+    let denom = pow(max(1.0 + g2 - 2.0 * g * cos_theta, 0.001), 1.5);
+    return 1.5 * (1.0 - g2) * (1.0 + cos_theta * cos_theta) / ((2.0 + g2) * denom);
 }
 
-fn mie_normalized(cos_theta: f32, g: f32) -> f32 {
-    return mie_phase(cos_theta, g) / mie_phase(1.0, g);
+fn atmospheric_gradient(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let h = clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0);
+    let sun_h = sun_dir.y;
+    let day = smoothstep(-0.02, 0.22, sun_h);
+    let night = smoothstep(0.10, -0.10, sun_h);
+    let dusk = 1.0 - smoothstep(0.02, 0.34, abs(sun_h));
+
+    let zenith_day = vec3<f32>(0.18, 0.44, 0.88);
+    let horizon_day = vec3<f32>(0.66, 0.82, 0.98);
+    let zenith_night = vec3<f32>(0.002, 0.005, 0.015);
+    let horizon_night = vec3<f32>(0.010, 0.014, 0.034);
+    let dusk_low = vec3<f32>(0.96, 0.40, 0.18);
+    let dusk_high = vec3<f32>(0.24, 0.10, 0.28);
+
+    var sky = mix(horizon_day, zenith_day, pow(h, 0.78)) * day;
+    sky += mix(horizon_night, zenith_night, pow(h, 0.72)) * night;
+    sky += mix(dusk_low, dusk_high, pow(h, 1.1)) * dusk * 0.52;
+
+    let horizon_band = 1.0 - smoothstep(0.0, 0.32, abs(view_dir.y));
+    sky += vec3<f32>(0.16, 0.22, 0.30) * horizon_band * (0.55 * day + 0.12 * dusk);
+
+    return sky;
 }
 
-fn star_field(view_dir: vec3<f32>, time: f32) -> vec3<f32> {
-    let scale    = 300.0;
-    let p        = floor(view_dir * scale);
-    let h        = hash3(p);
+fn atmospheric_scatter(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let sun_h = sun_dir.y;
+    let day = smoothstep(-0.08, 0.10, sun_h);
+    let dusk = 1.0 - smoothstep(0.0, 0.30, abs(sun_h));
+    let night = smoothstep(0.12, -0.08, sun_h);
 
-    let tier_dim    = step(0.970, h) * (1.0 - step(0.997, h));
-    let tier_bright = step(0.997, h);
-    let brightness  = tier_dim * 0.45 + tier_bright * 1.0;
-    if brightness < 0.001 { return vec3<f32>(0.0); }
+    let cos_theta = dot(view_dir, sun_dir);
+    let mu = clamp(cos_theta, -1.0, 1.0);
+    let rayleigh = rayleigh_phase(mu);
+    let mie = mie_phase(mu, 0.78);
 
-    let horizon_fade = clamp(view_dir.y * 3.0 + 0.5, 0.0, 1.0);
+    let view_height = clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0);
+    let altitude = pow(view_height, 0.6);
+    let horizon = 1.0 - smoothstep(0.0, 0.42, abs(view_dir.y));
 
-    let twinkle_phase = h * TWO_PI;
-    let twinkle_speed = mix(1.5, 4.0, fract(h * 73.156));
-    let twinkle = 0.75 + 0.25 * sin(time * twinkle_speed + twinkle_phase);
+    let rayleigh_color = vec3<f32>(0.14, 0.28, 0.62) * rayleigh;
+    let mie_color = vec3<f32>(1.0, 0.72, 0.42) * mie;
+    let dusk_tint = mix(vec3<f32>(1.0, 0.40, 0.16), vec3<f32>(0.60, 0.28, 0.50), altitude);
 
-    let warm_star = vec3<f32>(1.00, 0.88, 0.72);
+    var scatter = rayleigh_color * (0.45 * day + 0.12 * dusk);
+    scatter += mie_color * (0.30 * day + 0.45 * dusk) * horizon;
+    scatter += dusk_tint * dusk * horizon * 0.20;
+    scatter += vec3<f32>(0.010, 0.012, 0.020) * night * altitude;
+
+    return scatter;
+}
+
+fn sun_glow(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let sun_h = sun_dir.y;
+    let above = smoothstep(-0.08, 0.02, sun_h);
+    if above <= 0.001 {
+        return vec3<f32>(0.0);
+    }
+
+    let cos_s = clamp(dot(view_dir, sun_dir), 0.0, 1.0);
+    let core = pow(cos_s, 160.0);
+    let inner = pow(cos_s, 36.0);
+    let outer = pow(cos_s, 8.0);
+    let halo = pow(cos_s, 2.5) * 0.03;
+    let horizon_boost = 1.0 - smoothstep(-0.12, 0.42, sun_h);
+
+    let warm = mix(vec3<f32>(1.0, 0.82, 0.54), vec3<f32>(1.0, 0.97, 0.93), smoothstep(0.12, 0.75, sun_h));
+    return warm * (core * 1.8 + inner * 0.52 + outer * 0.12 + halo * 0.8)
+        * above * (0.65 + 0.45 * horizon_boost);
+}
+
+fn cloud_noise(p: vec2<f32>) -> f32 {
+    let a = sin(dot(p, vec2<f32>(1.3, 1.7)) + 0.3) * 0.5 + 0.5;
+    let b = sin(dot(p, vec2<f32>(2.1, 1.2)) + 1.7) * 0.5 + 0.5;
+    let c = sin(dot(p, vec2<f32>(3.7, 2.9)) + 2.6) * 0.5 + 0.5;
+    let d = sin(dot(p, vec2<f32>(5.4, 4.1)) + 4.2) * 0.5 + 0.5;
+    return a * 0.34 + b * 0.26 + c * 0.22 + d * 0.18;
+}
+
+fn cloud_layer(view_dir: vec3<f32>, sun_dir: vec3<f32>, time: f32) -> vec3<f32> {
+    let sun_h = sun_dir.y;
+    let day = smoothstep(-0.03, 0.20, sun_h);
+    let dusk = 1.0 - smoothstep(0.04, 0.30, abs(sun_h));
+    if day <= 0.001 && dusk <= 0.001 {
+        return vec3<f32>(0.0);
+    }
+
+    let band = pow(clamp(1.0 - abs(view_dir.y) * 1.18, 0.0, 1.0), 1.7);
+    if band <= 0.001 {
+        return vec3<f32>(0.0);
+    }
+
+    let lon = atan2(view_dir.z, view_dir.x) / TAU + 0.5;
+    let lat = view_dir.y * 0.5 + 0.5;
+    let p = vec2<f32>(lon * 5.2 + time * 0.0025, lat * 2.2);
+    let drift = vec2<f32>(time * 0.008, time * 0.003);
+
+    let n = cloud_noise(p + drift * 0.18);
+    let n2 = cloud_noise(p * 1.8 - drift * 0.8);
+    let coverage = smoothstep(0.60, 0.90, n * 0.70 + n2 * 0.30);
+    let wisps = smoothstep(0.52, 0.78, cloud_noise(p * 2.9 + drift * 1.3));
+    let layer = coverage * band * band;
+    if layer <= 0.001 {
+        return vec3<f32>(0.0);
+    }
+
+    let sun_light = pow(max(dot(view_dir, sun_dir), 0.0), 12.0) * 0.30;
+    let horizon_warm = vec3<f32>(1.0, 0.74, 0.50);
+    let cloud_day = vec3<f32>(0.90, 0.93, 0.97);
+    let cloud_shadow = vec3<f32>(0.48, 0.54, 0.65);
+    let dusk_tint = mix(vec3<f32>(1.0, 0.64, 0.42), vec3<f32>(0.78, 0.36, 0.48), lat);
+
+    var tint = mix(cloud_shadow, cloud_day, day);
+    tint = mix(tint, dusk_tint, dusk * 0.75);
+    tint += horizon_warm * (1.0 - smoothstep(0.0, 0.20, abs(view_dir.y))) * dusk * 0.16;
+
+    return tint * layer * (0.24 + 0.34 * day + sun_light * 0.20) * (0.82 + wisps * 0.18);
+}
+
+fn horizon_haze(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let band = pow(1.0 - smoothstep(0.0, 0.36, abs(view_dir.y)), 1.4);
+    let sun_h = sun_dir.y;
+    let dusk = 1.0 - smoothstep(0.0, 0.28, abs(sun_h));
+    let day = smoothstep(-0.02, 0.18, sun_h);
+    let warm = vec3<f32>(0.98, 0.58, 0.30);
+    let cool = vec3<f32>(0.20, 0.32, 0.48);
+    return mix(cool, warm, dusk) * band * (0.10 + 0.05 * day);
+}
+
+fn star_field(view_dir: vec3<f32>, time: f32, night_factor: f32) -> vec3<f32> {
+    if night_factor < 0.01 {
+        return vec3<f32>(0.0);
+    }
+
+    let p = floor(view_dir * 420.0);
+    let h = hash21(p.xz + vec2<f32>(p.y, p.y * 0.37));
+    if h < 0.978 {
+        return vec3<f32>(0.0);
+    }
+
+    let twinkle = 0.75 + 0.25 * sin(time * mix(1.5, 4.0, hash11(h * 73.0)) + h * TAU);
+    let horizon = clamp(view_dir.y * 2.2 + 0.22, 0.0, 1.0);
+    let brightness = smoothstep(0.978, 0.9995, h) * twinkle * horizon * night_factor;
+
+    let warm_star = vec3<f32>(1.00, 0.90, 0.74);
     let cool_star = vec3<f32>(0.78, 0.88, 1.00);
-    let star_color = mix(warm_star, cool_star, fract(h * 17.31));
+    let tint = mix(warm_star, cool_star, hash11(h * 91.7));
 
-    return star_color * brightness * twinkle * horizon_fade;
+    return tint * brightness * 1.25;
 }
 
-fn moon_color(view_dir: vec3<f32>, moon_dir: vec3<f32>,
-              sun_dir: vec3<f32>, night_factor: f32) -> vec3<f32> {
-    if night_factor < 0.01 { return vec3<f32>(0.0); }
+fn moon_disk(view_dir: vec3<f32>, moon_dir: vec3<f32>, night_factor: f32) -> vec3<f32> {
+    if night_factor < 0.01 {
+        return vec3<f32>(0.0);
+    }
 
     let cos_m = dot(view_dir, moon_dir);
-    if cos_m < 0.998 {
-        if cos_m < 0.985 { return vec3<f32>(0.0); }
-        let halo_w = pow(max(0.0, cos_m), 12.0)  * 0.012;
-        let halo_i = pow(max(0.0, cos_m), 64.0)  * 0.05;
-        return vec3<f32>(0.50, 0.55, 0.72) * (halo_w + halo_i) * night_factor;
+    if cos_m < 0.9985 {
+        let halo = pow(max(cos_m, 0.0), 64.0) * 0.03 + pow(max(cos_m, 0.0), 12.0) * 0.008;
+        return vec3<f32>(0.52, 0.58, 0.76) * halo * night_factor;
     }
 
-    let right   = normalize(cross(moon_dir, vec3<f32>(0.0, 1.0, 0.0)));
-    let up      = normalize(cross(right, moon_dir));
-    let moon_r  = 0.004;
-    let disk_uv = vec2<f32>(dot(view_dir - moon_dir, right),
-                            dot(view_dir - moon_dir, up)) / moon_r;
+    var right = cross(moon_dir, vec3<f32>(0.0, 1.0, 0.0));
+    if length(right) < 0.01 {
+        right = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    right = normalize(right);
+    let up = normalize(cross(right, moon_dir));
+
+    let disk_uv = vec2<f32>(dot(view_dir - moon_dir, right), dot(view_dir - moon_dir, up)) / 0.0045;
     let disk_r2 = dot(disk_uv, disk_uv);
-    if disk_r2 > 1.0 { return vec3<f32>(0.0); }
+    if disk_r2 > 1.0 {
+        return vec3<f32>(0.0);
+    }
 
     let limb = sqrt(max(0.0, 1.0 - disk_r2));
-    let limb_darkening = mix(0.55, 1.0, limb);
+    let limb_darkening = mix(0.58, 1.0, limb);
+    let disk_mask = 1.0 - smoothstep(0.95, 1.0, disk_r2);
+    let surface_tint = mix(
+        vec3<f32>(0.92, 0.88, 0.74),
+        vec3<f32>(0.85, 0.91, 0.98),
+        clamp(moon_dir.y * 2.0, 0.0, 1.0),
+    );
 
-    let cos_phase  = dot(moon_dir, sun_dir);
-    let sun_disk_x = dot(sun_dir, right);
-    let sun_disk_y = dot(sun_dir, up);
-    let lit_side   = sun_disk_x * disk_uv.x + sun_disk_y * disk_uv.y;
-    let terminator = smoothstep(-0.04, 0.04, lit_side + cos_phase * 0.05);
+    let halo = vec3<f32>(0.52, 0.58, 0.76)
+        * (pow(max(cos_m, 0.0), 20.0) * 0.014 + pow(max(cos_m, 0.0), 72.0) * 0.045);
 
-    let earthshine = (1.0 - terminator) * 0.035 * vec3<f32>(0.25, 0.35, 0.60);
-
-    let altitude_t   = clamp(moon_dir.y * 2.0, 0.0, 1.0);
-    let moon_surface = mix(vec3<f32>(0.92, 0.86, 0.72),
-                           vec3<f32>(0.90, 0.92, 0.98),
-                           altitude_t);
-
-    let disk_color = moon_surface * limb_darkening * terminator + earthshine;
-
-    let halo_w = pow(max(0.0, cos_m), 12.0) * 0.012;
-    let halo_i = pow(max(0.0, cos_m), 64.0) * 0.05;
-    let halo   = vec3<f32>(0.50, 0.55, 0.72) * (halo_w + halo_i);
-
-    return (disk_color + halo) * night_factor;
-}
-
-struct SkyParams {
-    day_factor:    f32,
-    night_factor:  f32,
-    sunset_factor: f32,
-    golden_hour:   f32,
-    twilight:      f32,
-    cos_theta:     f32,
-    cos_azimuth:   f32,
-    view_altitude: f32,
-    view_horiz_len: f32,
-    height_factor: f32,
-    curved_height: f32,
-};
-
-fn make_sky_params(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> SkyParams {
-    var p: SkyParams;
-    let sh = sun_dir.y;
-
-    p.day_factor    = clamp(sh * 5.0, 0.0, 1.0);
-    p.night_factor  = clamp(-sh * 4.0 - 0.2, 0.0, 1.0);
-    p.sunset_factor = smoothstep(0.30, 0.0, abs(sh));
-    p.golden_hour   = smoothstep(0.18, 0.0, sh) * smoothstep(-0.10, 0.12, sh);
-    p.twilight      = smoothstep(0.0, -0.15, sh) * smoothstep(-0.25, -0.04, sh);
-
-    p.view_altitude  = view_dir.y;
-    let vh_raw       = vec3<f32>(view_dir.x, 0.0, view_dir.z);
-    p.view_horiz_len = length(vh_raw);
-    let vh           = vh_raw / max(p.view_horiz_len, 0.0001);
-    let sh_raw       = vec3<f32>(sun_dir.x, 0.0, sun_dir.z);
-    let sh_dir       = sh_raw / max(length(sh_raw), 0.0001);
-
-    p.cos_theta   = dot(view_dir, sun_dir);
-    p.cos_azimuth = dot(vh, sh_dir);
-
-    p.height_factor = clamp(p.view_altitude * 0.5 + 0.5, 0.0, 1.0);
-    p.curved_height = pow(p.height_factor, 0.75);
-
-    return p;
-}
-
-fn sky_base(p: SkyParams) -> vec3<f32> {
-    let day   = mix(vec3<f32>(0.60, 0.78, 0.96), vec3<f32>(0.18, 0.38, 0.82), p.curved_height);
-    let night = mix(vec3<f32>(0.010, 0.012, 0.025), vec3<f32>(0.001, 0.002, 0.010), p.height_factor);
-    return day * p.day_factor + night * p.night_factor;
-}
-
-fn sky_rayleigh(p: SkyParams) -> vec3<f32> {
-    let r = rayleigh_phase(p.cos_theta);
-    let scatter = vec3<f32>(0.28, 0.52, 1.00) * r * 0.15;
-    return scatter * p.curved_height * p.day_factor;
-}
-
-fn sky_sunset_glow(p: SkyParams) -> vec3<f32> {
-    if p.sunset_factor < 0.01 { return vec3<f32>(0.0); }
-
-    let intensity = smoothstep(-0.14, 0.06, p.cos_theta - 0.0)
-                  * p.sunset_factor;
-
-    let prox_3d = max(0.0, p.cos_theta);
-    let prox_az = max(0.0, p.cos_azimuth);
-    let prox    = mix(prox_az, prox_3d, 0.5);
-
-    let mie_s = mie_normalized(p.cos_theta, 0.76);
-
-    let glow_core = pow(prox_3d, 90.0);
-    let glow_near = pow(prox,    10.0);
-    let glow_wide = pow(prox,     3.5);
-
-    let horiz_band  = pow(1.0 - abs(p.view_altitude), 1.2);
-    let horiz_boost = horiz_band * smoothstep(0.0, 0.12, p.view_horiz_len);
-
-    var c = vec3<f32>(0.0);
-    c += vec3<f32>(1.00, 0.90, 0.50) * glow_core * 1.5;
-    c += vec3<f32>(1.00, 0.45, 0.10) * glow_near * 0.9 * horiz_boost;
-    c += vec3<f32>(0.85, 0.20, 0.08) * glow_wide * 0.35 * horiz_boost;
-    c += vec3<f32>(1.00, 0.65, 0.25) * clamp(mie_s, 0.0, 1.0) * 0.4;
-
-    return c * intensity;
-}
-
-fn sky_golden_hour_tint(sky: vec3<f32>, p: SkyParams) -> vec3<f32> {
-    if p.golden_hour < 0.01 { return sky; }
-    return sky * mix(vec3<f32>(1.0), vec3<f32>(1.10, 0.90, 0.68), p.golden_hour * 0.45);
-}
-
-fn sky_twilight(p: SkyParams) -> vec3<f32> {
-    if p.twilight < 0.01 { return vec3<f32>(0.0); }
-
-    let band = vec3<f32>(0.14, 0.10, 0.30) * (1.0 - p.height_factor)
-             + vec3<f32>(0.06, 0.04, 0.18) * p.height_factor;
-
-    let arch = pow(max(0.0, -p.cos_azimuth), 4.0)
-             * pow(1.0 - abs(p.view_altitude), 2.0)
-             * p.twilight * 0.25;
-
-    var c = band * 0.5 * p.twilight * 0.6;
-    c    += vec3<f32>(0.50, 0.25, 0.38) * arch;
-    return c;
-}
-
-fn sky_haze(p: SkyParams) -> vec3<f32> {
-    let haze_amount = pow(1.0 - abs(p.view_altitude), 5.0) * p.day_factor * 0.55;
-    let haze_color  = mix(vec3<f32>(0.78, 0.85, 0.95),
-                          vec3<f32>(0.92, 0.88, 0.82), p.golden_hour);
-    return haze_color * 0.18 * haze_amount;
-}
-
-fn sky_horizon_fog(sky: vec3<f32>, p: SkyParams) -> vec3<f32> {
-    let fog_depth = clamp(smoothstep(0.05, -0.30, p.view_altitude), 0.0, 1.0);
-    let fog_color = mix(vec3<f32>(0.68, 0.72, 0.78),
-                        vec3<f32>(0.04, 0.04, 0.08), p.night_factor);
-    return mix(sky, fog_color, fog_depth * 0.7);
-}
-
-fn calculate_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_dir: vec3<f32>) -> vec3<f32> {
-    let p = make_sky_params(view_dir, sun_dir);
-
-    var sky = sky_base(p);
-    sky    += sky_rayleigh(p);
-
-    let glow = sky_sunset_glow(p);
-    sky      = mix(sky, sky + glow, p.sunset_factor);
-
-    sky = sky_golden_hour_tint(sky, p);
-    sky += sky_twilight(p);
-    sky += sky_haze(p);
-    sky  = sky_horizon_fog(sky, p);
-
-    if p.night_factor > 0.01 {
-        let star_rgb = star_field(view_dir, uniforms.time);
-        sky += star_rgb * p.night_factor * 0.9;
-    }
-
-    sky += moon_color(view_dir, moon_dir, sun_dir, p.night_factor);
-
-    return clamp(sky, vec3<f32>(0.0), vec3<f32>(2.0));
+    return (surface_tint * limb_darkening * disk_mask + halo) * night_factor;
 }
 
 fn underwater_color(ndc_pos: vec2<f32>, view_dir: vec3<f32>, time: f32) -> vec4<f32> {
     let uv = ndc_pos * 0.5 + 0.5;
+    let ripples = sin(uv.x * 12.0 + time * 1.8) * sin(uv.y * 8.5 - time * 1.2);
+    let caustics = ripples * 0.03 + sin((uv.x + uv.y) * 16.0 + time * 0.7) * 0.015;
 
-    const FREQ_A: f32 = 9.0;  const FREQ_B: f32  = 7.0;
-    const FREQ_C: f32 = 14.0; const FREQ_D: f32  = 11.0;
-    const FREQ_E: f32 = 8.0;
-    let w1 = sin(uv.x * FREQ_A + time * 1.6) * sin(uv.y * FREQ_B + time * 1.3);
-    let w2 = sin(uv.x * FREQ_C - time * 2.1 + 0.5) * sin(uv.y * FREQ_D + time * 0.9);
-    let w3 = sin((uv.x + uv.y) * FREQ_E + time * 1.1);
-    let caustics = (w1 * 0.5 + w2 * 0.3 + w3 * 0.2) * 0.035 + 0.04;
+    let depth_fog = mix(vec3<f32>(0.012, 0.075, 0.22), vec3<f32>(0.05, 0.20, 0.36), uv.y);
+    let up = max(0.0, view_dir.y);
+    let light_rays = up * up * (sin(uv.x * 18.0 + time * 2.0) * 0.5 + 0.5) * 0.10;
+    let tint = vec3<f32>(0.18, 0.42, 0.58) + vec3<f32>(0.08, 0.12, 0.14) * caustics;
 
-    let depth_fog = mix(vec3<f32>(0.015, 0.07, 0.22),
-                        vec3<f32>(0.04,  0.18, 0.38), uv.y);
-
-    let up           = max(0.0, view_dir.y);
-    let ray_shimmer  = sin(uv.x * 20.0 + time * 3.0) * 0.5 + 0.5;
-    let light_rays   = up * up * ray_shimmer * 0.12 * vec3<f32>(0.15, 0.30, 0.20);
-
-    let surface_glint = pow(up, 4.0)
-                      * (sin(uv.x * 40.0 + time * 5.0) * 0.5 + 0.5)
-                      * 0.25;
-    let surface_color = vec3<f32>(0.20, 0.50, 0.60) * surface_glint;
-
-    let dist_t   = clamp(length(ndc_pos) * 0.5, 0.0, 1.0);
-    let chroma   = vec3<f32>(
-        exp(-dist_t * 3.0),
-        exp(-dist_t * 1.8),
-        exp(-dist_t * 0.6),
-    );
-
-    var result = (depth_fog + caustics + light_rays + surface_color) * chroma;
-    return vec4<f32>(result, 1.0);
+    return vec4<f32>((depth_fog + tint + light_rays) * (1.0 + caustics), 1.0);
 }
 
 @fragment
@@ -321,8 +275,27 @@ fn fs_sky(in: VertexOutput) -> @location(0) vec4<f32> {
         return underwater_color(in.ndc_pos, view_dir, uniforms.time);
     }
 
-    let sun_dir  = uniforms.sun_position;
-    let moon_dir = uniforms.moon_position;
+    let sun_dir = normalize(uniforms.sun_position);
+    let moon_dir = normalize(uniforms.moon_position);
+    let sun_h = sun_dir.y;
+    let night = clamp(-sun_h * 4.0 - 0.05, 0.0, 1.0);
+    let dusk = 1.0 - smoothstep(0.0, 0.30, abs(sun_h));
 
-    return vec4<f32>(calculate_sky_color(view_dir, sun_dir, moon_dir), 1.0);
+    var sky = atmospheric_gradient(view_dir, sun_dir);
+    sky += atmospheric_scatter(view_dir, sun_dir);
+    sky += horizon_haze(view_dir, sun_dir);
+    sky += sun_glow(view_dir, sun_dir);
+    sky += cloud_layer(view_dir, sun_dir, uniforms.time);
+    sky += star_field(view_dir, uniforms.time, night);
+    sky += moon_disk(view_dir, moon_dir, night);
+
+    if dusk > 0.01 {
+        let warm_band = pow(max(0.0, 1.0 - abs(view_dir.y)), 2.6) * dusk;
+        sky += vec3<f32>(1.0, 0.40, 0.16) * warm_band * 0.08;
+    }
+
+    sky *= vec3<f32>(0.98, 0.99, 1.02);
+    sky = clamp(sky, vec3<f32>(0.0), vec3<f32>(1.8));
+
+    return vec4<f32>(sky, 1.0);
 }

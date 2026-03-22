@@ -9,11 +9,17 @@ struct Uniforms {
     is_underwater:       f32,
 };
 
+struct ShadowConfig {
+    shadow_map_size: f32,
+    pcf_samples:     u32,
+}
+
 @group(0) @binding(0) var<uniform> uniforms:       Uniforms;
 @group(0) @binding(1) var texture_atlas:           texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler:         sampler;
 @group(0) @binding(3) var shadow_map:              texture_depth_2d_array;
 @group(0) @binding(4) var shadow_sampler:          sampler_comparison;
+@group(0) @binding(5) var<uniform> shadow_config: ShadowConfig;
 
 
 struct VertexInput {
@@ -55,9 +61,6 @@ fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
 
 
 const PI:              f32 = 3.14159265359;
-const SHADOW_MAP_SIZE: f32 = 2048.0;
-const PCF_SAMPLES:     i32 = 16;
-
 
 fn calculate_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     let sun_height    = sun_dir.y;
@@ -104,8 +107,7 @@ fn calculate_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
 
 
 fn world_space_noise(world_pos: vec3<f32>) -> f32 {
-    let cell = floor(world_pos);
-    return fract(sin(dot(cell.xz, vec2<f32>(127.1, 311.7))) * 43758.5453);
+    return fract(sin(dot(world_pos.xz, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
 fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
@@ -144,8 +146,9 @@ fn sample_cascade_pcf(
     let edge_fade = smoothstep(0.0, em, uv.x) * smoothstep(1.0, 1.0 - em, uv.x)
                   * smoothstep(0.0, em, uv.y) * smoothstep(1.0, 1.0 - em, uv.y);
 
+    let pcf_samples = max(i32(shadow_config.pcf_samples), 1);
     var shadow = 0.0;
-    for (var i = 0; i < PCF_SAMPLES; i++) {
+    for (var i = 0; i < pcf_samples; i++) {
         let suv = uv + get_poisson_sample(i, rotation) * filter_radius;
         if any(suv < vec2<f32>(0.0)) || any(suv > vec2<f32>(1.0)) {
             shadow += select(0.0, 1.0, is_last);
@@ -155,7 +158,7 @@ fn sample_cascade_pcf(
         }
     }
 
-    return mix(1.0, shadow / f32(PCF_SAMPLES), edge_fade);
+    return mix(1.0, shadow / f32(pcf_samples), edge_fade);
 }
 
 fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
@@ -190,7 +193,8 @@ fn calculate_shadow(
     let bias = clamp(0.004 + 0.008 * sin_t / max(cos_t, 0.05), 0.004, 0.02);
 
     let rot    = world_space_noise(world_pos) * 2.0 * PI;
-    let radius = 5.0 / SHADOW_MAP_SIZE;
+    let shadow_map_size = max(shadow_config.shadow_map_size, 1.0);
+    let radius = 3.0 / shadow_map_size;
 
     let cb = select_cascade_with_blend(view_depth);
     let ci = i32(cb.x);

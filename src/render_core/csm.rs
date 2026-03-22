@@ -70,8 +70,6 @@ impl CsmManager {
                 radius = radius.max(dist);
             }
 
-            radius = (radius * 16.0).ceil() / 16.0;
-
             let sun_distance = radius * 2.0;
             let light_pos = Point3::new(
                 center.x + sun_dir.x * sun_distance,
@@ -166,22 +164,29 @@ fn snap_to_texel_grid(
     world_center: Point3<f32>,
     shadow_map_size: f32,
 ) -> Matrix4<f32> {
-    // Project the frustum center into shadow NDC space.
-    let c = matrix * cgmath::Vector4::new(world_center.x, world_center.y, world_center.z, 1.0);
-    // c.w should be 1.0 for an ortho projection, but divide anyway for safety.
-    let cx = c.x / c.w;
-    let cy = c.y / c.w;
+    if shadow_map_size <= 1.0 {
+        return matrix;
+    }
 
-    // One texel in NDC space.
+    // Project the cascade center into shadow clip space, then shift the
+    // matrix so the center lands on the nearest texel boundary. This keeps
+    // the shadow map stable as the camera moves.
+    let center_clip =
+        matrix * cgmath::Vector4::new(world_center.x, world_center.y, world_center.z, 1.0);
+    let inv_w = if center_clip.w.abs() > f32::EPSILON {
+        1.0 / center_clip.w
+    } else {
+        1.0
+    };
+    let center_ndc_x = center_clip.x * inv_w;
+    let center_ndc_y = center_clip.y * inv_w;
+
     let texel_ndc = 2.0 / shadow_map_size;
+    let snapped_ndc_x = (center_ndc_x / texel_ndc).round() * texel_ndc;
+    let snapped_ndc_y = (center_ndc_y / texel_ndc).round() * texel_ndc;
 
-    // How far is cx/cy from the nearest texel boundary?
-    let dx = (cx / texel_ndc).round() * texel_ndc - cx;
-    let dy = (cy / texel_ndc).round() * texel_ndc - cy;
+    let delta_x = snapped_ndc_x - center_ndc_x;
+    let delta_y = snapped_ndc_y - center_ndc_y;
 
-    // Shift the matrix translation by that amount so the center snaps.
-    let mut result = matrix;
-    result.w.x += dx;
-    result.w.y += dy;
-    result
+    Matrix4::from_translation(Vector3::new(delta_x, delta_y, 0.0)) * matrix
 }

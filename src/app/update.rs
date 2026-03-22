@@ -162,20 +162,20 @@ impl State {
                 }
             }
 
-            // Raycast only when the mouse is captured and a mouse button is
-            // held — avoid the work every frame when the player is idle.
-            let (raycast_result, target_block) =
-                if self.mouse_captured && (self.input.left_mouse || self.input.right_mouse) {
-                    let raycast = self.camera.raycast(&*world, 5.0);
-                    if let Some((bx, by, bz, _, _, _)) = raycast {
-                        let block = world.get_block(bx, by, bz);
-                        (Some((bx, by, bz, 0, 0, 0)), Some(block))
-                    } else {
-                        (None, None)
-                    }
+            // Raycast whenever the player is actively controlling the camera
+            // so the targeted block outline stays visible without requiring a
+            // mouse button press.
+            let (raycast_result, target_block) = if self.mouse_captured {
+                let raycast = self.camera.raycast(&*world, 5.0);
+                if let Some((bx, by, bz, _, _, _)) = raycast {
+                    let block = world.get_block(bx, by, bz);
+                    (Some((bx, by, bz, 0, 0, 0)), Some(block))
                 } else {
                     (None, None)
-                };
+                }
+            } else {
+                (None, None)
+            };
 
             // Check which block the camera eye is inside (used for the
             // underwater post-process effect).
@@ -193,6 +193,10 @@ impl State {
                 eye_block,
             }
         }; // Read lock released here.
+
+        self.highlighted_block = snapshot
+            .raycast_result
+            .map(|(bx, by, bz, _, _, _)| (bx, by, bz));
 
         // Update the cached player chunk position after releasing the lock.
         if player_chunk_moved {
