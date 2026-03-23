@@ -1,16 +1,16 @@
-use cgmath::{Matrix4, Point3, SquareMatrix, Vector3};
+use glam::{Mat4, Vec3, Vec4};
 
 use crate::constants::{CSM_CASCADE_COUNT, CSM_CASCADE_SPLITS};
 #[derive(Debug, Clone, Copy)]
 pub struct CascadeData {
-    pub view_proj: Matrix4<f32>,
+    pub view_proj: Mat4,
     pub split_distance: f32,
 }
 
 impl Default for CascadeData {
     fn default() -> Self {
         Self {
-            view_proj: Matrix4::identity(),
+            view_proj: Mat4::IDENTITY,
             split_distance: 0.0,
         }
     }
@@ -28,14 +28,14 @@ impl CsmManager {
     }
     pub fn update(
         &mut self,
-        camera_view: &Matrix4<f32>,
-        sun_dir: Vector3<f32>,
+        camera_view: &Mat4,
+        sun_dir: Vec3,
         near: f32,
         far: f32,
         aspect: f32,
         fov_y: f32,
     ) {
-        let inv_view = camera_view.invert().unwrap_or(Matrix4::identity());
+        let inv_view = camera_view.inverse();
 
         let mut split_distances = [0.0_f32; CSM_CASCADE_COUNT + 1];
         split_distances[0] = near;
@@ -51,41 +51,30 @@ impl CsmManager {
             let frustum_corners =
                 calculate_frustum_corners(cascade_near, cascade_far, fov_y, aspect, &inv_view);
 
-            let mut center = Point3::new(0.0, 0.0, 0.0);
+            let mut center = Vec3::ZERO;
             for corner in &frustum_corners {
-                center.x += corner.x;
-                center.y += corner.y;
-                center.z += corner.z;
+                center += *corner;
             }
-            center.x /= 8.0;
-            center.y /= 8.0;
-            center.z /= 8.0;
+            center /= 8.0;
 
             let mut radius = 0.0_f32;
             for corner in &frustum_corners {
-                let dist = ((corner.x - center.x).powi(2)
-                    + (corner.y - center.y).powi(2)
-                    + (corner.z - center.z).powi(2))
-                    .sqrt();
+                let dist = (*corner - center).length();
                 radius = radius.max(dist);
             }
 
             let sun_distance = radius * 2.0;
-            let light_pos = Point3::new(
-                center.x + sun_dir.x * sun_distance,
-                center.y + sun_dir.y * sun_distance,
-                center.z + sun_dir.z * sun_distance,
-            );
+            let light_pos = center + sun_dir * sun_distance;
 
             let light_up = if sun_dir.y.abs() > 0.99 {
-                Vector3::new(0.0, 0.0, 1.0)
+                Vec3::Z
             } else {
-                Vector3::new(0.0, 1.0, 0.0)
+                Vec3::Y
             };
 
-            let light_view = Matrix4::look_at_rh(light_pos, center, light_up);
+            let light_view = Mat4::look_at_rh(light_pos, center, light_up);
 
-            let light_proj = cgmath::ortho(
+            let light_proj = Mat4::orthographic_rh(
                 -radius,
                 radius,
                 -radius,
@@ -101,9 +90,12 @@ impl CsmManager {
                 crate::constants::CSM_SHADOW_MAP_SIZE as f32,
             );
 
-            let opengl_to_wgpu = Matrix4::new(
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 1.0,
-            );
+            let opengl_to_wgpu = Mat4::from_cols_array(&[
+                1.0, 0.0, 0.0, 0.0, 
+                0.0, 1.0, 0.0, 0.0, 
+                0.0, 0.0, 0.5, 0.0, 
+                0.0, 0.0, 0.5, 1.0,
+            ]);
 
             self.cascades[cascade_idx] = CascadeData {
                 view_proj: opengl_to_wgpu * shadow_matrix,
@@ -123,8 +115,8 @@ fn calculate_frustum_corners(
     far: f32,
     fov_y: f32,
     aspect: f32,
-    inv_view: &Matrix4<f32>,
-) -> [Point3<f32>; 8] {
+    inv_view: &Mat4,
+) -> [Vec3; 8] {
     let tan_half_fov = (fov_y / 2.0).tan();
 
     let near_height = near * tan_half_fov;
@@ -134,22 +126,22 @@ fn calculate_frustum_corners(
 
     let corners_view = [
         // Near plane
-        Point3::new(-near_width, -near_height, -near),
-        Point3::new(near_width, -near_height, -near),
-        Point3::new(near_width, near_height, -near),
-        Point3::new(-near_width, near_height, -near),
+        Vec3::new(-near_width, -near_height, -near),
+        Vec3::new(near_width, -near_height, -near),
+        Vec3::new(near_width, near_height, -near),
+        Vec3::new(-near_width, near_height, -near),
         // Far plane
-        Point3::new(-far_width, -far_height, -far),
-        Point3::new(far_width, -far_height, -far),
-        Point3::new(far_width, far_height, -far),
-        Point3::new(-far_width, far_height, -far),
+        Vec3::new(-far_width, -far_height, -far),
+        Vec3::new(far_width, -far_height, -far),
+        Vec3::new(far_width, far_height, -far),
+        Vec3::new(-far_width, far_height, -far),
     ];
 
     // Transform to world space
-    let mut corners_world = [Point3::new(0.0, 0.0, 0.0); 8];
+    let mut corners_world = [Vec3::ZERO; 8];
     for (i, corner) in corners_view.iter().enumerate() {
-        let world = inv_view * cgmath::Vector4::new(corner.x, corner.y, corner.z, 1.0);
-        corners_world[i] = Point3::new(world.x / world.w, world.y / world.w, world.z / world.w);
+        let world = *inv_view * Vec4::new(corner.x, corner.y, corner.z, 1.0);
+        corners_world[i] = Vec3::new(world.x / world.w, world.y / world.w, world.z / world.w);
     }
 
     corners_world
@@ -160,10 +152,10 @@ fn calculate_frustum_corners(
 /// map when the camera moves, because the frustum is always anchored to the
 /// same texel grid (GPU Gems 3 – "Stable Cascaded Shadow Maps").
 fn snap_to_texel_grid(
-    matrix: Matrix4<f32>,
-    world_center: Point3<f32>,
+    matrix: Mat4,
+    world_center: Vec3,
     shadow_map_size: f32,
-) -> Matrix4<f32> {
+) -> Mat4 {
     if shadow_map_size <= 1.0 {
         return matrix;
     }
@@ -172,7 +164,7 @@ fn snap_to_texel_grid(
     // matrix so the center lands on the nearest texel boundary. This keeps
     // the shadow map stable as the camera moves.
     let center_clip =
-        matrix * cgmath::Vector4::new(world_center.x, world_center.y, world_center.z, 1.0);
+        matrix * Vec4::new(world_center.x, world_center.y, world_center.z, 1.0);
     let inv_w = if center_clip.w.abs() > f32::EPSILON {
         1.0 / center_clip.w
     } else {
@@ -188,5 +180,5 @@ fn snap_to_texel_grid(
     let delta_x = snapped_ndc_x - center_ndc_x;
     let delta_y = snapped_ndc_y - center_ndc_y;
 
-    Matrix4::from_translation(Vector3::new(delta_x, delta_y, 0.0)) * matrix
+    Mat4::from_translation(Vec3::new(delta_x, delta_y, 0.0)) * matrix
 }

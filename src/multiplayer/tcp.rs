@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::multiplayer::protocol::Packet;
+use crate::logger::{log, LogLevel};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::SocketAddr;
@@ -189,8 +190,7 @@ impl TcpServer {
     /// in use, permission denied).
     pub async fn bind(addr: &str) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
-        tracing::info!("[TCP Server] Listening on {}", addr);
-
+        log(LogLevel::Info, &format!("[TCP Server] Listening on {}", addr));
         Ok(Self {
             listener: Some(listener),
             connections: Arc::new(RwLock::new(HashMap::new())),
@@ -231,8 +231,7 @@ impl TcpServer {
             let mut conns = self.connections.write().await;
             conns.insert(id, connection.clone());
         }
-
-        tracing::info!("[TCP Server] Client {} connected from {}", id, addr);
+        log(LogLevel::Info, &format!("[TCP Server] Client {} connected from {}", id, addr));
         Ok((id, connection))
     }
 
@@ -248,7 +247,7 @@ impl TcpServer {
         let conns = self.connections.read().await;
         for (id, conn) in conns.iter() {
             if let Err(e) = conn.send(packet).await {
-                tracing::warn!("[TCP Server] Failed to send to client {}: {}", id, e);
+                log(LogLevel::Warning, &format!("[TCP Server] Failed to send to client {}: {}", id, e));
             }
         }
         Ok(())
@@ -268,7 +267,7 @@ impl TcpServer {
         for (id, conn) in conns.iter() {
             if *id != except_id {
                 if let Err(e) = conn.send(packet).await {
-                    tracing::warn!("[TCP Server] Failed to send to client {}: {}", id, e);
+                    log(LogLevel::Warning, &format!("[TCP Server] Failed to send to client {}: {}", id, e));
                 }
             }
         }
@@ -284,7 +283,7 @@ impl TcpServer {
     pub async fn remove_client(&self, id: u32) {
         let mut conns = self.connections.write().await;
         if conns.remove(&id).is_some() {
-            tracing::info!("[TCP Server] Client {} disconnected", id);
+            log(LogLevel::Info, &format!("[TCP Server] Client {} removed", id));
         }
     }
 

@@ -1,5 +1,6 @@
 use wgpu;
 use windows::core::factory;
+use crate::logger::{log, LogLevel};
 #[cfg(all(target_os = "windows", feature = "dx12"))]
 use windows::core::Interface;
 use windows::Win32::Graphics::Dxgi;
@@ -79,7 +80,7 @@ impl GpuMemoryInfo {
         let info = adapter.get_info();
         let backend = info.backend;
 
-        tracing::info!("GPU backend {:?}", backend);
+        log(LogLevel::Info, &format!("Detected GPU adapter: {} ({:?})", info.name, backend));
 
         let (total_vram_bytes, available_vram_bytes) = match backend {
             wgpu::Backend::Vulkan => Self::get_vulkan_memory(&info.name),
@@ -270,16 +271,16 @@ impl VulkanMemoryDetector {
 
             // Sum only device-local heaps; shared/system heaps are excluded.
             let mut total = 0u64;
-            tracing::info!("Vulkan memory heaps:");
+            log(LogLevel::Info, "Vulkan memory heaps:");
             for i in 0..mem_props.memory_heap_count {
                 let heap = mem_props.memory_heaps[i as usize];
                 let is_device_local = heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
-                tracing::info!(
-                    "  Heap {}: {} MB (device_local: {})",
+                log(LogLevel::Info, &format!(
+                     "  Heap {}: {} MB (device_local: {})",
                     i,
                     heap.size / 1024 / 1024,
                     is_device_local
-                );
+                ));
 
                 if is_device_local {
                     total += heap.size;
@@ -349,26 +350,17 @@ impl Dx12MemoryDetector {
 
             let total = desc.DedicatedVideoMemory as u64;
 
-            tracing::info!("DirectX 12 adapter info:");
+            log(LogLevel::Info, "DirectX 12 adapter info:");
             let name_len = desc
                 .Description
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(desc.Description.len());
             let name = String::from_utf16_lossy(&desc.Description[..name_len]);
-            tracing::info!("  Name: {}", name);
-            tracing::info!(
-                "  Dedicated video memory: {} MB",
-                total / 1024 / 1024
-            );
-            tracing::info!(
-                "  Dedicated system memory: {} MB",
-                desc.DedicatedSystemMemory as u64 / 1024 / 1024
-            );
-            tracing::info!(
-                "  Shared system memory: {} MB",
-                desc.SharedSystemMemory as u64 / 1024 / 1024
-            );
+            log(LogLevel::Info, &format!("  Name: {}", name));
+            log(LogLevel::Info, &format!("  Dedicated video memory: {} MB", total / 1024 / 1024));
+            log(LogLevel::Info, &format!("  Dedicated system memory: {} MB", desc.DedicatedSystemMemory as u64 / 1024 / 1024));
+            log(LogLevel::Info, &format!("  Shared system memory: {} MB", desc.SharedSystemMemory as u64 / 1024 / 1024));
 
             // IDXGIAdapter3 exposes live budget/usage — use it when available.
             let available = match adapter.cast::<IDXGIAdapter3>() {
@@ -380,38 +372,21 @@ impl Dx12MemoryDetector {
                         &mut mem_info,
                     ) {
                         Ok(_) => {
-                            tracing::info!(
-                                "  Budget: {} MB",
-                                mem_info.Budget / 1024 / 1024
-                            );
-                            tracing::info!(
-                                "  Current usage: {} MB",
-                                mem_info.CurrentUsage / 1024 / 1024
-                            );
-                            tracing::info!(
-                                "  Available for reservation: {} MB",
-                                mem_info.AvailableForReservation / 1024 / 1024
-                            );
-                            tracing::info!(
-                                "  Current reservation: {} MB",
-                                mem_info.CurrentReservation / 1024 / 1024
-                            );
+                            log(LogLevel::Info, &format!("  Budget: {} MB", mem_info.Budget / 1024 / 1024));
+                            log(LogLevel::Info, &format!("  Current usage: {} MB", mem_info.CurrentUsage / 1024 / 1024));
+                            log(Level::Info, &format!("  Available for reservation: {} MB", mem_info.AvailableForReservation / 1024 / 1024));
+                            log(LogLevel::Info, &format!("  Reserved: {} MB", mem_info.CurrentReservation / 1024 / 1024));
                             // Saturating sub guards against transient over-budget states.
                             mem_info.Budget.saturating_sub(mem_info.CurrentUsage)
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "  Failed to query video memory info: {:?}",
-                                e
-                            );
+                            log(LogLevel::Warning, &format!("  Failed to query video memory info, using total VRAM as available: "), e);
                             total
                         }
                     }
                 }
                 Err(_) => {
-                    tracing::info!(
-                        "  IDXGIAdapter3 not available, using total VRAM as available"
-                    );
+                    log(LogLevel::Warning, "  IDXGIAdapter3 not available, using total VRAM as available");
                     total
                 }
             };

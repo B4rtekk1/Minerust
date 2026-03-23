@@ -1,4 +1,4 @@
-use cgmath::{Matrix4, Point3, Vector3, prelude::*};
+use glam::{Mat4, Vec3};
 
 use crate::constants::*;
 use crate::core::block::BlockType;
@@ -16,23 +16,10 @@ pub struct Camera {
     ///
     /// The Y component represents the bottom of the player's AABB. Use
     /// [`Camera::eye_position`] to get the rendering origin.
-    pub position: Point3<f32>,
-
-    /// Horizontal look angle in radians, measured from the positive X axis.
-    ///
-    /// Increases clockwise when viewed from above (right = positive yaw).
+    pub position: Vec3,
     pub yaw: f32,
-
-    /// Vertical look angle in radians.
-    ///
-    /// Clamped to roughly `[-π/2, π/2]`; positive values look upward.
     pub pitch: f32,
-
-    /// Current velocity in world-space units per second `[x, y, z]`.
-    ///
-    /// Modified each frame by [`Camera::update`] based on input, gravity,
-    /// drag, and collision response.
-    pub velocity: Vector3<f32>,
+    pub velocity: Vec3,
 
     /// `true` when the player is resting on a solid surface.
     ///
@@ -54,10 +41,10 @@ impl Camera {
     /// Velocity is zero and both `on_ground` and `in_water` are `false`.
     pub fn new(spawn: (f32, f32, f32)) -> Self {
         Camera {
-            position: Point3::new(spawn.0, spawn.1, spawn.2),
+            position: Vec3::new(spawn.0, spawn.1, spawn.2),
             yaw: 0.0,
             pitch: 0.0,
-            velocity: Vector3::zero(),
+            velocity: Vec3::ZERO,
             on_ground: false,
             in_water: false,
         }
@@ -67,44 +54,31 @@ impl Camera {
     ///
     /// Y is always `0.0`; use [`Camera::look_direction`] for the full 3-D
     /// gaze vector including pitch.
-    pub fn forward(&self) -> Vector3<f32> {
-        Vector3::new(self.yaw.cos(), 0.0, self.yaw.sin()).normalize()
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin()).normalize()
     }
 
-    /// Returns the horizontal right unit vector based on the current yaw.
-    ///
-    /// Perpendicular to [`Camera::forward`] on the XZ plane.
-    pub fn right(&self) -> Vector3<f32> {
-        Vector3::new(-self.yaw.sin(), 0.0, self.yaw.cos()).normalize()
+    pub fn right(&self) -> Vec3 {
+        Vec3::new(-self.yaw.sin(), 0.0, self.yaw.cos()).normalize()
     }
 
-    /// Returns the full 3-D gaze unit vector combining yaw and pitch.
-    ///
-    /// Used for raycasting and computing the view matrix target point.
-    pub fn look_direction(&self) -> Vector3<f32> {
-        Vector3::new(
+    pub fn look_direction(&self) -> Vec3 {
+        Vec3::new(
             self.yaw.cos() * self.pitch.cos(),
             self.pitch.sin(),
             self.yaw.sin() * self.pitch.cos(),
         )
-            .normalize()
+        .normalize()
     }
 
-    /// Returns the eye (camera) position, offset `+1.8` units above [`Self::position`].
-    ///
-    /// This is the origin used for rendering and raycasting.
-    pub fn eye_position(&self) -> Point3<f32> {
-        Point3::new(self.position.x, self.position.y + 1.8, self.position.z)
+    pub fn eye_position(&self) -> Vec3 {
+        Vec3::new(self.position.x, self.position.y + 1.8, self.position.z)
     }
 
-    /// Builds the right-handed view matrix for the current eye position and look direction.
-    ///
-    /// Suitable for passing directly to the GPU as the `view` component of a
-    /// view-projection matrix.
-    pub fn view_matrix(&self) -> Matrix4<f32> {
+    pub fn view_matrix(&self) -> Mat4 {
         let eye = self.eye_position();
         let target = eye + self.look_direction();
-        Matrix4::look_at_rh(eye, target, Vector3::unit_y())
+        Mat4::look_at_rh(eye, target, Vec3::Y)
     }
 
     /// Returns `true` if the block at the player's feet or mid-body is [`BlockType::Water`].
@@ -172,7 +146,7 @@ impl Camera {
                 (speed, 25.0, 50.0, 8.0, 1.0, 1.0)
             };
 
-        let mut move_dir = Vector3::zero();
+        let mut move_dir = Vec3::ZERO;
 
         if input.forward {
             move_dir += self.forward();
@@ -187,7 +161,7 @@ impl Camera {
             move_dir += self.right();
         }
 
-        if move_dir.magnitude2() > 0.0 {
+        if move_dir.length_squared() > 0.0 {
             move_dir = move_dir.normalize() * base_speed;
         }
 
@@ -264,7 +238,7 @@ impl Camera {
             for by in min_y..=max_y {
                 for bz in min_z..=max_z {
                     if world.is_solid(bx, by, bz) {
-                        if check_intersection(Point3::new(x, y, z), bx, by, bz) {
+                        if check_intersection(Vec3::new(x, y, z), bx, by, bz) {
                             return true;
                         }
                     }
@@ -293,7 +267,7 @@ impl Camera {
     pub fn raycast(&self, world: &World, max_dist: f32) -> Option<(i32, i32, i32, i32, i32, i32)> {
         let dir = self.look_direction();
         let eye = self.eye_position();
-        let mut pos = Vector3::new(eye.x, eye.y, eye.z);
+        let mut pos = Vec3::new(eye.x, eye.y, eye.z);
         let step = 0.1;
         let mut prev = (
             pos.x.floor() as i32,
@@ -324,7 +298,7 @@ impl Camera {
 /// The player AABB extends [`PLAYER_WIDTH`] units in ±X and ±Z from `pos`,
 /// and [`PLAYER_HEIGHT`] units upward from `pos.y`. Uses a standard
 /// axis-aligned box vs. box intersection test.
-pub fn check_intersection(pos: Point3<f32>, bx: i32, by: i32, bz: i32) -> bool {
+pub fn check_intersection(pos: Vec3, bx: i32, by: i32, bz: i32) -> bool {
     let player_width = PLAYER_WIDTH;
     let player_height = PLAYER_HEIGHT;
 

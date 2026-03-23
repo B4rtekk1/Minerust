@@ -100,7 +100,7 @@ impl State {
                 // This iterates all known remote players and checks their
                 // server-authoritative positions.
                 for player in self.remote_players.values() {
-                    let player_pos = cgmath::Point3::new(player.x, player.y, player.z);
+                    let player_pos = glam::Vec3::new(player.x, player.y, player.z);
                     if check_intersection(player_pos, px, py, pz) {
                         return;
                     }

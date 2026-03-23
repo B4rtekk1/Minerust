@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::logger::{log, LogLevel};
 use minerust::{TEXTURE_SIZE, generate_texture_atlas, load_texture_atlas_from_file};
 
 /// Manages a file-based cache for the texture atlas binary data.
@@ -214,10 +215,10 @@ pub fn load_or_generate_atlas(
     let (atlas_data, atlas_width, atlas_height) = if cache.exists() {
         match cache.load() {
             Some(cached_data) => {
-                tracing::info!(
+                log(LogLevel::Info, &format!(
                     "Loaded texture atlas from cache ({} bytes)",
                     cached_data.len()
-                );
+                ));
                 (cached_data, TEXTURE_SIZE, TEXTURE_SIZE)
             }
             None => {
@@ -229,11 +230,19 @@ pub fn load_or_generate_atlas(
     } else {
         match load_texture_atlas_from_file("assets/textures.png") {
             Ok((data, width, height)) => {
-                tracing::info!("Loaded texture atlas from PNG: {}x{}", width, height);
+                log(LogLevel::Info, &format!(
+                    "Loaded texture atlas from PNG ({} bytes, {}x{})",
+                    data.len(),
+                    width,
+                    height
+                ));
                 (data, width, height)
             }
             Err(e) => {
-                tracing::warn!("Failed to load texture atlas from PNG: {}", e);
+                log(LogLevel::Warning, &format!(
+                    "Failed to load texture atlas from PNG: {}; falling back to procedural generation",
+                    e
+                ));
                 let data = generate_texture_atlas();
                 (data, TEXTURE_SIZE, TEXTURE_SIZE)
             }

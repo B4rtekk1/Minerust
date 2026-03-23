@@ -5,6 +5,7 @@ use crate::core::vertex::Vertex;
 use crate::render::frustum::AABB;
 
 use ::std::collections::BTreeMap;
+use crate::logger::{log, LogLevel};
 
 /// Maximum number of subchunks that can be tracked simultaneously.
 const MAX_SUBCHUNKS: usize = 65536;
@@ -604,11 +605,11 @@ impl IndirectManager {
             }
             None => {
                 if self.next_vertex_offset + vertex_count > MAX_VERTICES as u32 {
-                    tracing::warn!(
+                    log(LogLevel::Warning, &format!(
                         "Unified vertex buffer full ({}/{} vertices used), clearing indirect draw cache...",
                         self.next_vertex_offset,
                         MAX_VERTICES
-                    );
+                    ));
                     self.clear_gpu_data(queue);
                     return false;
                 }
@@ -632,11 +633,7 @@ impl IndirectManager {
             }
             None => {
                 if self.next_index_offset + index_count > MAX_INDICES as u32 {
-                    tracing::warn!(
-                        "Unified index buffer full ({}/{} indices used), clearing indirect draw cache...",
-                        self.next_index_offset,
-                        MAX_INDICES
-                    );
+                    log(LogLevel::Warning, &format!("Unified index buffer full ({}/{} indices used), clearing indirect draw cache...", self.next_index_offset, MAX_INDICES));
                     self.clear_gpu_data(queue);
                     return false;
                 }
@@ -648,7 +645,7 @@ impl IndirectManager {
         let slot_index = match self.free_slots.pop() {
             Some(idx) => idx,
             None => {
-                tracing::warn!("Max subchunks reached!");
+                log(LogLevel::Warning, "No free metadata slots available, clearing indirect draw cache...");
                 return false;
             }
         };
@@ -874,7 +871,7 @@ impl IndirectManager {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
-        view_proj: &cgmath::Matrix4<f32>,
+        view_proj: &glam::Mat4,
         frustum_planes: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
         hiz_size: [f32; 2],
@@ -890,7 +887,7 @@ impl IndirectManager {
         let active = self.max_slot_bound;
 
         let uniforms = CullUniforms {
-            view_proj: (*view_proj).into(),
+            view_proj: view_proj.to_cols_array_2d(),
             frustum_planes: *frustum_planes,
             camera_pos,
             subchunk_count: active,

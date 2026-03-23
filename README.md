@@ -263,11 +263,11 @@ Key libraries used:
 
 - **wgpu** (28.0) - GPU rendering
 - **winit** (0.29) - Window/input handling
-- **tokio** (1.40) - Async runtime
+- **tokio** (1.50) - Async runtime
 - **quinn** (0.11) - QUIC networking
 - **fastnoise-lite** (1.1) - Procedural generation
 - **glyphon** (0.10) - Text rendering
-- **cgmath** (0.18) - Linear algebra
+- **glam** (0.29) - Linear algebra and 3D math
 
 See `Cargo.toml` for complete dependency list.
 

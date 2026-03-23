@@ -44,8 +44,8 @@ cargo build
 - `winit 0.29` - Window creation and event handling
 
 **Math & Graphics:**
-- `cgmath 0.18` - Linear algebra and 3D math
-- `bytemuck 1.14` - GPU-safe type conversions
+- `glam 0.29` - Linear algebra and 3D math
+- `bytemuck 1.25` - GPU-safe type conversions
 
 **Serialization:**
 - `serde 1.0` - Serialization framework
@@ -54,7 +54,7 @@ cargo build
 - `image 0.25` - Image file loading
 
 **Networking:**
-- `tokio 1.40` - Async runtime
+- `tokio 1.50` - Async runtime
 - `quinn 0.11` - QUIC protocol
 - `rustls 0.23` - TLS encryption
 

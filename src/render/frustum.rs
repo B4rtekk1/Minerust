@@ -1,4 +1,4 @@
-use cgmath::{Matrix4, Vector3, Vector4};
+use glam::{Mat4, Vec3, Vec4};
 
 /// An axis-aligned bounding box defined by its minimum and maximum corners.
 ///
@@ -6,15 +6,13 @@ use cgmath::{Matrix4, Vector3, Vector4};
 /// outside the view frustum without inspecting individual vertices.
 #[derive(Clone, Copy)]
 pub struct AABB {
-    /// World-space corner with the smallest x, y, and z coordinates.
-    pub min: Vector3<f32>,
-    /// World-space corner with the largest x, y, and z coordinates.
-    pub max: Vector3<f32>,
+    pub min: Vec3,
+    pub max: Vec3,
 }
 
 impl AABB {
     /// Creates a new `AABB` from explicit minimum and maximum corners.
-    pub fn new(min: Vector3<f32>, max: Vector3<f32>) -> Self {
+    pub fn new(min: Vec3, max: Vec3) -> Self {
         AABB { min, max }
     }
 
@@ -37,25 +35,21 @@ impl AABB {
     /// # Returns
     /// `true` if the AABB is potentially visible; `false` if it is definitely
     /// outside the frustum and can be safely culled.
-    pub fn is_visible(&self, frustum_planes: &[Vector4<f32>; 6]) -> bool {
-        // A small world-space margin to guard against edge-case popping.
+    pub fn is_visible(&self, frustum_planes: &[Vec4; 6]) -> bool {
         let margin = 2.0;
-        let expanded_min = Vector3::new(
+        let expanded_min = Vec3::new(
             self.min.x - margin,
             self.min.y - margin,
             self.min.z - margin,
         );
-        let expanded_max = Vector3::new(
+        let expanded_max = Vec3::new(
             self.max.x + margin,
             self.max.y + margin,
             self.max.z + margin,
         );
 
         for plane in frustum_planes {
-            // Select the AABB corner that is furthest in the direction of the
-            // plane normal (the "positive vertex").  If even this most-positive
-            // corner is behind the plane, the box is fully outside.
-            let p = Vector3::new(
+            let p = Vec3::new(
                 if plane.x > 0.0 { expanded_max.x } else { expanded_min.x },
                 if plane.y > 0.0 { expanded_max.y } else { expanded_min.y },
                 if plane.z > 0.0 { expanded_max.z } else { expanded_min.z },
@@ -80,65 +74,32 @@ impl AABB {
 /// and `d` is stored in the `w` component.
 ///
 /// # Arguments
-/// * `view_proj` – The combined view-projection matrix (column-major, as cgmath
+/// * `view_proj` – The combined view-projection matrix (column-major, as glam
 ///   stores it).  The matrix must use a left-handed clip space (z ∈ [0, 1]),
 ///   which matches wgpu / Vulkan conventions.
 ///
 /// # Returns
 /// An array of six normalized planes in the order:
 /// `[left, right, bottom, top, near, far]`.
-pub fn extract_frustum_planes(view_proj: &Matrix4<f32>) -> [Vector4<f32>; 6] {
-    // cgmath stores matrices column-major: m[col][row].
+pub fn extract_frustum_planes(view_proj: &Mat4) -> [Vec4; 6] {
     let m = view_proj;
+    let row0 = m.row(0);
+    let row1 = m.row(1);
+    let row2 = m.row(2);
+    let row3 = m.row(3);
+
     let mut planes = [
-        // Left:   row3 + row0
-        Vector4::new(
-            m[0][3] + m[0][0],
-            m[1][3] + m[1][0],
-            m[2][3] + m[2][0],
-            m[3][3] + m[3][0],
-        ),
-        // Right:  row3 - row0
-        Vector4::new(
-            m[0][3] - m[0][0],
-            m[1][3] - m[1][0],
-            m[2][3] - m[2][0],
-            m[3][3] - m[3][0],
-        ),
-        // Bottom: row3 + row1
-        Vector4::new(
-            m[0][3] + m[0][1],
-            m[1][3] + m[1][1],
-            m[2][3] + m[2][1],
-            m[3][3] + m[3][1],
-        ),
-        // Top:    row3 - row1
-        Vector4::new(
-            m[0][3] - m[0][1],
-            m[1][3] - m[1][1],
-            m[2][3] - m[2][1],
-            m[3][3] - m[3][1],
-        ),
-        // Near:   row2  (z ∈ [0,1] clip space — no row3 addition needed)
-        Vector4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
-        // Far:    row3 - row2
-        Vector4::new(
-            m[0][3] - m[0][2],
-            m[1][3] - m[1][2],
-            m[2][3] - m[2][2],
-            m[3][3] - m[3][2],
-        ),
+        row3 + row0, // Left
+        row3 - row0, // Right
+        row3 + row1, // Bottom
+        row3 - row1, // Top
+        row2,        // Near (Z in [0, 1])
+        row3 - row2, // Far
     ];
 
-    // Normalize each plane so its normal has unit length.  This makes the `w`
-    // component a true signed distance and allows mixing plane tests with
-    // distance-based comparisons (e.g. LOD selection).
     for plane in &mut planes {
-        let length = (plane.x * plane.x + plane.y * plane.y + plane.z * plane.z).sqrt();
-        plane.x /= length;
-        plane.y /= length;
-        plane.z /= length;
-        plane.w /= length;
+        let length = plane.truncate().length();
+        *plane /= length;
     }
 
     planes

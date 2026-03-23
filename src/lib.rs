@@ -55,6 +55,7 @@ pub mod constants;
 pub mod save;
 mod commands;
 mod shader_utils;
+mod logger;
 
 pub use constants::*;
 pub use constants::{get_active_cascade_count, get_chunk_worker_count, get_mesh_worker_count};

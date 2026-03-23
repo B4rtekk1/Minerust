@@ -14,6 +14,7 @@ use minerust::{
 };
 
 use crate::ui::menu::GameState;
+use crate::logger::{log, LogLevel};
 
 use super::server::run_dedicated_server;
 use super::state::State;
@@ -107,16 +108,16 @@ struct Args {
 /// # Panics
 /// Panics if the winit event loop or window cannot be created, or if the
 /// Tokio runtime for the server cannot be initialized.
-pub fn run_game() {
+pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // ── Dedicated server mode ─────────────────────────────────────────────── //
     if args.server {
         let addr = format!("0.0.0.0:{}", args.port);
-        tracing::info!("Starting Headless Dedicated Server on {}...", addr);
-        tracing::info!("Note: This is a console-only server. No game window will appear.");
-        tracing::info!("To play the game, run the application without --server.");
-        tracing::info!("Press Ctrl+C to stop the server.");
+        log(LogLevel::Info, &format!("Starting headless server on {}...", addr));
+        log(LogLevel::Info, "Note: This is a console-only server. No game window will appear.");
+        log(LogLevel::Info, "To play the game, run the application without --server.");
+        log(LogLevel::Info, "Press Ctrl+C to stop the server.");
         // Flush so the operator sees the startup messages immediately even
         // when stdout is piped (e.g., `minerust --server | tee server.log`).
         use std::io::Write;
@@ -124,9 +125,9 @@ pub fn run_game() {
 
         // Block the main thread on the async server; `run_dedicated_server`
         // runs an infinite accept loop so this never returns normally.
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime.");
+        let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(run_dedicated_server(&addr));
-        return;
+        return Ok(());
     }
 
     // ── Windowed game mode ────────────────────────────────────────────────── //
@@ -577,5 +578,6 @@ pub fn run_game() {
                 _ => {}
             }
         })
-        .expect("Event loop error");
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(())
 }

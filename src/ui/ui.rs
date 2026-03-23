@@ -164,7 +164,7 @@ pub fn build_hotbar(
 /// rebuilt, or `None` when the position has not changed since the last call.
 pub fn update_coords_ui(
     device: &wgpu::Device,
-    camera_pos: cgmath::Point3<f32>,
+    camera_pos: glam::Vec3,
     last_coords_position: &mut (i32, i32, i32),
 ) -> Option<(wgpu::Buffer, wgpu::Buffer, u32)> {
     let x = camera_pos.x;

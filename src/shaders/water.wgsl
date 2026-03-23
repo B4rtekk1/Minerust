@@ -1,3 +1,4 @@
+enable f16;
 
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
@@ -9,9 +10,8 @@ const SSR_THICKNESS:     f32 = 0.06;
 const SSR_EDGE_FADE:     f32 = 0.06;
 const SSR_FADE_DISTANCE: f32 = 300.0;
 
-const SHADOW_MAP_SIZE: f32 = 2048.0;
+const SHADOW_MAP_SIZE: f16 = 2048.0;
 const PCF_SAMPLES:     i32 = 16;
-
 
 const LOD_FAR: f32 = 300.0;
 
@@ -26,9 +26,12 @@ const WATER_ROUGHNESS_MAX: f32 = 0.14;
 const FOAM_THRESHOLD: f32 = 0.30;
 const FOAM_INTENSITY: f32 = 0.70;
 
-const FOG_NEAR: f32 = 0.0;
-const FOG_FAR:  f32 = 200.0;
+const FOG_NEAR: f16 = 0.0;
+const FOG_FAR:  f16 = 200.0;
 
+struct ShadowConfig {
+    shadow_map_size: f16,
+}
 
 struct Uniforms {
     view_proj:           mat4x4<f32>,
@@ -108,7 +111,8 @@ fn hash21(p: vec2<f32>) -> f32 {
 
 fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     let dist    = length(pos.xz - uniforms.camera_pos.xz);
-    let lod     = clamp(1.0 - dist / LOD_FAR, 0.05, 1.0);
+    // f16: lod i cap_lod sa w [0,1] - bezpieczne
+    let lod     = f16(clamp(1.0 - dist / LOD_FAR, 0.05, 1.0));
 
     var result: GerstnerResult;
     result.displacement = vec3(0.0);
@@ -116,12 +120,13 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     result.foam         = 0.0;
     result.jacobian     = 1.0;
 
-    if lod < 0.01 { return result; }
+    if lod < f16(0.01) { return result; }
 
     let wind_n = normalize(uniforms.wind_dir);
     let p      = pos.xz;
     let wsp    = uniforms.wind_speed;
 
+    // Gerstner displacement - f32 potrzebne dla precyzji sumowania
     var x_off = 0.0; var y_off = 0.0; var z_off = 0.0;
     var dx = 0.0;    var dz = 0.0;
     var j_xx = 0.0;  var j_zz = 0.0;  var j_xz = 0.0;
@@ -129,9 +134,10 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     for (var i: i32 = 0; i < 4; i++) {
         let base_dir = vec2(SW_DX[i], SW_DZ[i]);
         let dmod     = normalize(mix(base_dir, wind_n, 0.35));
-        let align    = max(dot(dmod, wind_n), 0.0);
-        let amp      = SW_AMP[i] * lod * (0.65 + 0.35 * align);
-        let steep    = SW_STEEP[i] * lod;
+        // f16: align, amp, steep - wartosci [0,1] lub male
+        let align    = f16(max(dot(dmod, wind_n), 0.0));
+        let amp      = f32(f16(SW_AMP[i]) * lod * (f16(0.65) + f16(0.35) * align));
+        let steep    = f32(f16(SW_STEEP[i]) * lod);
 
         let phase = SW_K[i] * dot(dmod, p) - SW_C[i] * time * wsp + SW_PH[i];
         let sf = sin(phase);
@@ -152,12 +158,12 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
         j_xz += dmod.x * dmod.y * ka_sf_Q;
     }
 
-    let cap_lod = clamp(1.0 - dist / (LOD_FAR * 0.4), 0.0, 1.0);
-    if cap_lod > 0.01 {
+    let cap_lod = f16(clamp(1.0 - dist / (LOD_FAR * 0.4), 0.0, 1.0));
+    if cap_lod > f16(0.01) {
         for (var i: i32 = 0; i < 4; i++) {
             let dmod  = normalize(vec2(CP_DX[i], CP_DZ[i]));
-            let amp   = CP_AMP[i] * cap_lod;
-            let steep = CP_STEEP[i] * cap_lod;
+            let amp   = f32(f16(CP_AMP[i]) * cap_lod);
+            let steep = f32(f16(CP_STEEP[i]) * cap_lod);
 
             let phase = CP_K[i] * dot(dmod, p) - CP_C[i] * time * wsp + CP_PH[i];
             let sf = sin(phase);
@@ -216,10 +222,10 @@ fn vs_water(model: VertexInput) -> VertexOutput {
     return out;
 }
 
-fn schlick_fresnel(cos_theta: f32, r0: f32) -> f32 {
-    let x  = 1.0 - cos_theta;
+fn schlick_fresnel(cos_theta: f16, r0: f16) -> f16 {
+    let x  = f16(1.0) - cos_theta;
     let x2 = x * x;
-    return r0 + (1.0 - r0) * x2 * x2 * x;
+    return r0 + (f16(1.0) - r0) * x2 * x2 * x;
 }
 
 fn ggx_distribution(ndh: f32, roughness: f32) -> f32 {
@@ -244,31 +250,36 @@ fn fbm_normal_perturb(p: vec2<f32>, t: f32) -> vec2<f32> {
 }
 
 fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity: f32) -> vec3<f32> {
-    let h = clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0);
-    let sun_h = sun_dir.y;
-    let day = smoothstep(-0.02, 0.22, sun_h);
-    let night = smoothstep(0.10, -0.10, sun_h);
-    let dusk = 1.0 - smoothstep(0.02, 0.34, abs(sun_h));
+    // f16: wszystkie blending-factors sa w [0,1]
+    let h     = f16(clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0));
+    let sun_h = f16(sun_dir.y);
+    let day   = f16(smoothstep(-0.02, 0.22, f32(sun_h)));
+    let night = f16(smoothstep(0.10, -0.10, f32(sun_h)));
+    let dusk  = f16(1.0) - f16(smoothstep(0.02, 0.34, abs(f32(sun_h))));
 
-    let zenith_day = vec3<f32>(0.18, 0.44, 0.88);
-    let horizon_day = vec3<f32>(0.66, 0.82, 0.98);
-    let zenith_night = vec3<f32>(0.002, 0.005, 0.015);
+    let zenith_day    = vec3<f32>(0.18, 0.44, 0.88);
+    let horizon_day   = vec3<f32>(0.66, 0.82, 0.98);
+    let zenith_night  = vec3<f32>(0.002, 0.005, 0.015);
     let horizon_night = vec3<f32>(0.010, 0.014, 0.034);
-    let dusk_low = vec3<f32>(0.96, 0.40, 0.18);
-    let dusk_high = vec3<f32>(0.24, 0.10, 0.28);
+    let dusk_low      = vec3<f32>(0.96, 0.40, 0.18);
+    let dusk_high     = vec3<f32>(0.24, 0.10, 0.28);
 
-    var sky = mix(horizon_day, zenith_day, pow(h, 0.82)) * day;
-    sky += mix(horizon_night, zenith_night, pow(h, 0.74)) * night;
-    sky += mix(dusk_low, dusk_high, pow(h, 1.08)) * dusk * 0.50;
+    let h_pow82  = f32(pow(h, f16(0.82)));
+    let h_pow74  = f32(pow(h, f16(0.74)));
+    let h_pow108 = f32(pow(h, f16(1.08)));
 
-    let horizon_band = 1.0 - smoothstep(0.0, 0.32, abs(view_dir.y));
-    sky += vec3<f32>(0.16, 0.22, 0.30) * horizon_band * (0.48 * day + 0.18 * dusk);
+    var sky = mix(horizon_day,   zenith_day,   h_pow82) * f32(day);
+    sky    += mix(horizon_night, zenith_night, h_pow74) * f32(night);
+    sky    += mix(dusk_low,      dusk_high,    h_pow108) * f32(dusk) * 0.50;
 
-    let sun_glow = pow(max(dot(view_dir, sun_dir), 0.0), 24.0) * (0.8 + 0.4 * dusk);
-    sky += mix(vec3<f32>(1.0, 0.74, 0.48), vec3<f32>(1.0, 0.95, 0.90), day) * sun_glow * 0.28;
+    let horizon_band = f16(1.0) - f16(smoothstep(0.0, 0.32, abs(view_dir.y)));
+    sky += vec3<f32>(0.16, 0.22, 0.30) * f32(horizon_band) * f32(f16(0.48) * day + f16(0.18) * dusk);
+
+    let sun_glow = pow(max(dot(view_dir, sun_dir), 0.0), 24.0) * f32(f16(0.8) + f16(0.4) * dusk);
+    sky += mix(vec3<f32>(1.0, 0.74, 0.48), vec3<f32>(1.0, 0.95, 0.90), f32(day)) * sun_glow * 0.28;
 
     if moon_intensity > 0.01 {
-        sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * night * (0.18 + 0.22 * horizon_band);
+        sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * f32(night) * f32(f16(0.18) + f16(0.22) * horizon_band);
     }
 
     return sky;
@@ -286,6 +297,7 @@ fn reconstruct_world(uv: vec2<f32>, d: f32) -> vec3<f32> {
     return wh.xyz / wh.w;
 }
 
+// SSR zostaje w f32 - precyzja ray marchingu jest krytyczna
 fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>) -> vec4<f32> {
     let dir  = normalize(refl_dir);
     var ray  = world_pos + dir * 0.3;
@@ -369,7 +381,7 @@ fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
     if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { return 1.0; }
 
     let bias  = 0.003;
-    let texel = 1.0 / SHADOW_MAP_SIZE;
+    let texel = 1.0 / f32(SHADOW_MAP_SIZE);
     let rot   = hash21(world_pos.xz) * TAU;
     let s     = sin(rot);
     let c     = cos(rot);
@@ -392,7 +404,8 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist      = length(to_camera);
     let view_dir  = to_camera / dist;
     let sun_dir   = normalize(uniforms.sun_position);
-    let day       = clamp(sun_dir.y, 0.0, 1.0);
+    // f16: day to clamp [0,1]
+    let day       = f16(clamp(sun_dir.y, 0.0, 1.0));
     let t         = uniforms.time;
 
     let inv_w     = 1.0 / in.clip_position.w;
@@ -400,38 +413,39 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let screen_uv = vec2(clip_ndc.x * 0.5 + 0.5, 0.5 - clip_ndc.y * 0.5);
 
     let wave_n_raw = in.wave_normal.xyz;
-    let foam_val   = in.wave_normal.w;
+    let foam_val   = f16(in.wave_normal.w);
 
-    let perturb_blend = clamp(1.0 - dist / 120.0, 0.0, 1.0);
+    // f16: blending factors [0,1]
+    let perturb_blend = f16(clamp(1.0 - dist / 120.0, 0.0, 1.0));
     var normal = wave_n_raw;
-    if perturb_blend > 0.005 {
-        let perturb = fbm_normal_perturb(in.world_pos.xz * 0.15, t) * perturb_blend;
+    if perturb_blend > f16(0.005) {
+        let perturb = fbm_normal_perturb(in.world_pos.xz * 0.15, t) * f32(perturb_blend);
         normal = normalize(wave_n_raw + vec3(perturb.x, 0.0, perturb.y));
     }
 
-    let micro_blend = clamp(1.0 - dist / 50.0, 0.0, 1.0);
-    if micro_blend > 0.005 {
+    let micro_blend = f16(clamp(1.0 - dist / 50.0, 0.0, 1.0));
+    if micro_blend > f16(0.005) {
         let mp = 0.08 * sin(vec2(
             in.world_pos.x * 11.3 + t * 2.1,
             in.world_pos.z * 9.7  - t * 1.8
-        )) * micro_blend;
+        )) * f32(micro_blend);
         normal = normalize(normal + vec3(mp.x, 0.0, mp.y));
     }
 
+    // f16: cos_theta, fresnel, grazing - wszystko [0,1]
+    let cos_theta = f16(max(dot(view_dir, normal), 0.0));
+    let fresnel   = schlick_fresnel(cos_theta, f16(FRESNEL_R0));
+    let grazing   = f16(smoothstep(0.25, 0.98, f32(f16(1.0) - cos_theta)));
 
-    let cos_theta = max(dot(view_dir, normal), 0.0);
-    let fresnel   = schlick_fresnel(cos_theta, FRESNEL_R0);
-    let grazing   = smoothstep(0.25, 0.98, 1.0 - cos_theta);
+    let depth_t     = f16(clamp(f32(f16(1.0) - cos_theta * f16(1.4)), 0.0, 1.0));
+    var water_color = mix(WATER_COLOR_SHALLOW, WATER_COLOR_DEEP, f32(depth_t));
 
-    let depth_t     = clamp(1.0 - cos_theta * 1.4, 0.0, 1.0);
-    var water_color = mix(WATER_COLOR_SHALLOW, WATER_COLOR_DEEP, depth_t);
-
-    let wave_pulse = clamp(in.world_pos.y * 1.4 + 0.5, 0.0, 1.0);
-    water_color   *= mix(0.75, 1.18, wave_pulse);
+    let wave_pulse = f16(clamp(in.world_pos.y * 1.4 + 0.5, 0.0, 1.0));
+    water_color   *= f32(mix(f16(0.75), f16(1.18), wave_pulse));
 
     let shadow  = calculate_shadow(in.world_pos, sun_dir);
-    let ambient = mix(0.01, 0.35, day);
-    water_color *= ambient + shadow * 0.55 * day;
+    let ambient = f16(mix(0.01, 0.35, f32(day)));
+    water_color *= f32(ambient) + shadow * 0.55 * f32(day);
 
     var refl_dir   = reflect(-view_dir, normal);
     refl_dir.y     = max(refl_dir.y, 0.001);
@@ -439,51 +453,52 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     var refl_color = sky_reflection_color(refl_dir, sun_dir, uniforms.moon_intensity);
 
     if uniforms.reflection_mode != 0.0 {
-        let ssr_fade = clamp(1.0 - dist / SSR_FADE_DISTANCE, 0.0, 1.0);
-        if ssr_fade > 0.01 {
+        let ssr_fade = f16(clamp(1.0 - dist / SSR_FADE_DISTANCE, 0.0, 1.0));
+        if ssr_fade > f16(0.01) {
             let ssr  = ssr_trace(in.world_pos, refl_dir);
-            let conf = smoothstep(0.05, 0.9, ssr.w) * ssr_fade;
-            if conf > 0.02 {
-                refl_color = mix(refl_color, ssr.rgb, conf * 0.85);
+            let conf = f16(smoothstep(0.05, 0.9, ssr.w)) * ssr_fade;
+            if conf > f16(0.02) {
+                refl_color = mix(refl_color, ssr.rgb, f32(conf) * 0.85);
             }
         }
     }
 
-    refl_color *= 1.0 - grazing * 0.18;
-    let reflection_mix = clamp(fresnel * (0.78 - grazing * 0.20), 0.0, 0.80);
-    water_color = mix(water_color, refl_color, reflection_mix);
+    refl_color *= f32(f16(1.0) - grazing * f16(0.18));
+    let reflection_mix = f16(clamp(f32(fresnel * (f16(0.78) - grazing * f16(0.20))), 0.0, 0.80));
+    water_color = mix(water_color, refl_color, f32(reflection_mix));
 
     if sun_dir.y > 0.0 {
-        let jac_rough   = clamp(1.0 - in.jacobian, 0.0, 1.0);
-        let roughness   = mix(WATER_ROUGHNESS_MIN, WATER_ROUGHNESS_MAX, jac_rough)
-                        * mix(1.0, 0.82, 1.0 - day);
+        let jac_rough   = f16(clamp(1.0 - in.jacobian, 0.0, 1.0));
+        let roughness   = f32(mix(f16(WATER_ROUGHNESS_MIN), f16(WATER_ROUGHNESS_MAX), jac_rough)
+                        * mix(f16(1.0), f16(0.82), f16(1.0) - day));
         let spec        = ggx_spec_simple(normal, view_dir, sun_dir, roughness);
-        let spec_color  = mix(vec3(1.0, 0.97, 0.88), vec3(1.0, 0.84, 0.58), 1.0 - day);
-        water_color    += spec_color * spec * mix(1.45, 1.8, day) * shadow;
+        let spec_color  = mix(vec3(1.0, 0.97, 0.88), vec3(1.0, 0.84, 0.58), f32(f16(1.0) - day));
+        water_color    += spec_color * spec * f32(mix(f16(1.45), f16(1.8), day)) * shadow;
 
-        if uniforms.moon_intensity > 0.01 && day < 0.2 {
+        if uniforms.moon_intensity > 0.01 && day < f16(0.2) {
             let moon_dir  = normalize(uniforms.moon_position);
             let spec_moon = ggx_spec_simple(normal, view_dir, moon_dir, WATER_ROUGHNESS_MIN * 0.5);
             water_color  += vec3(0.82, 0.88, 1.0) * spec_moon * uniforms.moon_intensity
-                            * (1.0 - day) * 0.6;
+                            * f32(f16(1.0) - day) * 0.6;
         }
     }
 
-    if foam_val > 0.01 {
-        let foam_pulse = mix(0.85, 1.0, sin(t * 3.7 + in.world_pos.x * 2.1) * 0.5 + 0.5);
-        let lit_foam   = vec3(0.88, 0.92, 0.96) * (ambient + shadow * day * 0.7);
+    if foam_val > f16(0.01) {
+        let foam_pulse = f16(mix(0.85, 1.0, sin(t * 3.7 + in.world_pos.x * 2.1) * 0.5 + 0.5));
+        let lit_foam   = vec3(0.88, 0.92, 0.96) * f32(ambient + f16(shadow) * day * f16(0.7));
         water_color    = mix(water_color, lit_foam,
-                             clamp(foam_val * 0.75 * foam_pulse, 0.0, 0.8));
+                             f32(clamp(foam_val * f16(0.75) * foam_pulse, f16(0.0), f16(0.8))));
     }
 
-
+    // fog
     let delta_xz = in.world_pos.xz - uniforms.camera_pos.xz;
-    let dist_xz  = sqrt(dot(delta_xz, delta_xz));
-    let fog_t    = clamp((dist_xz - FOG_NEAR) / (FOG_FAR - FOG_NEAR), 0.0, 1.0);
-    let fog_col  = mix(vec3(0.004, 0.010, 0.024), refl_color, 0.85 * day + 0.15 * (1.0 - day));
-    water_color  = mix(water_color, fog_col, fog_t * fog_t);
+    let dist_xz  = f16(sqrt(dot(delta_xz, delta_xz)));
+    let fog_t    = clamp((dist_xz - FOG_NEAR) / (FOG_FAR - FOG_NEAR), f16(0.0), f16(1.0));
+    let fog_col  = mix(vec3(0.004, 0.010, 0.024), refl_color,
+                       f32(f16(0.85) * day + f16(0.15) * (f16(1.0) - day)));
+    water_color  = mix(water_color, fog_col, f32(fog_t * fog_t));
 
-    let alpha = WATER_OPACITY + fresnel * 0.30;
+    let alpha = f16(WATER_OPACITY) + fresnel * f16(0.30);
 
-    return vec4(water_color, clamp(alpha, 0.0, 1.0));
+    return vec4(water_color, clamp(f32(alpha), 0.0, 1.0));
 }

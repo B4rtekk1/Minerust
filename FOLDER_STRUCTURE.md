@@ -406,7 +406,7 @@ From `Cargo.toml`:
 ```toml
 wgpu = "28.0.0"              # Graphics API abstraction
 winit = "0.29"               # Window and event handling
-cgmath = "0.18"              # Linear algebra
+glam = { version = "0.29", features = ["bytemuck", "serde"] } # Linear algebra
 serde = "1.0"                # Serialization
 serde_yaml = "0.9"           # YAML configuration
 bincode = "1.3"              # Binary serialization

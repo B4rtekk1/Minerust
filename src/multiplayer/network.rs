@@ -189,7 +189,7 @@ pub fn connect_to_server(
 /// - `window`              – Used to lock the OS cursor when transitioning to `Playing`.
 pub fn update_network(
     my_player_id: &mut u32,
-    camera_pos: &cgmath::Point3<f32>,
+    camera_pos: &glam::Vec3,
     camera_yaw: f32,
     camera_pitch: f32,
     last_position_send: &mut Instant,

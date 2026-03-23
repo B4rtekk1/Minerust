@@ -3,13 +3,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck;
-use cgmath::Matrix4;
+use glam::{Mat4, Vec4};
 use glyphon::{
     Cache, FontSystem, Metrics, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport,
 };
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::logger::{log, LogLevel};
 use crate::app::texture_cache;
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
@@ -31,18 +32,18 @@ use super::state::State;
 /// depth_wgpu = depth_gl * 0.5 + 0.5
 /// ```
 #[cfg_attr(rustfmt, rustfmt_skip)]
-pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = Matrix4::new(
+pub const OPENGL_TO_WGPU_MATRIX: Mat4 = Mat4::from_cols_array(&[
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 0.5, 0.0,
     0.0, 0.0, 0.5, 1.0,
-);
+]);
 
-/// Converts an array of six frustum planes from `cgmath::Vector4<f32>` into
+/// Converts an array of six frustum planes from `glam::Vec4` into
 /// a plain `[[f32; 4]; 6]` that can be sent directly to a GPU buffer.
 ///
 /// # Safety
-/// `cgmath::Vector4<f32>` has the same memory layout as `[f32; 4]`
+/// `glam::Vec4` has the same memory layout as `[f32; 4]`
 /// (four tightly-packed 32-bit floats), so the `transmute` is sound.
 ///
 /// # Parameters
@@ -52,7 +53,7 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = Matrix4::new(
 /// # Returns
 /// The same data as a raw `[[f32; 4]; 6]` array ready for `bytemuck::cast_slice`.
 #[inline(always)]
-pub fn frustum_planes_to_array(planes: &[cgmath::Vector4<f32>; 6]) -> [[f32; 4]; 6] {
+pub fn frustum_planes_to_array(planes: &[Vec4; 6]) -> [[f32; 4]; 6] {
     unsafe { std::mem::transmute(*planes) }
 }
 
@@ -135,11 +136,7 @@ impl State {
             .expect("Failed to find a suitable GPU adapter");
 
         let info = adapter.get_info();
-        tracing::info!(
-            "Selected adapter: {} on {:?} backend",
-            info.name,
-            info.backend
-        );
+        log(LogLevel::Info, &format!("Selected adapter: {} on {:?} backend", info.name, info.backend));
 
         // ------------------------------------------------------------------ //
         // Feature negotiation
@@ -151,13 +148,19 @@ impl State {
         // fully GPU-side occlusion culling: chunks that fail the Hi-Z test are
         // simply never emitted into the draw list.
         let adapter_features = adapter.features();
+        let mut requested_features = wgpu::Features::empty();
         let supports_indirect_count =
             adapter_features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
-        let requested_features = if supports_indirect_count {
-            wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
-        } else {
-            wgpu::Features::empty()
-        };
+        if supports_indirect_count {
+            requested_features |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+            log(LogLevel::Info, "Adapter supports MULTI_DRAW_INDIRECT_COUNT");
+        }
+
+        let supports_shader_f16 = adapter_features.contains(wgpu::Features::SHADER_F16);
+        if supports_shader_f16 {
+            requested_features |= wgpu::Features::SHADER_F16;
+            log(LogLevel::Info, "Adapter supports SHADER_F16");
+        }
 
         // ------------------------------------------------------------------ //
         // Logical device & queue
@@ -289,10 +292,10 @@ impl State {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
             contents: bytemuck::cast_slice(&[Uniforms {
-                view_proj: Matrix4::from_scale(1.0).into(),
-                inv_view_proj: Matrix4::from_scale(1.0).into(),
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 // `csm_view_proj` holds four 4×4 matrices – one per cascade.
-                csm_view_proj: [Matrix4::from_scale(1.0).into(); 4],
+                csm_view_proj: [Mat4::IDENTITY.to_cols_array_2d(); 4],
                 // Split distances (world-space) for the four CSM cascades.
                 // Tune these to balance shadow resolution vs. coverage range.
                 csm_split_distances: [16.0, 48.0, 128.0, 300.0],
@@ -1199,15 +1202,14 @@ impl State {
         // ------------------------------------------------------------------ //
         // World, camera, chunk loader
         // ------------------------------------------------------------------ //
-
-        tracing::info!("Generating world...");
+        log(LogLevel::Info, "Generating world...");
         let world = Arc::new(parking_lot::RwLock::new(World::new()));
 
         // `find_spawn_point` searches downward from a candidate column until
         // it finds a non-air block, ensuring the player spawns on solid ground.
         let spawn = world.read().find_spawn_point();
         let camera = Camera::new(spawn);
-        tracing::info!("World generated! Spawn: {:?}", spawn);
+        log(LogLevel::Info, &format!("World generated! Spawn: {:?}", spawn));
 
         let seed = world.read().seed;
         // `ChunkLoader` generates chunk data (terrain noise, biomes, structures)

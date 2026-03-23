@@ -1,4 +1,4 @@
-use cgmath::Vector3;
+use glam::Vec3;
 
 use crate::constants::*;
 use crate::core::block::BlockType;
@@ -78,8 +78,8 @@ impl SubChunk {
             num_indices: 0,
             num_water_indices: 0,
             aabb: AABB::new(
-                Vector3::new(world_x as f32, world_y as f32, world_z as f32),
-                Vector3::new(
+                Vec3::new(world_x as f32, world_y as f32, world_z as f32),
+                Vec3::new(
                     (world_x + CHUNK_SIZE) as f32,
                     (world_y + SUBCHUNK_HEIGHT) as f32,
                     (world_z + CHUNK_SIZE) as f32,

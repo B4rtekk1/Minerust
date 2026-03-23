@@ -1,3 +1,5 @@
+use crate::logger::{log, LogLevel};
+
 pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 16;
 pub const SUBCHUNK_HEIGHT: i32 = 16;
@@ -49,7 +51,7 @@ pub const BLOCK_OFFSET: f32 = (1.0 - BLOCK_SIZE) / 2.0;
 pub fn get_chunk_worker_count() -> usize {
     let cores = num_cpus::get();
     let workers = ((cores.saturating_sub(2)) / 2).max(2).min(8);
-    tracing::info!("CPU cores: {}, chunk workers: {}", cores, workers);
+    log(LogLevel::Info, &format!("CPU cores: {}, chunk workers: {}", cores, workers));
     workers
 }
 
