@@ -5,6 +5,9 @@ pub mod uniforms;
 pub mod vertex;
 pub mod game_item;
 
+#[macro_use]
+pub mod mobs;
+
 pub use biome::Biome;
 pub use block::BlockType;
 pub use chunk::{Chunk, SubChunk};

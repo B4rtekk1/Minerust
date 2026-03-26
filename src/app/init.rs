@@ -10,13 +10,13 @@ use glyphon::{
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::logger::{log, LogLevel};
 use crate::app::texture_cache;
+use crate::logger::{LogLevel, log};
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    build_crosshair, Camera, DiggingState, IndirectManager, InputState, OutlineVertex,
-    ShadowConfig, Uniforms, Vertex, World, CSM_SHADOW_MAP_SIZE, SEA_LEVEL,
+    CSM_SHADOW_MAP_SIZE, Camera, DiggingState, IndirectManager, InputState, OutlineVertex,
+    SEA_LEVEL, ShadowConfig, Uniforms, Vertex, World, build_crosshair,
 };
 
 use super::state::State;
@@ -136,7 +136,13 @@ impl State {
             .expect("Failed to find a suitable GPU adapter");
 
         let info = adapter.get_info();
-        log(LogLevel::Info, &format!("Selected adapter: {} on {:?} backend", info.name, info.backend));
+        log(
+            LogLevel::Info,
+            &format!(
+                "Selected adapter: {} on {:?} backend",
+                info.name, info.backend
+            ),
+        );
 
         // ------------------------------------------------------------------ //
         // Feature negotiation
@@ -235,7 +241,6 @@ impl State {
 
         /// Compiles a WGSL shader from a string literal embedded in the binary.
         // (macro-like helper used only inside this function for brevity)
-
         let hiz_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Hi-Z Shader"),
             // Downsamples the depth buffer into a mip chain for GPU occlusion culling.
@@ -417,6 +422,50 @@ impl State {
             ..Default::default()
         });
 
+        // Screen-space shadow mask sampled by `terrain.wgsl`.
+        // It starts fully lit so the terrain path works even before a compute
+        // pass is wired up to write real shadow coverage into it.
+        let shadow_mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Mask Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_mask_view =
+            shadow_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        {
+            let mut clear_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Shadow Mask Clear Encoder"),
+                });
+            clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Mask Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &shadow_mask_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            queue.submit(Some(clear_encoder.finish()));
+        }
+
         let shadow_config_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Shadow Config Buffer"),
             contents: bytemuck::cast_slice(&[ShadowConfig {
@@ -514,6 +563,54 @@ impl State {
                     },
                     count: None,
                 }],
+            });
+
+        let shadow_mask_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow_mask_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // These placeholder layouts keep the terrain shader's binding group
+        // indices aligned with `terrain.wgsl`.
+        let terrain_gbuffer_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("terrain_gbuffer_bind_group_layout"),
+                entries: &[],
+            });
+        let terrain_shadow_output_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("terrain_shadow_output_bind_group_layout"),
+                entries: &[],
+            });
+
+        let terrain_gbuffer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain_gbuffer_bind_group"),
+            layout: &terrain_gbuffer_bind_group_layout,
+            entries: &[],
+        });
+        let terrain_shadow_output_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("terrain_shadow_output_bind_group"),
+                layout: &terrain_shadow_output_bind_group_layout,
+                entries: &[],
             });
 
         // ------------------------------------------------------------------ //
@@ -814,6 +911,21 @@ impl State {
             label: Some("shadow_bind_group"),
         });
 
+        let shadow_mask_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &shadow_mask_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&ssr_sampler),
+                },
+            ],
+            label: Some("shadow_mask_bind_group"),
+        });
+
         // ------------------------------------------------------------------ //
         // Pipeline layouts
         // ------------------------------------------------------------------ //
@@ -821,7 +933,12 @@ impl State {
         // Terrain / sky / sun / crosshair all share the same uniform layout.
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout],
+            bind_group_layouts: &[
+                &uniform_bind_group_layout,               // group: 0
+                &terrain_gbuffer_bind_group_layout,       // group: 1
+                &terrain_shadow_output_bind_group_layout,  // group: 2
+                &shadow_mask_bind_group_layout,           // group: 3
+            ],
             immediate_size: 0,
         });
 
@@ -1155,35 +1272,23 @@ impl State {
         // A single unit quad in local space; the vertex shader billboards it
         // toward the camera and translates it to the sun/moon direction.
         let sun_normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
-        let sun_color = Vertex::pack_color([1.0, 1.0, 1.0]);
+
         let sun_vertices = vec![
             Vertex {
                 position: [-1.0, -1.0, 0.0],
-                normal: sun_normal,
-                color: sun_color,
-                uv: [0.0, 0.0],
-                tex_index: 0.0,
+                packed: Vertex::pack(sun_normal, [1.0, 1.0, 1.0], 0, 0, 1, 1),
             },
             Vertex {
                 position: [1.0, -1.0, 0.0],
-                normal: sun_normal,
-                color: sun_color,
-                uv: [1.0, 0.0],
-                tex_index: 0.0,
+                packed: Vertex::pack(sun_normal, [1.0, 1.0, 1.0], 0, 1, 1, 1),
             },
             Vertex {
                 position: [1.0, 1.0, 0.0],
-                normal: sun_normal,
-                color: sun_color,
-                uv: [1.0, 1.0],
-                tex_index: 0.0,
+                packed: Vertex::pack(sun_normal, [1.0, 1.0, 1.0], 0, 2, 1, 1),
             },
             Vertex {
                 position: [-1.0, 1.0, 0.0],
-                normal: sun_normal,
-                color: sun_color,
-                uv: [0.0, 1.0],
-                tex_index: 0.0,
+                packed: Vertex::pack(sun_normal, [1.0, 1.0, 1.0], 0, 3, 1, 1),
             },
         ];
         let sun_indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
@@ -1209,7 +1314,10 @@ impl State {
         // it finds a non-air block, ensuring the player spawns on solid ground.
         let spawn = world.read().find_spawn_point();
         let camera = Camera::new(spawn);
-        log(LogLevel::Info, &format!("World generated! Spawn: {:?}", spawn));
+        log(
+            LogLevel::Info,
+            &format!("World generated! Spawn: {:?}", spawn),
+        );
 
         let seed = world.read().seed;
         // `ChunkLoader` generates chunk data (terrain noise, biomes, structures)
@@ -1678,13 +1786,18 @@ impl State {
             uniform_buffer,
             shadow_config_buffer,
             uniform_bind_group,
+            terrain_gbuffer_bind_group,
+            terrain_shadow_output_bind_group,
             shadow_bind_group,
             depth_texture,
             msaa_texture_view,
             shadow_texture_view,
+            shadow_mask_texture,
+            shadow_mask_view,
             shadow_cascade_views,
             shadow_cascade_buffer,
             shadow_sampler,
+            shadow_mask_bind_group,
             world,
             mesh_loader,
             camera,
@@ -1702,7 +1815,7 @@ impl State {
             mouse_captured: false,
             chunks_rendered: 0,
             subchunks_rendered: 0,
-            game_start_time: Instant::now(),
+            game_start_time: Instant::now(), // - std::time::Duration::from_secs_f32(3.14 / 0.005),
             coords_vertex_buffer: None,
             coords_index_buffer: None,
             coords_num_indices: 0,
@@ -1845,7 +1958,7 @@ impl State {
     /// - `sample_count` – Number of MSAA samples (typically 4).
     ///
     /// # Returns
-    /// A `TextureView` wrapping the newly created MSAA colour texture.
+    /// A `TextureView` wrapping the newly created MSAA color texture.
     pub fn create_msaa_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,

@@ -1,0 +1,818 @@
+warning: unused imports: `LogLevel` and `log`
+ --> src\render\mesh_loader.rs:7:21
+  |
+7 | use crate::logger::{log, LogLevel};
+  |                     ^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src\render\texture.rs:105:5
+    |
+105 | /     /// Writes one RGBA pixel into `data` at the given layer and pixel coordinates.
+106 | |     ///
+107 | |     /// Silently does nothing if the computed index would exceed the buffer,
+108 | |     /// guarding against accidental out-of-bounds writes during development.
+    | |____________________________________________________________________________^
+109 | /     let set_pixel = |data: &mut [u8], tex_idx: u32, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8| {
+110 | |         let layer_size = (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize;
+111 | |         let layer_offset = tex_idx as usize * layer_size;
+112 | |         let pixel_offset = ((y * TEXTURE_SIZE + x) * 4) as usize;
+...   |
+121 | |     };
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src\render\texture.rs:123:5
+    |
+123 | /     /// A fast, seed-able integer hash that maps `(x, y, seed)` to a pseudo-random
+124 | |     /// byte in `[0, 255]`.  Used to add per-pixel noise to every texture.
+125 | |     ///
+126 | |     /// The constants are from well-known hash multiplier families (Knuth,
+127 | |     /// Murmur-style) and produce good avalanche with minimal arithmetic.
+    | |_________________________________________________________________________^
+128 | /     let hash = |x: u32, y: u32, seed: u32| -> u8 {
+129 | |         let n = x
+130 | |             .wrapping_mul(374_761_393)
+131 | |             .wrapping_add(y.wrapping_mul(668_265_263))
+...   |
+134 | |         ((n ^ (n >> 16)) & 0xFF) as u8
+135 | |     };
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused import: `init_logger`
+ --> src\logger\mod.rs:2:24
+  |
+2 | pub use self::logger::{init_logger, LogLevel, log};
+  |                        ^^^^^^^^^^^
+
+warning: struct `PlayerInfo` is never constructed
+ --> src\player\player_stats.rs:6:12
+  |
+6 | pub struct PlayerInfo {
+  |            ^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `add_experience`, and `experience_to_next_level` are never used
+  --> src\player\player_stats.rs:46:12
+   |
+41 | impl PlayerInfo {
+   | --------------- associated items in this implementation
+...
+46 |     pub fn new() -> Self {
+   |            ^^^
+...
+62 |     pub fn add_experience(&mut self, amount: f32) {
+   |            ^^^^^^^^^^^^^^
+...
+87 |     pub fn experience_to_next_level(&self) -> f32 {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `InventoryItem` is never constructed
+ --> src\player\inventory\inventory.rs:2:12
+  |
+2 | pub struct InventoryItem {
+  |            ^^^^^^^^^^^^^
+
+warning: struct `Inventory` is never constructed
+ --> src\player\inventory\inventory.rs:8:12
+  |
+8 | pub struct Inventory {
+  |            ^^^^^^^^^
+
+warning: struct `Atlas` is never constructed
+ --> src\render\atlas_map.rs:7:8
+  |
+7 | struct Atlas {
+  |        ^^^^^
+
+warning: function `load_textures` is never used
+  --> src\render\atlas_map.rs:31:4
+   |
+31 | fn load_textures(paths: &[&str], tile_size: u32) -> Vec<Vec<u8>> {
+   |    ^^^^^^^^^^^^^
+
+warning: function `create_atlas` is never used
+  --> src\render\atlas_map.rs:59:4
+   |
+59 | fn create_atlas(tile_size: u32, textures: &[Vec<u8>]) -> Atlas {
+   |    ^^^^^^^^^^^^
+
+warning: struct `DeviceInfo` is never constructed
+ --> src\world\device_info.rs:3:12
+  |
+3 | pub struct DeviceInfo {
+  |            ^^^^^^^^^^
+
+warning: associated function `collect` is never used
+  --> src\world\device_info.rs:12:12
+   |
+11 | impl DeviceInfo {
+   | --------------- associated function in this implementation
+12 |     pub fn collect() -> Self {
+   |            ^^^^^^^
+
+warning: struct `Command` is never constructed
+ --> src\commands\command.rs:1:12
+  |
+1 | pub struct Command {
+  |            ^^^^^^^
+
+warning: variants `Debug` and `Error` are never constructed
+  --> src\logger\logger.rs:8:5
+   |
+ 7 | pub enum LogLevel {
+   |          -------- variants in this enum
+ 8 |     Debug,
+   |     ^^^^^
+...
+11 |     Error,
+   |     ^^^^^
+
+warning: function `init_logger` is never used
+  --> src\logger\logger.rs:35:8
+   |
+35 | pub fn init_logger(log_path: &str) {
+   |        ^^^^^^^^^^^
+
+warning: function `get_project_dirs` is never used
+ --> src\minerust_data\data.rs:3:8
+  |
+3 | pub fn get_project_dirs() -> Result<ProjectDirs, &'static str> {
+  |        ^^^^^^^^^^^^^^^^
+
+warning: `minerust` (lib) generated 17 warnings (run `cargo fix --lib -p minerust` to apply 2 suggestions)
+    Checking minerust v0.1.0 (C:\Users\Bartosz Kasyna\OneDrive - Wydzia┼é Edukacji Urz─ůd Miasta Gda┼äska\Pulpit\Render3D\Minerust)
+warning: unused doc comment
+   --> src\app\init.rs:242:9
+    |
+242 |           /// Compiles a WGSL shader from a string literal embedded in the binary.
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+243 |           // (macro-like helper used only inside this function for brevity)
+244 | /         let hiz_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+245 | |             label: Some("Hi-Z Shader"),
+246 | |             // Downsamples the depth buffer into a mip chain for GPU occlusion culling.
+247 | |             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hiz.wgsl").into()),
+248 | |         });
+    | |___________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src\app\init.rs:1292:9
+     |
+1292 |         /// FPS counter displayed in the top-left corner.
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1293 |         let fps_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(40.0, 48.0));
+     |         ---------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+
+warning: unused doc comment
+    --> src\app\init.rs:1306:9
+     |
+1306 |         /// Random tip shown in the menu footer.
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1307 |         let menu_tips_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+     |         ---------------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+
+warning: unused doc comment
+    --> src\app\init.rs:1312:9
+     |
+1312 |         /// Connection status / error message shown below the buttons.
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1313 |         let menu_status_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+     |         ------------------------------------------------------------------------------------------ rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+    --> src\app\init.rs:1167:17
+     |
+1167 |                 normal: sun_normal,
+     |                 ^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+    --> src\app\init.rs:1168:17
+     |
+1168 |                 color: sun_color,
+     |                 ^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+    --> src\app\init.rs:1169:17
+     |
+1169 |                 uv: [0.0, 0.0],
+     |                 ^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+    --> src\app\init.rs:1170:17
+     |
+1170 |                 tex_index: 0.0,
+     |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+    --> src\app\init.rs:1174:17
+     |
+1174 |                 normal: sun_normal,
+     |                 ^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+    --> src\app\init.rs:1175:17
+     |
+1175 |                 color: sun_color,
+     |                 ^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+    --> src\app\init.rs:1176:17
+     |
+1176 |                 uv: [1.0, 0.0],
+     |                 ^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+    --> src\app\init.rs:1177:17
+     |
+1177 |                 tex_index: 0.0,
+     |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+    --> src\app\init.rs:1181:17
+     |
+1181 |                 normal: sun_normal,
+     |                 ^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+    --> src\app\init.rs:1182:17
+     |
+1182 |                 color: sun_color,
+     |                 ^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+    --> src\app\init.rs:1183:17
+     |
+1183 |                 uv: [1.0, 1.0],
+     |                 ^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+    --> src\app\init.rs:1184:17
+     |
+1184 |                 tex_index: 0.0,
+     |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+    --> src\app\init.rs:1188:17
+     |
+1188 |                 normal: sun_normal,
+     |                 ^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+    --> src\app\init.rs:1189:17
+     |
+1189 |                 color: sun_color,
+     |                 ^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+    --> src\app\init.rs:1190:17
+     |
+1190 |                 uv: [0.0, 1.0],
+     |                 ^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+    --> src\app\init.rs:1191:17
+     |
+1191 |                 tex_index: 0.0,
+     |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+     |
+     = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+  --> src\app\render.rs:80:13
+   |
+80 |             normal,
+   |             ^^^^^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+  --> src\app\render.rs:81:13
+   |
+81 |             color,
+   |             ^^^^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+  --> src\app\render.rs:82:13
+   |
+82 |             uv: [0.0, 0.0],
+   |             ^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+  --> src\app\render.rs:83:13
+   |
+83 |             tex_index: 0.0,
+   |             ^^^^^^^^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:941:17
+    |
+941 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:942:17
+    |
+942 |                 color: bg_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:943:17
+    |
+943 |                 uv: [0.0, 0.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:944:17
+    |
+944 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:948:17
+    |
+948 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:949:17
+    |
+949 |                 color: bg_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:950:17
+    |
+950 |                 uv: [1.0, 0.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:951:17
+    |
+951 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:955:17
+    |
+955 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:956:17
+    |
+956 |                 color: bg_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:957:17
+    |
+957 |                 uv: [1.0, 1.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:958:17
+    |
+958 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:962:17
+    |
+962 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:963:17
+    |
+963 |                 color: bg_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:964:17
+    |
+964 |                 uv: [0.0, 1.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:965:17
+    |
+965 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:973:17
+    |
+973 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:974:17
+    |
+974 |                 color: prog_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:975:17
+    |
+975 |                 uv: [0.0, 0.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:976:17
+    |
+976 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:980:17
+    |
+980 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:981:17
+    |
+981 |                 color: prog_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:982:17
+    |
+982 |                 uv: [1.0, 0.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:983:17
+    |
+983 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:987:17
+    |
+987 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:988:17
+    |
+988 |                 color: prog_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:989:17
+    |
+989 |                 uv: [1.0, 1.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:990:17
+    |
+990 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\app\render.rs:994:17
+    |
+994 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\app\render.rs:995:17
+    |
+995 |                 color: prog_color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\app\render.rs:996:17
+    |
+996 |                 uv: [0.0, 1.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\app\render.rs:997:17
+    |
+997 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+  --> src\ui\ui.rs:83:17
+   |
+83 |                 normal,
+   |                 ^^^^^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+  --> src\ui\ui.rs:84:17
+   |
+84 |                 color,
+   |                 ^^^^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+  --> src\ui\ui.rs:85:17
+   |
+85 |                 uv: [0.0, 0.0],
+   |                 ^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+  --> src\ui\ui.rs:86:17
+   |
+86 |                 tex_index: 0.0,
+   |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+   |
+   = note: available fields are: `packed`
+
+error[E0308]: mismatched types
+   --> src\ui\ui.rs:105:34
+    |
+105 |         add_quad(x0, y0, x1, y1, border_color);
+    |         --------                 ^^^^^^^^^^^^ expected an array with a size of 4, found one with a size of 3
+    |         |
+    |         arguments to this function are incorrect
+    |
+note: closure parameter defined here
+   --> src\ui\ui.rs:78:61
+    |
+ 78 |     let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4]| {
+    |                                                             ^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\ui\ui.rs:118:13
+    |
+113 |         add_quad(
+    |         -------- arguments to this function are incorrect
+...
+118 |             bg_color,
+    |             ^^^^^^^^ expected an array with a size of 4, found one with a size of 3
+    |
+note: closure parameter defined here
+   --> src\ui\ui.rs:78:61
+    |
+ 78 |     let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4]| {
+    |                                                             ^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\ui\ui.rs:127:62
+    |
+127 |         add_quad(x0 + pad, y0 + pad_h, x1 - pad, y1 - pad_h, block_color);
+    |         -------- arguments to this function are incorrect    ^^^^^^^^^^^ expected an array with a size of 4, found one with a size of 3
+    |
+note: closure parameter defined here
+   --> src\ui\ui.rs:78:61
+    |
+ 78 |     let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4]| {
+    |                                                             ^^^^^^^^^^^^^^
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\ui\ui.rs:233:17
+    |
+233 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\ui\ui.rs:234:17
+    |
+234 |                 color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\ui\ui.rs:235:17
+    |
+235 |                 uv: [0.0, 0.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\ui\ui.rs:236:17
+    |
+236 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\ui\ui.rs:240:17
+    |
+240 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\ui\ui.rs:241:17
+    |
+241 |                 color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\ui\ui.rs:242:17
+    |
+242 |                 uv: [1.0, 0.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\ui\ui.rs:243:17
+    |
+243 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\ui\ui.rs:247:17
+    |
+247 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\ui\ui.rs:248:17
+    |
+248 |                 color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\ui\ui.rs:249:17
+    |
+249 |                 uv: [1.0, 1.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\ui\ui.rs:250:17
+    |
+250 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `normal`
+   --> src\ui\ui.rs:254:17
+    |
+254 |                 normal,
+    |                 ^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `color`
+   --> src\ui\ui.rs:255:17
+    |
+255 |                 color,
+    |                 ^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `uv`
+   --> src\ui\ui.rs:256:17
+    |
+256 |                 uv: [0.0, 1.0],
+    |                 ^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+error[E0560]: struct `minerust::Vertex` has no field named `tex_index`
+   --> src\ui\ui.rs:257:17
+    |
+257 |                 tex_index: 0.0,
+    |                 ^^^^^^^^^ `minerust::Vertex` does not have this field
+    |
+    = note: available fields are: `packed`
+
+Some errors have detailed explanations: E0308, E0560.
+For more information about an error, try `rustc --explain E0308`.
+warning: `minerust` (bin "minerust") generated 4 warnings
+error: could not compile `minerust` (bin "minerust") due to 75 previous errors; 4 warnings emitted

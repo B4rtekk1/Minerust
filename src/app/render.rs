@@ -61,7 +61,7 @@ fn push_rect(
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
     rect: Rect,
-    color: [u8; 4],
+    color: [f32; 3],  // Use raw floats for consistent packing
     width: f32,
     height: f32,
 ) {
@@ -70,17 +70,14 @@ fn push_rect(
     let y0 = px_to_ndc_y(rect.y, height);
     let x1 = px_to_ndc_x(rect.x + rect.w, width);
     let y1 = px_to_ndc_y(rect.y + rect.h, height);
-    let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+    let normal_idx = Vertex::pack_normal([0.0, 0.0, 1.0]);
 
-    // Push the four corners of the rectangle (top-left → top-right →
-    // bottom-right → bottom-left in NDC space).
-    for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+    // Top-left → top-right → bottom-right → bottom-left (corner_idx 0..3)
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    for (i, &(x, y)) in corners.iter().enumerate() {
         vertices.push(Vertex {
             position: [x, y, 0.0],
-            normal,
-            color,
-            uv: [0.0, 0.0],
-            tex_index: 0.0,
+            packed: Vertex::pack(normal_idx, color, 0, i as u8, 1, 1),
         });
     }
 
@@ -88,13 +85,10 @@ fn push_rect(
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// Converts a normalized `[f32; 4]` RGBA color to the packed `[u8; 4]`
-/// format expected by [`Vertex`].
-///
-/// Each channel is clamped to `[0.0, 1.0]` by `pack_color_rgba` before
-/// converting to `u8`.
-fn rgba(color: [f32; 4]) -> [u8; 4] {
-    Vertex::pack_color_rgba(color)
+/// Converts a normalized `[f32; 4]` RGBA color to the raw `[f32; 3]`
+/// format expected by [`Vertex::pack`].  (UI is opaque for now)
+fn color_to_f32x3(color: [f32; 4]) -> [f32; 3] {
+    [color[0], color[1], color[2]]
 }
 
 /// Computes which faces of the highlighted block should be outlined.
@@ -582,6 +576,9 @@ impl State {
             // being clipped, and the same quad geometry as the sun billboard.
             opaque_pass.set_pipeline(&self.sky_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+            opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+            opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
             opaque_pass
                 .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -592,6 +589,9 @@ impl State {
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+            opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+            opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
             opaque_pass.set_index_buffer(
                 self.indirect_manager.index_buffer().slice(..),
@@ -623,6 +623,9 @@ impl State {
                 ) {
                     opaque_pass.set_pipeline(&self.render_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+                    opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+                    opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     opaque_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
@@ -634,6 +637,9 @@ impl State {
             // terrain on the horizon.
             opaque_pass.set_pipeline(&self.sun_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+            opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+            opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
             opaque_pass
                 .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -816,6 +822,9 @@ impl State {
                             });
                     outline_pass.set_pipeline(&self.outline_pipeline);
                     outline_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    outline_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+                    outline_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+                    outline_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
                     outline_pass.set_vertex_buffer(0, outline_vb.slice(..));
                     outline_pass.set_index_buffer(outline_ib.slice(..), wgpu::IndexFormat::Uint32);
                     outline_pass.draw_indexed(0..outline_indices.len() as u32, 0, 0..1);
@@ -872,6 +881,9 @@ impl State {
             // --- Crosshair ---
             ui_pass.set_pipeline(&self.crosshair_pipeline);
             ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            ui_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+            ui_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+            ui_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
             ui_pass.set_index_buffer(
                 self.crosshair_index_buffer.slice(..),
@@ -929,73 +941,35 @@ impl State {
             let bar_height = 0.015;
             let bar_y = -0.05;
 
-            let bg_color = Vertex::pack_color([0.2, 0.2, 0.2]);
+            let bg_color = [0.2, 0.2, 0.2];
             // Color shifts from red (0%) → yellow (50%) → green (100%).
-            let prog_color = Vertex::pack_color([1.0 - progress, progress, 0.0]);
-            let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+            let prog_color = [1.0 - progress, progress, 0.0];
+            let normal_idx = Vertex::pack_normal([0.0, 0.0, 1.0]);
 
             // Background quad (full-width gray bar).
             let mut vertices = Vec::with_capacity(8);
-            vertices.push(Vertex {
-                position: [-bar_width, bar_y - bar_height, 0.0],
-                normal,
-                color: bg_color,
-                uv: [0.0, 0.0],
-                tex_index: 0.0,
-            });
-            vertices.push(Vertex {
-                position: [bar_width, bar_y - bar_height, 0.0],
-                normal,
-                color: bg_color,
-                uv: [1.0, 0.0],
-                tex_index: 0.0,
-            });
-            vertices.push(Vertex {
-                position: [bar_width, bar_y + bar_height, 0.0],
-                normal,
-                color: bg_color,
-                uv: [1.0, 1.0],
-                tex_index: 0.0,
-            });
-            vertices.push(Vertex {
-                position: [-bar_width, bar_y + bar_height, 0.0],
-                normal,
-                color: bg_color,
-                uv: [0.0, 1.0],
-                tex_index: 0.0,
-            });
+            for (i, (x, y)) in [(-bar_width, bar_y - bar_height), (bar_width, bar_y - bar_height), (bar_width, bar_y + bar_height), (-bar_width, bar_y + bar_height)].into_iter().enumerate() {
+                vertices.push(Vertex {
+                    position: [x, y, 0.0],
+                    packed: Vertex::pack(normal_idx, bg_color, 0, i as u8, 1, 1),
+                });
+            }
 
             // Foreground quad (colored fill, inset by 0.005/0.003 on each
             // side so the gray border remains visible all around).
             let prog_width = bar_width * 2.0 * progress - bar_width;
-            vertices.push(Vertex {
-                position: [-bar_width + 0.005, bar_y - bar_height + 0.003, 0.0],
-                normal,
-                color: prog_color,
-                uv: [0.0, 0.0],
-                tex_index: 0.0,
-            });
-            vertices.push(Vertex {
-                position: [prog_width - 0.005, bar_y - bar_height + 0.003, 0.0],
-                normal,
-                color: prog_color,
-                uv: [1.0, 0.0],
-                tex_index: 0.0,
-            });
-            vertices.push(Vertex {
-                position: [prog_width - 0.005, bar_y + bar_height - 0.003, 0.0],
-                normal,
-                color: prog_color,
-                uv: [1.0, 1.0],
-                tex_index: 0.0,
-            });
-            vertices.push(Vertex {
-                position: [-bar_width + 0.005, bar_y + bar_height - 0.003, 0.0],
-                normal,
-                color: prog_color,
-                uv: [0.0, 1.0],
-                tex_index: 0.0,
-            });
+            let fg_corners = [
+                (-bar_width + 0.005, bar_y - bar_height + 0.003),
+                (prog_width - 0.005, bar_y - bar_height + 0.003),
+                (prog_width - 0.005, bar_y + bar_height - 0.003),
+                (-bar_width + 0.005, bar_y + bar_height - 0.003),
+            ];
+            for (i, (x, y)) in fg_corners.into_iter().enumerate() {
+                vertices.push(Vertex {
+                    position: [x, y, 0.0],
+                    packed: Vertex::pack(normal_idx, prog_color, 0, i as u8, 1, 1),
+                });
+            }
 
             // Indices for two quads (bg = 0-3, fg = 4-7).
             let indices: [u32; 12] = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
@@ -1054,6 +1028,9 @@ impl State {
             });
             progress_pass.set_pipeline(&self.crosshair_pipeline);
             progress_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            progress_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+            progress_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+            progress_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             progress_pass.set_vertex_buffer(0, progress_vb.slice(..));
             progress_pass.set_index_buffer(progress_ib.slice(..), wgpu::IndexFormat::Uint32);
             progress_pass.draw_indexed(0..12, 0, 0..1);
@@ -1693,7 +1670,7 @@ impl State {
                 w: width,
                 h: height,
             },
-            rgba([0.03, 0.05, 0.08, 0.94]),
+            color_to_f32x3([0.03, 0.05, 0.08, 0.94]),
             width,
             height,
         );
@@ -1708,7 +1685,7 @@ impl State {
                 w: panel.w + 20.0,
                 h: panel.h + 20.0,
             },
-            rgba([0.05, 0.1, 0.16, 0.55]),
+            color_to_f32x3([0.05, 0.1, 0.16, 0.55]),
             width,
             height,
         );
@@ -1718,7 +1695,7 @@ impl State {
             &mut vertices,
             &mut indices,
             panel,
-            rgba([0.07, 0.09, 0.12, 0.96]),
+            color_to_f32x3([0.07, 0.09, 0.12, 0.96]),
             width,
             height,
         );
@@ -1733,7 +1710,7 @@ impl State {
                 w: panel.w,
                 h: 6.0,
             },
-            rgba([0.95, 0.72, 0.24, 1.0]),
+            color_to_f32x3([0.95, 0.72, 0.24, 1.0]),
             width,
             height,
         );
@@ -1748,7 +1725,7 @@ impl State {
                 w: 180.0,
                 h: 34.0,
             },
-            rgba([0.12, 0.16, 0.21, 0.95]),
+            color_to_f32x3([0.12, 0.16, 0.21, 0.95]),
             width,
             height,
         );
@@ -1763,7 +1740,7 @@ impl State {
                 w: 8.0,
                 h: 40.0,
             },
-            rgba([0.97, 0.74, 0.24, 1.0]),
+            color_to_f32x3([0.97, 0.74, 0.24, 1.0]),
             width,
             height,
         );
@@ -1778,7 +1755,7 @@ impl State {
                 w: layout.quick_card.w,
                 h: layout.quick_card.h,
             },
-            rgba([0.11, 0.14, 0.18, 0.98]),
+            color_to_f32x3([0.11, 0.14, 0.18, 0.98]),
             width,
             height,
         );
@@ -1793,23 +1770,23 @@ impl State {
                 w: 4.0,
                 h: layout.quick_card.h,
             },
-            rgba([0.35, 0.8, 0.78, 1.0]),
+            color_to_f32x3([0.35, 0.8, 0.78, 1.0]),
             width,
             height,
         );
 
         // 7. Server address field (active = slightly brighter fill).
         let field_color = if self.menu_state.selected_field == MenuField::ServerAddress {
-            rgba([0.13, 0.2, 0.27, 1.0])
+            color_to_f32x3([0.13, 0.2, 0.27, 1.0])
         } else {
-            rgba([0.1, 0.13, 0.17, 1.0])
+            color_to_f32x3([0.1, 0.13, 0.17, 1.0])
         };
         // Outer dark border (1 px implied by the 2 px inset of the inner rect).
         push_rect(
             &mut vertices,
             &mut indices,
             layout.server_field,
-            rgba([0.02, 0.03, 0.04, 1.0]),
+            color_to_f32x3([0.02, 0.03, 0.04, 1.0]),
             width,
             height,
         );
@@ -1829,15 +1806,15 @@ impl State {
 
         // 8. Username field (same pattern as server field).
         let username_color = if self.menu_state.selected_field == MenuField::Username {
-            rgba([0.13, 0.2, 0.27, 1.0])
+            color_to_f32x3([0.13, 0.2, 0.27, 1.0])
         } else {
-            rgba([0.1, 0.13, 0.17, 1.0])
+            color_to_f32x3([0.1, 0.13, 0.17, 1.0])
         };
         push_rect(
             &mut vertices,
             &mut indices,
             layout.username_field,
-            rgba([0.02, 0.03, 0.04, 1.0]),
+            color_to_f32x3([0.02, 0.03, 0.04, 1.0]),
             width,
             height,
         );
@@ -1857,15 +1834,15 @@ impl State {
 
         // 9. Connect button (brighter fill on hover).
         let connect_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Connect)) {
-            rgba([0.24, 0.52, 0.84, 1.0])
+            color_to_f32x3([0.24, 0.52, 0.84, 1.0])
         } else {
-            rgba([0.2, 0.45, 0.74, 1.0])
+            color_to_f32x3([0.2, 0.45, 0.74, 1.0])
         };
         push_rect(
             &mut vertices,
             &mut indices,
             layout.connect_button,
-            rgba([0.16, 0.33, 0.55, 1.0]),
+            color_to_f32x3([0.16, 0.33, 0.55, 1.0]),
             width,
             height,
         ); // border
@@ -1885,15 +1862,15 @@ impl State {
 
         // 10. Singleplayer button (same pattern, darker palette).
         let single_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Singleplayer)) {
-            rgba([0.19, 0.22, 0.28, 1.0])
+            color_to_f32x3([0.19, 0.22, 0.28, 1.0])
         } else {
-            rgba([0.16, 0.19, 0.24, 1.0])
+            color_to_f32x3([0.16, 0.19, 0.24, 1.0])
         };
         push_rect(
             &mut vertices,
             &mut indices,
             layout.singleplayer_button,
-            rgba([0.1, 0.11, 0.14, 1.0]),
+            color_to_f32x3([0.1, 0.11, 0.14, 1.0]),
             width,
             height,
         );
@@ -1916,7 +1893,7 @@ impl State {
             &mut vertices,
             &mut indices,
             layout.status_pill,
-            rgba([0.08, 0.1, 0.13, 0.96]),
+            color_to_f32x3([0.08, 0.1, 0.13, 0.96]),
             width,
             height,
         );
@@ -1938,7 +1915,7 @@ impl State {
                     w: field.w + 4.0,
                     h: 3.0,
                 },
-                rgba([0.97, 0.74, 0.24, 1.0]),
+                color_to_f32x3([0.97, 0.74, 0.24, 1.0]),
                 width,
                 height,
             );
@@ -1968,7 +1945,7 @@ impl State {
                     w: 2.0,
                     h: field.h - 16.0,
                 },
-                rgba([0.97, 0.74, 0.24, 0.95]),
+                color_to_f32x3([0.97, 0.74, 0.24, 0.95]),
                 width,
                 height,
             );
@@ -2009,6 +1986,9 @@ impl State {
             });
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+            pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+            pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..indices.len() as u32, 0, 0..1);

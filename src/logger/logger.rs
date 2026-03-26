@@ -55,3 +55,5 @@ pub fn log(level: LogLevel, message: &str) {
         let _ = file.write_all(formatted.as_bytes());
     }
 }
+
+

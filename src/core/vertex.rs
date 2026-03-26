@@ -6,104 +6,72 @@ use bytemuck::{Pod, Zeroable};
 /// returned by [`Vertex::desc`]. Implements [`Pod`] and [`Zeroable`] for safe
 /// direct casting to/from byte slices.
 ///
+/// A high-performance, packed 16-byte vertex for voxel rendering.
+///
+/// This format reduces memory bandwidth and VRAM usage by packing normals,
+/// colors, and UV metadata into a single 32-bit field.
+///
 /// # Memory layout
 /// | Field       | Offset | Size | Format        |
 /// |-------------|--------|------|---------------|
 /// | `position`  | 0      | 12 B | `Float32x3`   |
-/// | `normal`    | 12     | 4 B  | `Snorm8x4`    |
-/// | `color`     | 16     | 4 B  | `Unorm8x4`    |
-/// | `uv`        | 20     | 8 B  | `Float32x2`   |
-/// | `tex_index` | 28     | 4 B  | `Float32`     |
+/// | `packed`    | 12     | 4 B  | `Uint32`      |
+///
+/// # Packed Data Bits (32 bits total)
+/// | Bits  | Purpose        | Range         |
+/// |-------|----------------|---------------|
+/// | 0-2   | Normal Index   | 0-5 (cardinal)|
+/// | 3-10  | Texture Index  | 0-255         |
+/// | 11-12 | UV Corner      | 0-3           |
+/// | 13-18 | Color R (6-bit)| 0-63          |
+/// | 19-24 | Color G (6-bit)| 0-63          |
+/// | 25-30 | Color B (6-bit)| 0-63          |
+/// | 31    | Reserved       | -             |
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex {
-    /// World-space position `[x, y, z]` in floating-point coordinates.
     pub position: [f32; 3],
-    /// Packed surface normal. Use [`Vertex::pack_normal`] to convert from `[f32; 3]`.
-    /// The fourth byte is padding and should be `0`.
-    pub normal: [i8; 4],
-    /// RGBA color packed as `u8` per channel. Use [`Vertex::pack_color`] or
-    /// [`Vertex::pack_color_rgba`] to convert from normalized `f32` values.
-    pub color: [u8; 4],
-    /// Texture UV coordinates `[u, v]` in normalized `[0.0, 1.0]` space.
-    pub uv: [f32; 2],
-    /// Index of the texture to sample, stored as `f32` for shader compatibility.
-    pub tex_index: f32,
+    pub packed: u32,
 }
 
 impl Vertex {
-    /// Packs a floating-point RGB normal into a signed 8-bit `[i8; 4]` representation.
-    ///
-    /// Each component is clamped to `[-1.0, 1.0]` and scaled to the `[-127, 127]` range.
-    /// The fourth element is always `0` (padding).
-    ///
-    /// # Parameters
-    /// - `n`: A unit-length normal vector `[x, y, z]` with components in `[-1.0, 1.0]`.
-    ///
-    /// # Returns
-    /// A 4-byte packed normal suitable for [`Vertex::normal`].
-    #[inline]
-    pub fn pack_normal(n: [f32; 3]) -> [i8; 4] {
-        [
-            (n[0].clamp(-1.0, 1.0) * 127.0) as i8,
-            (n[1].clamp(-1.0, 1.0) * 127.0) as i8,
-            (n[2].clamp(-1.0, 1.0) * 127.0) as i8,
-            0,
-        ]
+    /// Packs normal, color, texture, corner, and dimensions into the 32-bit `packed` field.
+    pub fn pack(
+        normal_idx: u8,      // 0-5 (3 bits)
+        color: [f32; 3],     // 0.0-1.0 (11 bits: 4R, 4G, 3B)
+        tex_index: u8,       // 0-255 (8 bits)
+        corner_idx: u8,      // 0-3 (2 bits)
+        width: u8,           // 1-16 (4 bits)
+        height: u8,          // 1-16 (4 bits)
+    ) -> u32 {
+        let n = (normal_idx as u32) & 0x7;
+        let t = (tex_index as u32) & 0xFF;
+        let uv = (corner_idx as u32) & 0x3;
+        let w = ((width.saturating_sub(1)) as u32) & 0xF;
+        let h = ((height.saturating_sub(1)) as u32) & 0xF;
+        
+        // 11-bit color: 4 bits Red, 4 bits Green, 3 bits Blue
+        let r = ((color[0].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
+        let g = ((color[1].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
+        let b = ((color[2].clamp(0.0, 1.0) * 7.0) as u32) & 0x7;
+
+        n | (t << 3) | (uv << 11) | (w << 13) | (h << 17) | (r << 21) | (g << 25) | (b << 29)
     }
 
-    /// Packs a floating-point RGB color into an unsigned 8-bit `[u8; 4]` representation.
-    ///
-    /// Each component is clamped to `[0.0, 1.0]` and scaled to `[0, 255]`.
-    /// Alpha is set to `255` (fully opaque).
-    ///
-    /// # Parameters
-    /// - `c`: An RGB color `[r, g, b]` with components in `[0.0, 1.0]`.
-    ///
-    /// # Returns
-    /// A 4-byte packed RGBA color suitable for [`Vertex::color`].
-    #[inline]
-    pub fn pack_color(c: [f32; 3]) -> [u8; 4] {
-        [
-            (c[0].clamp(0.0, 1.0) * 255.0) as u8,
-            (c[1].clamp(0.0, 1.0) * 255.0) as u8,
-            (c[2].clamp(0.0, 1.0) * 255.0) as u8,
-            255,
-        ]
+    /// Legacy pack helpers (unused but kept for compatibility during refactor if needed)
+    #[inline] pub fn pack_normal(n: [f32; 3]) -> u8 {
+        if n[0] > 0.5 { 1 } else if n[0] < -0.5 { 0 }
+        else if n[1] > 0.5 { 3 } else if n[1] < -0.5 { 2 }
+        else if n[2] > 0.5 { 5 } else { 4 }
     }
 
-    /// Packs a floating-point RGBA color into an unsigned 8-bit `[u8; 4]` representation.
-    ///
-    /// Each component is clamped to `[0.0, 1.0]` and scaled to `[0, 255]`.
-    ///
-    /// # Parameters
-    /// - `c`: An RGBA color `[r, g, b, a]` with components in `[0.0, 1.0]`.
-    ///
-    /// # Returns
-    /// A 4-byte packed RGBA color suitable for [`Vertex::color`].
-    #[inline]
-    pub fn pack_color_rgba(c: [f32; 4]) -> [u8; 4] {
-        [
-            (c[0].clamp(0.0, 1.0) * 255.0) as u8,
-            (c[1].clamp(0.0, 1.0) * 255.0) as u8,
-            (c[2].clamp(0.0, 1.0) * 255.0) as u8,
-            (c[3].clamp(0.0, 1.0) * 255.0) as u8,
-        ]
+    #[inline] pub fn pack_color(c: [f32; 3]) -> [u8; 3] {
+        [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8]
     }
 
-    /// Returns the wgpu vertex buffer layout descriptor for this vertex type.
-    ///
-    /// Describes the stride, step mode, and all five shader attributes so wgpu
-    /// knows how to interpret a buffer of [`Vertex`] values.
-    ///
-    /// # Shader locations
-    /// | Location | Field       | Format      |
-    /// |----------|-------------|-------------|
-    /// | 0        | `position`  | `Float32x3` |
-    /// | 1        | `normal`    | `Snorm8x4`  |
-    /// | 2        | `color`     | `Unorm8x4`  |
-    /// | 3        | `uv`        | `Float32x2` |
-    /// | 4        | `tex_index` | `Float32`   |
+    #[inline] pub fn pack_color_rgba(c: [f32; 4]) -> [u8; 4] {
+        [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, (c[3] * 255.0) as u8]
+    }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -118,22 +86,7 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: 12,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Snorm8x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: 16,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Unorm8x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: 20,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: 28,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         }

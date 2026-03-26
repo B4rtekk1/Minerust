@@ -19,10 +19,7 @@ var<uniform> uniforms: Uniforms;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec4<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) uv: vec2<f32>,
-    @location(4) tex_index: f32,
+    @location(1) packed: u32,
 };
 
 struct VertexOutput {
@@ -33,6 +30,11 @@ struct VertexOutput {
 @vertex
 fn vs_sun(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
+    let uv_idx = (model.packed >> 11u) & 0x3u;
+    let uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0)
+    );
 
     let sun_dir = normalize(uniforms.sun_position);
     let sun_world_pos = uniforms.camera_pos + sun_dir * 180.0;
@@ -52,7 +54,7 @@ fn vs_sun(model: VertexInput) -> VertexOutput {
 
     out.clip_position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
     out.clip_position.z = out.clip_position.w * 0.99999;
-    out.uv = model.uv;
+    out.uv = uvs[uv_idx % 4u];
 
     return out;
 }

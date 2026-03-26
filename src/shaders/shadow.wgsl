@@ -7,10 +7,7 @@ var<uniform> uniforms: ShadowUniforms;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec4<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) uv: vec2<f32>,
-    @location(4) tex_index: f32,
+    @location(1) packed: u32,
 };
 
 @vertex

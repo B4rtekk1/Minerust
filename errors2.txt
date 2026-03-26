@@ -1,0 +1,229 @@
+warning: unused imports: `LogLevel` and `log`
+ --> src\render\mesh_loader.rs:7:21
+  |
+7 | use crate::logger::{log, LogLevel};
+  |                     ^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src\render\texture.rs:105:5
+    |
+105 | /     /// Writes one RGBA pixel into `data` at the given layer and pixel coordinates.
+106 | |     ///
+107 | |     /// Silently does nothing if the computed index would exceed the buffer,
+108 | |     /// guarding against accidental out-of-bounds writes during development.
+    | |____________________________________________________________________________^
+109 | /     let set_pixel = |data: &mut [u8], tex_idx: u32, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8| {
+110 | |         let layer_size = (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize;
+111 | |         let layer_offset = tex_idx as usize * layer_size;
+112 | |         let pixel_offset = ((y * TEXTURE_SIZE + x) * 4) as usize;
+...   |
+121 | |     };
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src\render\texture.rs:123:5
+    |
+123 | /     /// A fast, seed-able integer hash that maps `(x, y, seed)` to a pseudo-random
+124 | |     /// byte in `[0, 255]`.  Used to add per-pixel noise to every texture.
+125 | |     ///
+126 | |     /// The constants are from well-known hash multiplier families (Knuth,
+127 | |     /// Murmur-style) and produce good avalanche with minimal arithmetic.
+    | |_________________________________________________________________________^
+128 | /     let hash = |x: u32, y: u32, seed: u32| -> u8 {
+129 | |         let n = x
+130 | |             .wrapping_mul(374_761_393)
+131 | |             .wrapping_add(y.wrapping_mul(668_265_263))
+...   |
+134 | |         ((n ^ (n >> 16)) & 0xFF) as u8
+135 | |     };
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused import: `init_logger`
+ --> src\logger\mod.rs:2:24
+  |
+2 | pub use self::logger::{init_logger, LogLevel, log};
+  |                        ^^^^^^^^^^^
+
+warning: struct `PlayerInfo` is never constructed
+ --> src\player\player_stats.rs:6:12
+  |
+6 | pub struct PlayerInfo {
+  |            ^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `add_experience`, and `experience_to_next_level` are never used
+  --> src\player\player_stats.rs:46:12
+   |
+41 | impl PlayerInfo {
+   | --------------- associated items in this implementation
+...
+46 |     pub fn new() -> Self {
+   |            ^^^
+...
+62 |     pub fn add_experience(&mut self, amount: f32) {
+   |            ^^^^^^^^^^^^^^
+...
+87 |     pub fn experience_to_next_level(&self) -> f32 {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `InventoryItem` is never constructed
+ --> src\player\inventory\inventory.rs:2:12
+  |
+2 | pub struct InventoryItem {
+  |            ^^^^^^^^^^^^^
+
+warning: struct `Inventory` is never constructed
+ --> src\player\inventory\inventory.rs:8:12
+  |
+8 | pub struct Inventory {
+  |            ^^^^^^^^^
+
+warning: struct `Atlas` is never constructed
+ --> src\render\atlas_map.rs:7:8
+  |
+7 | struct Atlas {
+  |        ^^^^^
+
+warning: function `load_textures` is never used
+  --> src\render\atlas_map.rs:31:4
+   |
+31 | fn load_textures(paths: &[&str], tile_size: u32) -> Vec<Vec<u8>> {
+   |    ^^^^^^^^^^^^^
+
+warning: function `create_atlas` is never used
+  --> src\render\atlas_map.rs:59:4
+   |
+59 | fn create_atlas(tile_size: u32, textures: &[Vec<u8>]) -> Atlas {
+   |    ^^^^^^^^^^^^
+
+warning: struct `DeviceInfo` is never constructed
+ --> src\world\device_info.rs:3:12
+  |
+3 | pub struct DeviceInfo {
+  |            ^^^^^^^^^^
+
+warning: associated function `collect` is never used
+  --> src\world\device_info.rs:12:12
+   |
+11 | impl DeviceInfo {
+   | --------------- associated function in this implementation
+12 |     pub fn collect() -> Self {
+   |            ^^^^^^^
+
+warning: struct `Command` is never constructed
+ --> src\commands\command.rs:1:12
+  |
+1 | pub struct Command {
+  |            ^^^^^^^
+
+warning: variants `Debug` and `Error` are never constructed
+  --> src\logger\logger.rs:8:5
+   |
+ 7 | pub enum LogLevel {
+   |          -------- variants in this enum
+ 8 |     Debug,
+   |     ^^^^^
+...
+11 |     Error,
+   |     ^^^^^
+
+warning: function `init_logger` is never used
+  --> src\logger\logger.rs:35:8
+   |
+35 | pub fn init_logger(log_path: &str) {
+   |        ^^^^^^^^^^^
+
+warning: function `get_project_dirs` is never used
+ --> src\minerust_data\data.rs:3:8
+  |
+3 | pub fn get_project_dirs() -> Result<ProjectDirs, &'static str> {
+  |        ^^^^^^^^^^^^^^^^
+
+warning: `minerust` (lib) generated 17 warnings (run `cargo fix --lib -p minerust` to apply 2 suggestions)
+    Checking minerust v0.1.0 (C:\Users\Bartosz Kasyna\OneDrive - Wydzia┼é Edukacji Urz─ůd Miasta Gda┼äska\Pulpit\Render3D\Minerust)
+warning: unused doc comment
+   --> src\app\init.rs:242:9
+    |
+242 |           /// Compiles a WGSL shader from a string literal embedded in the binary.
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+243 |           // (macro-like helper used only inside this function for brevity)
+244 | /         let hiz_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+245 | |             label: Some("Hi-Z Shader"),
+246 | |             // Downsamples the depth buffer into a mip chain for GPU occlusion culling.
+247 | |             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hiz.wgsl").into()),
+248 | |         });
+    | |___________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src\app\init.rs:1280:9
+     |
+1280 |         /// FPS counter displayed in the top-left corner.
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1281 |         let fps_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(40.0, 48.0));
+     |         ---------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+
+warning: unused doc comment
+    --> src\app\init.rs:1294:9
+     |
+1294 |         /// Random tip shown in the menu footer.
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1295 |         let menu_tips_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+     |         ---------------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+
+warning: unused doc comment
+    --> src\app\init.rs:1300:9
+     |
+1300 |         /// Connection status / error message shown below the buttons.
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1301 |         let menu_status_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+     |         ------------------------------------------------------------------------------------------ rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+
+warning: unused variable: `sun_color`
+    --> src\app\init.rs:1163:13
+     |
+1163 |         let sun_color = Vertex::pack_color([1.0, 1.0, 1.0]);
+     |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sun_color`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `block_type_to_index` is never used
+  --> src\ui\ui.rs:25:8
+   |
+25 | pub fn block_type_to_index(block: BlockType) -> Option<f32> {
+   |        ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SlotIcon` is never constructed
+ --> src\ui\toolbar.rs:1:8
+  |
+1 | struct SlotIcon {
+  |        ^^^^^^^^
+
+warning: variant `Debug` is never constructed
+ --> src\logger\logger.rs:8:5
+  |
+7 | pub enum LogLevel {
+  |          -------- variant in this enum
+8 |     Debug,
+  |     ^^^^^
+
+warning: `minerust` (bin "minerust") generated 8 warnings (run `cargo fix --bin "minerust" -p minerust` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.78s

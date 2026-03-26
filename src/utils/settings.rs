@@ -3,13 +3,15 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use crate::logger::{log, LogLevel};
+use crate::minerust_data::data::get_project_dirs;
 
 /// Root settings structure containing all configurable game options.
 ///
-/// Serialised to and deserialised from `settings.bin` via
+/// Serialised to and deserialized from `
+/// settings.bin` via
 /// [`save_settings`] and [`load_settings`]. Sub-sections with
 /// `#[serde(default)]` are backwards-compatible: older save files that
-/// predate a section will deserialise successfully with default values
+/// predate a section will deserialize successfully with default values
 /// for the missing fields.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GameSettings {
@@ -307,7 +309,7 @@ pub struct Keybinds {
 /// Returns the default binding for the interact action (`"mouse.Right"`).
 ///
 /// Used as a `serde` default function so older save files without this
-/// field deserialise correctly.
+/// field deserialize correctly.
 fn default_interact_key() -> String {
     "mouse.Right".to_string()
 }
@@ -315,7 +317,7 @@ fn default_interact_key() -> String {
 /// Returns the default binding for the toggle-fly action (`"keyboard.G"`).
 ///
 /// Used as a `serde` default function so older save files without this
-/// field deserialise correctly.
+/// field deserialize correctly.
 fn default_fly_key() -> String {
     "keyboard.G".to_string()
 }
@@ -374,7 +376,7 @@ pub struct DebugSettings {
     pub show_coords: bool,
     /// Renders geometry as wireframe instead of solid surfaces.
     pub wireframe_mode: bool,
-    /// Draws coloured borders around loaded chunk boundaries.
+    /// Draws colored borders around loaded chunk boundaries.
     pub show_chunk_borders: bool,
 }
 
@@ -389,17 +391,19 @@ impl Default for DebugSettings {
     }
 }
 
-/// Serialises `settings` to `settings.bin` using `bincode`.
+/// Serializes `settings` to `settings.bin` using `bincode`.
 ///
 /// Creates or overwrites the file in the current working directory.
 ///
 /// # Errors
 ///
-/// Returns a boxed error if serialisation fails or the file cannot be
+/// Returns a boxed error if serialization fails or the file cannot be
 /// created or written.
 pub fn save_settings(settings: &GameSettings) -> Result<(), Box<dyn std::error::Error>> {
     let encoded: Vec<u8> = bincode::serialize(settings)?;
-    let mut file = File::create("settings.bin")?;
+    let path = get_project_dirs()?;
+    let final_path = path.data_dir().join("settings.bin");
+    let mut file = File::create(final_path)?;
     file.write_all(&encoded)?;
     Ok(())
 }
@@ -420,7 +424,7 @@ pub fn load_settings() -> GameSettings {
     }
 }
 
-/// Attempts to open and deserialise `settings.bin`.
+/// Attempts to open and deserialize `settings.bin`.
 ///
 /// Separated from [`load_settings`] so the error path can be handled in
 /// one place without duplicating file I/O logic.
@@ -428,7 +432,7 @@ pub fn load_settings() -> GameSettings {
 /// # Errors
 ///
 /// Returns a boxed error if the file cannot be opened, read, or
-/// deserialised by `bincode`.
+/// deserialized by `bincode`.
 fn try_load_settings() -> Result<GameSettings, Box<dyn std::error::Error>> {
     let mut file = File::open("settings.bin")?;
     let mut encoded = Vec::new();

@@ -23,7 +23,10 @@ pub const HOTBAR_SLOTS: [BlockType; 9] = [
 /// The result is `f32` so it can be passed directly to shader uniforms or
 /// stored in vertex data without an extra cast at the call site.
 pub fn block_type_to_index(block: BlockType) -> Option<f32> {
-    HOTBAR_SLOTS.iter().position(|&b| b == block).map(|i| i as f32)
+    HOTBAR_SLOTS
+        .iter()
+        .position(|&b| b == block)
+        .map(|i| i as f32)
 }
 
 /// Builds GPU vertex and index buffers for the HUD hotbar.
@@ -72,15 +75,13 @@ pub fn build_hotbar(
 
     // Appends a screen-aligned quad spanning (x0, y0)–(x1, y1) with a solid
     // `color`. Vertices are wound counter-clockwise: BL, BR, TR, TL.
-    let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4]| {
+    let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 3]| {
         let base = vertices.len() as u32;
-        for (px, py) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        for (i, &(px, py)) in corners.iter().enumerate() {
             vertices.push(Vertex {
                 position: [px, py, 0.0],
-                normal,
-                color,
-                uv: [0.0, 0.0],
-                tex_index: 0.0,
+                packed: Vertex::pack(normal, color, 0, i as u8, 1, 1),
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -94,18 +95,18 @@ pub fn build_hotbar(
 
         // Layer 1: border — bright for the selected slot, dim otherwise.
         let border_color = if i == selected_slot {
-            Vertex::pack_color([1.0, 1.0, 1.0])
+            [1.0, 1.0, 1.0]
         } else {
-            Vertex::pack_color([0.4, 0.4, 0.4])
+            [0.4, 0.4, 0.4]
         };
         let border = 0.004;
         add_quad(x0, y0, x1, y1, border_color);
 
         // Layer 2: background — inset by `border` on all sides.
         let bg_color = if i == selected_slot {
-            Vertex::pack_color([0.25, 0.25, 0.25])
+            [0.25, 0.25, 0.25]
         } else {
-            Vertex::pack_color([0.12, 0.12, 0.12])
+            [0.12, 0.12, 0.12]
         };
         add_quad(
             x0 + border,
@@ -118,7 +119,7 @@ pub fn build_hotbar(
         // Layer 3: block colour swatch — inset by 18% of slot size on all sides.
         let block = HOTBAR_SLOTS[i];
         let [r, g, b] = block.color();
-        let block_color = Vertex::pack_color([r, g, b]);
+        let block_color = [r, g, b];
         let pad = slot_size * 0.18;
         let pad_h = pad * aspect;
         add_quad(x0 + pad, y0 + pad_h, x1 - pad, y1 - pad_h, block_color);
@@ -205,7 +206,7 @@ pub fn update_coords_ui(
 
     let mut cursor_x = start_x;
     let cursor_y = start_y;
-    let color = Vertex::pack_color([1.0, 1.0, 1.0]);
+    let color = [1.0, 1.0, 1.0];
     let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
 
     // Appends a screen-space line segment as a quad with width `line_thickness`.
@@ -225,34 +226,19 @@ pub fn update_coords_ui(
             let nx = -dy / len * line_thickness * 0.5;
             let ny = dx / len * line_thickness * 0.5;
 
-            verts.push(Vertex {
-                position: [x1 - nx, y1 - ny, 0.0],
-                normal,
-                color,
-                uv: [0.0, 0.0],
-                tex_index: 0.0,
-            });
-            verts.push(Vertex {
-                position: [x2 - nx, y2 - ny, 0.0],
-                normal,
-                color,
-                uv: [1.0, 0.0],
-                tex_index: 0.0,
-            });
-            verts.push(Vertex {
-                position: [x2 + nx, y2 + ny, 0.0],
-                normal,
-                color,
-                uv: [1.0, 1.0],
-                tex_index: 0.0,
-            });
-            verts.push(Vertex {
-                position: [x1 + nx, y1 + ny, 0.0],
-                normal,
-                color,
-                uv: [0.0, 1.0],
-                tex_index: 0.0,
-            });
+            // BL, BR, TR, TL (corner_idx 0..3)
+            let corners = [
+                (x1 - nx, y1 - ny),
+                (x2 - nx, y2 - ny),
+                (x2 + nx, y2 + ny),
+                (x1 + nx, y1 + ny),
+            ];
+            for (i, &(px, py)) in corners.iter().enumerate() {
+                verts.push(Vertex {
+                    position: [px, py, 0.0],
+                    packed: Vertex::pack(normal, color, 0, i as u8, 1, 1),
+                });
+            }
             inds.extend_from_slice(&[
                 base_idx,
                 base_idx + 1,
@@ -315,11 +301,11 @@ pub fn update_coords_ui(
 fn get_char_segments(ch: char) -> Vec<(f32, f32, f32, f32)> {
     // Named aliases for the seven standard segment positions.
     let seg_top = (0.0, 1.0, 1.0, 1.0); // top horizontal
-    let seg_tr = (1.0, 1.0, 1.0, 0.5);  // top-right vertical
-    let seg_br = (1.0, 0.5, 1.0, 0.0);  // bottom-right vertical
+    let seg_tr = (1.0, 1.0, 1.0, 0.5); // top-right vertical
+    let seg_br = (1.0, 0.5, 1.0, 0.0); // bottom-right vertical
     let seg_bot = (0.0, 0.0, 1.0, 0.0); // bottom horizontal
-    let seg_bl = (0.0, 0.5, 0.0, 0.0);  // bottom-left vertical
-    let seg_tl = (0.0, 1.0, 0.0, 0.5);  // top-left vertical
+    let seg_bl = (0.0, 0.5, 0.0, 0.0); // bottom-left vertical
+    let seg_tl = (0.0, 1.0, 0.0, 0.5); // top-left vertical
     let seg_mid = (0.0, 0.5, 1.0, 0.5); // middle horizontal
 
     match ch {

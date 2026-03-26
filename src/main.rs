@@ -2,9 +2,9 @@ mod app;
 mod multiplayer;
 mod ui;
 mod logger;
-
+mod minerust_data;
+use minerust_data::data;
 use logger::{init_logger, LogLevel, log};
-use directories::ProjectDirs;
 use std::fs;
 
 fn main() {
@@ -17,14 +17,13 @@ fn main() {
 
     if let Err(e) = app::run_game() {
         log(LogLevel::Error, &format!("Error occurred while starting game: {}", e));
-        eprintln!("Critic error: {}", e);
+        eprintln!("Critical error: {}", e);
         std::process::exit(1);
     }
 }
 
 fn setup_logger() -> Result<(), Box<dyn std::error::Error>> {
-    let proj_dirs = ProjectDirs::from("com", "Minerust", "Minerust")
-        .ok_or("Could not determinate directory (ProjectDirs)")?;
+    let proj_dirs = data::get_project_dirs()?;
 
     let log_dir = proj_dirs.data_dir().join("logs");
     fs::create_dir_all(&log_dir)?;

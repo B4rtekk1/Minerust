@@ -47,7 +47,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // wgpu core
     // -------------------------------------------------------------------------
-
     /// The wgpu rendering surface backed by the OS window.
     pub surface: wgpu::Surface<'static>,
     /// Logical GPU device; used to create all GPU resources.
@@ -62,7 +61,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Render pipelines
     // -------------------------------------------------------------------------
-
     /// Main opaque terrain render pipeline.
     pub render_pipeline: wgpu::RenderPipeline,
     /// Transparent water render pipeline (blended over opaque geometry).
@@ -86,7 +84,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Static geometry buffers
     // -------------------------------------------------------------------------
-
     /// Vertex buffer for the sun disc quad.
     pub sun_vertex_buffer: wgpu::Buffer,
     /// Index buffer for the sun disc quad.
@@ -101,7 +98,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Uniforms and bind groups
     // -------------------------------------------------------------------------
-
     /// Uniform buffer containing per-frame data (view-proj, sun direction, etc.).
     pub uniform_buffer: wgpu::Buffer,
     /// Small shadow settings buffer shared with the terrain shader.
@@ -109,6 +105,10 @@ pub struct State {
     pub shadow_config_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
+    /// Empty placeholder bind group for terrain pipeline group(1).
+    pub terrain_gbuffer_bind_group: wgpu::BindGroup,
+    /// Empty placeholder bind group for terrain pipeline group(2).
+    pub terrain_shadow_output_bind_group: wgpu::BindGroup,
     /// Bind group that exposes the shadow cascade array to the main render pass.
     pub shadow_bind_group: wgpu::BindGroup,
     /// Bind group for the water pass (SSR color/depth textures + sampler).
@@ -124,13 +124,18 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Render targets and textures
     // -------------------------------------------------------------------------
-
     /// Non-linear (sRGB) depth buffer view used by the main render pass.
     pub depth_texture: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
     /// Full shadow cascade array texture view (all cascades as one 2-D array).
     pub shadow_texture_view: wgpu::TextureView,
+    /// Screen-space shadow mask sampled by `terrain.wgsl`.
+    #[allow(dead_code)]
+    pub shadow_mask_texture: wgpu::Texture,
+    /// View of the screen-space shadow mask texture.
+    #[allow(dead_code)]
+    pub shadow_mask_view: wgpu::TextureView,
     /// One `wgpu::TextureView` per shadow cascade for per-cascade rendering.
     pub shadow_cascade_views: Vec<wgpu::TextureView>,
     /// GPU buffer containing the packed `CascadeData` array for all cascades.
@@ -139,6 +144,8 @@ pub struct State {
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub shadow_sampler: wgpu::Sampler,
+    /// Bind group that exposes the screen-space shadow mask to `terrain.wgsl`.
+    pub shadow_mask_bind_group: wgpu::BindGroup,
     /// Intermediate scene color texture rendered into before compositing.
     pub scene_color_texture: wgpu::Texture,
     /// View of `scene_color_texture`.
@@ -177,7 +184,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Hi-Z (hierarchical depth) occlusion culling
     // -------------------------------------------------------------------------
-
     /// Full Hi-Z mip-chain texture (R32Float, one mip per halving).
     pub hiz_texture: wgpu::Texture,
     /// View of the full Hi-Z mip chain (used by the culling shader).
@@ -196,7 +202,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // World, camera, and input
     // -------------------------------------------------------------------------
-
     /// Shared voxel world, protected by a reader-writer lock so background
     /// generation and meshing threads can read concurrently.
     pub world: Arc<parking_lot::RwLock<World>>,
@@ -218,7 +223,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Frame timing and performance stats
     // -------------------------------------------------------------------------
-
     /// Total number of frames rendered since startup.
     pub frame_count: u32,
     /// `Instant` of the last FPS counter refresh.
@@ -248,7 +252,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Streaming: chunk generation and mesh building
     // -------------------------------------------------------------------------
-
     /// Submits chunk generation requests to background threads and collects results.
     pub chunk_loader: ChunkLoader,
     /// Chunk-column X coordinate of the player's position on the last generation scan.
@@ -261,7 +264,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Indirect rendering managers
     // -------------------------------------------------------------------------
-
     /// Manages the unified vertex/index buffers and GPU culling for terrain.
     pub indirect_manager: IndirectManager,
     /// Manages the unified vertex/index buffers and GPU culling for water.
@@ -270,7 +272,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Cascaded shadow maps (CSM)
     // -------------------------------------------------------------------------
-
     /// Computes and stores the per-cascade light-space view-projection matrices.
     pub csm: CsmManager,
     /// Active shadow-cascade mode selector (reserved for future multi-mode support).
@@ -279,7 +280,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // HUD: coordinate display
     // -------------------------------------------------------------------------
-
     /// Vertex buffer for the coordinate HUD quad (rebuilt when position changes).
     pub coords_vertex_buffer: Option<wgpu::Buffer>,
     /// Index buffer for the coordinate HUD quad.
@@ -293,7 +293,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // HUD: block-break progress bar
     // -------------------------------------------------------------------------
-
     /// Vertex buffer for the block-break progress bar quad.
     pub progress_bar_vertex_buffer: Option<wgpu::Buffer>,
     /// Index buffer for the block-break progress bar quad.
@@ -302,7 +301,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // HUD: hotbar
     // -------------------------------------------------------------------------
-
     /// Currently selected hotbar slot index (0-based).
     pub hotbar_slot: usize,
     /// Vertex buffer for the hotbar background/selection quads.
@@ -319,7 +317,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // glyphon text rendering
     // -------------------------------------------------------------------------
-
     /// Manages font data and shaping for all text rendered via glyphon.
     pub font_system: FontSystem,
     /// Rasterises glyph outlines into the `text_atlas`.
@@ -367,7 +364,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // UI / game state
     // -------------------------------------------------------------------------
-
     /// Tracks whether the player is in the main menu, lobby, or in-game.
     pub game_state: GameState,
     /// Tracks focus / edit state of individual menu widgets.
@@ -379,7 +375,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Multiplayer
     // -------------------------------------------------------------------------
-
     /// Map from player ID to the last-known state of each remote player.
     pub remote_players: HashMap<u32, RemotePlayer>,
     /// This client's own player ID assigned by the server (0 = not connected).
@@ -396,7 +391,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Remote player model geometry
     // -------------------------------------------------------------------------
-
     /// Vertex buffer containing the combined geometry for all remote player models.
     pub player_model_vertex_buffer: Option<wgpu::Buffer>,
     /// Index buffer for the combined remote player model geometry.

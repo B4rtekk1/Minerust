@@ -62,10 +62,7 @@ struct Uniforms {
 
 struct VertexInput {
     @location(0) position:  vec3<f32>,
-    @location(1) normal:    vec4<f32>,
-    @location(2) color:     vec4<f32>,
-    @location(3) uv:        vec2<f32>,
-    @location(4) tex_index: f32,
+    @location(1) packed:    u32,
 };
 
 struct VertexOutput {
@@ -201,11 +198,29 @@ fn vs_water(model: VertexInput) -> VertexOutput {
     var pos = model.position;
     out.original_pos = pos.xz;
 
-    var wave_normal = model.normal.xyz;
+    let n_idx   = model.packed & 0x7u;
+    let t_idx   = (model.packed >> 3u) & 0xFFu;
+    let uv_idx  = (model.packed >> 11u) & 0x3u;
+    let w_raw   = (model.packed >> 13u) & 0xFu;
+    let h_raw   = (model.packed >> 17u) & 0xFu;
+    let width  = f32(w_raw + 1u);
+    let height = f32(h_raw + 1u);
+
+    let normals = array<vec3<f32>, 6>(
+        vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0)
+    );
+    let uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0)
+    );
+
+    var wave_normal = normals[n_idx % 6u];
     var foam_val    = 0.0;
     var jac_val     = 1.0;
 
-    if model.normal.y > 0.5 {
+    if n_idx == 3u {
         let w  = calculate_gerstner(pos, uniforms.time);
         pos   += w.displacement - vec3(0.0, WATER_LEVEL_OFFSET, 0.0);
         wave_normal = w.normal;
@@ -215,8 +230,8 @@ fn vs_water(model: VertexInput) -> VertexOutput {
 
     out.clip_position = uniforms.view_proj * vec4(pos, 1.0);
     out.world_pos     = pos;
-    out.wave_normal   = vec4(wave_normal, foam_val);
-    out.uv            = model.uv;
+    out.wave_normal   = vec4(normalize(wave_normal), foam_val);
+    out.uv            = vec2(uvs[uv_idx % 4u].x * width, uvs[uv_idx % 4u].y * height);
     out.view_depth    = out.clip_position.w;
     out.jacobian      = jac_val;
     return out;
@@ -250,39 +265,34 @@ fn fbm_normal_perturb(p: vec2<f32>, t: f32) -> vec2<f32> {
 }
 
 fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity: f32) -> vec3<f32> {
-    // f16: wszystkie blending-factors sa w [0,1]
-    let h     = f16(clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0));
-    let sun_h = f16(sun_dir.y);
-    let day   = f16(smoothstep(-0.02, 0.22, f32(sun_h)));
-    let night = f16(smoothstep(0.10, -0.10, f32(sun_h)));
-    let dusk  = f16(1.0) - f16(smoothstep(0.02, 0.34, abs(f32(sun_h))));
-
-    let zenith_day    = vec3<f32>(0.18, 0.44, 0.88);
-    let horizon_day   = vec3<f32>(0.66, 0.82, 0.98);
-    let zenith_night  = vec3<f32>(0.002, 0.005, 0.015);
-    let horizon_night = vec3<f32>(0.010, 0.014, 0.034);
-    let dusk_low      = vec3<f32>(0.96, 0.40, 0.18);
-    let dusk_high     = vec3<f32>(0.24, 0.10, 0.28);
-
-    let h_pow82  = f32(pow(h, f16(0.82)));
-    let h_pow74  = f32(pow(h, f16(0.74)));
-    let h_pow108 = f32(pow(h, f16(1.08)));
-
-    var sky = mix(horizon_day,   zenith_day,   h_pow82) * f32(day);
-    sky    += mix(horizon_night, zenith_night, h_pow74) * f32(night);
-    sky    += mix(dusk_low,      dusk_high,    h_pow108) * f32(dusk) * 0.50;
-
-    let horizon_band = f16(1.0) - f16(smoothstep(0.0, 0.32, abs(view_dir.y)));
-    sky += vec3<f32>(0.16, 0.22, 0.30) * f32(horizon_band) * f32(f16(0.48) * day + f16(0.18) * dusk);
-
-    let sun_glow = pow(max(dot(view_dir, sun_dir), 0.0), 24.0) * f32(f16(0.8) + f16(0.4) * dusk);
-    sky += mix(vec3<f32>(1.0, 0.74, 0.48), vec3<f32>(1.0, 0.95, 0.90), f32(day)) * sun_glow * 0.28;
-
+    let sun_h = sun_dir.y;
+    let view_h = max(view_dir.y, 0.0);
+    
+    let day = smoothstep(-0.15, 0.15, sun_h);
+    let night = smoothstep(0.12, -0.12, sun_h);
+    let dusk = 1.0 - smoothstep(0.0, 0.45, abs(sun_h));
+    
+    let day_zenith = vec3<f32>(0.08, 0.32, 0.72);
+    let day_horizon = vec3<f32>(0.56, 0.82, 0.98);
+    let night_zenith = vec3<f32>(0.001, 0.003, 0.012);
+    let night_horizon = vec3<f32>(0.008, 0.012, 0.024);
+    let sunset_horizon = vec3<f32>(1.0, 0.42, 0.12);
+    let sunset_zenith = vec3<f32>(0.18, 0.12, 0.35);
+    
+    var sky = mix(day_horizon, day_zenith, pow(view_h, 0.65)) * day;
+    sky += mix(night_horizon, night_zenith, pow(view_h, 0.55)) * night;
+    
+    let dusk_color = mix(sunset_horizon, sunset_zenith, pow(view_h, 0.75));
+    let sun_prox = max(dot(view_dir, sun_dir), 0.0);
+    sky += dusk_color * dusk * (0.45 * pow(sun_prox, 2.0) + 0.15);
+    
     if moon_intensity > 0.01 {
-        sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * f32(night) * f32(f16(0.18) + f16(0.22) * horizon_band);
+        sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * night;
     }
 
-    return sky;
+    // Simple tonemap to match sky
+    sky = sky / (sky + vec3<f32>(0.15));
+    return sky * 1.15;
 }
 
 fn sample_depth(uv: vec2<f32>) -> f32 {
@@ -445,7 +455,10 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let shadow  = calculate_shadow(in.world_pos, sun_dir);
     let ambient = f16(mix(0.01, 0.35, f32(day)));
-    water_color *= f32(ambient) + shadow * 0.55 * f32(day);
+    let night_factor = f32(1.0 - day);
+    let night_dark = vec3(0.0, 0.0, 0.01);
+    let night_mix = clamp(night_factor * 1.5, 0.0, 1.0);
+    water_color = mix(water_color, night_dark, night_mix);
 
     var refl_dir   = reflect(-view_dir, normal);
     refl_dir.y     = max(refl_dir.y, 0.001);

@@ -24,10 +24,7 @@ var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec4<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) uv: vec2<f32>,
-    @location(4) tex_index: f32,
+    @location(1) packed:   u32,
 };
 
 struct VertexOutput {
@@ -39,11 +36,15 @@ struct VertexOutput {
 
 @vertex
 fn vs_ui(model: VertexInput) -> VertexOutput {
+    let r = f32((model.packed >> 21u) & 0xFu) / 15.0;
+    let g = f32((model.packed >> 25u) & 0xFu) / 15.0;
+    let b = f32((model.packed >> 29u) & 0x7u) / 7.0;
+
     var out: VertexOutput;
     out.clip_position = vec4<f32>(model.position.xy, 0.0, 1.0);
-    out.color = model.color;
-    out.uv = model.uv;
-    out.tex_index = model.tex_index;
+    out.color = vec4<f32>(r, g, b, 1.0);
+    out.uv = vec2<f32>(0.0, 0.0);
+    out.tex_index = f32((model.packed >> 3u) & 0xFFu);
     return out;
 }
 

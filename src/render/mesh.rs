@@ -27,36 +27,24 @@ pub fn add_quad(
     _roughness: f32,
     _metallic: f32,
 ) {
-    let packed_normal = Vertex::pack_normal(normal);
-    let packed_color = Vertex::pack_color(color);
+    let n_idx = Vertex::pack_normal(normal);
     let base_idx = vertices.len() as u32;
+
     vertices.push(Vertex {
         position: v0,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 1.0],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 1, 1, 1), // Corner 1 (0, 1)
     });
     vertices.push(Vertex {
         position: v1,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [1.0, 1.0],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 2, 1, 1), // Corner 2 (1, 1)
     });
     vertices.push(Vertex {
         position: v2,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [1.0, 0.0],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 3, 1, 1), // Corner 3 (1, 0)
     });
     vertices.push(Vertex {
         position: v3,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 0.0],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 0, 1, 1), // Corner 0 (0, 0)
     });
     indices.extend_from_slice(&[
         base_idx,
@@ -99,36 +87,35 @@ pub fn add_greedy_quad(
     width: f32,
     height: f32,
 ) {
-    let packed_normal = Vertex::pack_normal(normal);
-    let packed_color = Vertex::pack_color(color);
+    let n_idx = Vertex::pack_normal(normal);
     let base_idx = vertices.len() as u32;
+
+    // For greedy quads, we are still using unit UV corners in the vertex,
+    // but the shader will multiply them by width/height? 
+    // Wait, width and height are not in my current 16-byte pack.
+    // I should add them or pass them differently.
+    
+    // Actually, I can put width/height into the packed data for greedy quads!
+    // I need to update Vertex::pack to include width/height if it fits.
+    
+    let w = width as u8;
+    let h = height as u8;
+
     vertices.push(Vertex {
         position: v0,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, height],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 1, w, h),
     });
     vertices.push(Vertex {
         position: v1,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [width, height],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 2, w, h),
     });
     vertices.push(Vertex {
         position: v2,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [width, 0.0],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 3, w, h),
     });
     vertices.push(Vertex {
         position: v3,
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 0.0],
-        tex_index,
+        packed: Vertex::pack(n_idx, color, tex_index as u8, 0, w, h),
     });
     indices.extend_from_slice(&[
         base_idx,
@@ -151,8 +138,8 @@ pub fn add_greedy_quad(
 pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     let size = 0.02;
     let thickness = 0.001;
-    let packed_color = Vertex::pack_color([1.0, 1.0, 1.0]);
-    let packed_normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+    let n_idx = Vertex::pack_normal([0.0, 0.0, 1.0]);
+    let color_white = [1.0, 1.0, 1.0];
 
     // Compensate for widescreen aspect ratio so the crosshair isn't stretched.
     let aspect = 16.0 / 9.0;
@@ -165,62 +152,38 @@ pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     // Horizontal bar.
     vertices.push(Vertex {
         position: [-size_x, -thickness, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 0.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 0, 1, 1),
     });
     vertices.push(Vertex {
         position: [size_x, -thickness, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [1.0, 0.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 3, 1, 1),
     });
     vertices.push(Vertex {
         position: [size_x, thickness, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [1.0, 1.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 2, 1, 1),
     });
     vertices.push(Vertex {
         position: [-size_x, thickness, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 1.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 1, 1, 1),
     });
     indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
 
     // Vertical bar.
     vertices.push(Vertex {
         position: [-thickness_x, -size, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 0.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 0, 1, 1),
     });
     vertices.push(Vertex {
         position: [thickness_x, -size, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [1.0, 0.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 3, 1, 1),
     });
     vertices.push(Vertex {
         position: [thickness_x, size, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [1.0, 1.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 2, 1, 1),
     });
     vertices.push(Vertex {
         position: [-thickness_x, size, 0.0],
-        normal: packed_normal,
-        color: packed_color,
-        uv: [0.0, 1.0],
-        tex_index: 0.0,
+        packed: Vertex::pack(n_idx, color_white, 0, 1, 1, 1),
     });
     indices.extend_from_slice(&[4, 5, 6, 4, 6, 7]);
 
@@ -349,16 +312,16 @@ pub fn build_player_model(x: f32, y: f32, z: f32, yaw: f32) -> (Vec<Vertex>, Vec
     let cos_yaw = yaw.cos();
     let sin_yaw = yaw.sin();
 
-    /// Rotates a 2-D offset `(dx, dz)` around the Y-axis by the outer `yaw`.
+    // Rotates a 2-D offset `(dx, dz)` around the Y-axis by the outer `yaw`.
     let rotate = |dx: f32, dz: f32| -> (f32, f32) {
         (dx * cos_yaw - dz * sin_yaw, dx * sin_yaw + dz * cos_yaw)
     };
 
-    /// Appends a yaw-rotated, axis-aligned box to `vertices` and `indices`.
-    ///
-    /// The box is defined by its center offset from the player origin
-    /// `(cx, cy, cz)` and half-extents `(hw, hh, hd)`. All six faces are
-    /// emitted with correct outward normals and a flat `color`.
+    // Appends a yaw-rotated, axis-aligned box to `vertices` and `indices`.
+    //
+    // The box is defined by its center offset from the player origin
+    // `(cx, cy, cz)` and half-extents `(hw, hh, hd)`. All six faces are
+    // emitted with correct outward normals and a flat `color`.
     let add_box = |vertices: &mut Vec<Vertex>,
                    indices: &mut Vec<u32>,
                    cx: f32,
@@ -400,16 +363,12 @@ pub fn build_player_model(x: f32, y: f32, z: f32, yaw: f32) -> (Vec<Vertex>, Vec
         ];
 
         for (face_indices, normal) in faces {
-            let packed_normal = Vertex::pack_normal(normal);
-            let packed_color = Vertex::pack_color(color);
+            let n_idx = Vertex::pack_normal(normal);
             let base_idx = vertices.len() as u32;
-            for &idx in &face_indices {
+            for (i, &idx) in face_indices.iter().enumerate() {
                 vertices.push(Vertex {
                     position: transformed[idx],
-                    normal: packed_normal,
-                    color: packed_color,
-                    uv: [0.0, 0.0],
-                    tex_index: -1.0,
+                    packed: Vertex::pack(n_idx, color, 255, i as u8, 1, 1),
                 });
             }
             indices.extend_from_slice(&[

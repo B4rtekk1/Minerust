@@ -127,7 +127,7 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     return nearest_z <= occluder_z + 0.0001;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
 
