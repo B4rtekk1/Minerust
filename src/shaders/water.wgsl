@@ -56,7 +56,7 @@ struct Uniforms {
 @group(0) @binding(3) var shadow_map:         texture_depth_2d_array;
 @group(0) @binding(4) var shadow_sampler:     sampler_comparison;
 @group(0) @binding(5) var ssr_color:          texture_2d<f32>;
-@group(0) @binding(6) var ssr_depth:          texture_depth_2d;
+@group(0) @binding(6) var ssr_depth:          texture_2d<f32>;
 @group(0) @binding(7) var ssr_sampler:        sampler;
 
 
@@ -69,10 +69,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos:    vec3<f32>,
     @location(1) wave_normal:  vec4<f32>,
-    @location(2) uv:           vec2<f32>,
-    @location(3) view_depth:   f32,
-    @location(4) original_pos: vec2<f32>,
-    @location(5) jacobian:     f32,
+    @location(2) jacobian:     f32,
 };
 
 const SW_K:     array<f32, 4> = array(0.38,  0.84,  2.10,  5.60);
@@ -108,7 +105,6 @@ fn hash21(p: vec2<f32>) -> f32 {
 
 fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     let dist    = length(pos.xz - uniforms.camera_pos.xz);
-    // f16: lod i cap_lod sa w [0,1] - bezpieczne
     let lod     = f16(clamp(1.0 - dist / LOD_FAR, 0.05, 1.0));
 
     var result: GerstnerResult;
@@ -123,7 +119,6 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     let p      = pos.xz;
     let wsp    = uniforms.wind_speed;
 
-    // Gerstner displacement - f32 potrzebne dla precyzji sumowania
     var x_off = 0.0; var y_off = 0.0; var z_off = 0.0;
     var dx = 0.0;    var dz = 0.0;
     var j_xx = 0.0;  var j_zz = 0.0;  var j_xz = 0.0;
@@ -131,7 +126,6 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     for (var i: i32 = 0; i < 4; i++) {
         let base_dir = vec2(SW_DX[i], SW_DZ[i]);
         let dmod     = normalize(mix(base_dir, wind_n, 0.35));
-        // f16: align, amp, steep - wartosci [0,1] lub male
         let align    = f16(max(dot(dmod, wind_n), 0.0));
         let amp      = f32(f16(SW_AMP[i]) * lod * (f16(0.65) + f16(0.35) * align));
         let steep    = f32(f16(SW_STEEP[i]) * lod);
@@ -196,24 +190,13 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
 fn vs_water(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     var pos = model.position;
-    out.original_pos = pos.xz;
 
     let n_idx   = model.packed & 0x7u;
-    let t_idx   = (model.packed >> 3u) & 0xFFu;
-    let uv_idx  = (model.packed >> 11u) & 0x3u;
-    let w_raw   = (model.packed >> 13u) & 0xFu;
-    let h_raw   = (model.packed >> 17u) & 0xFu;
-    let width  = f32(w_raw + 1u);
-    let height = f32(h_raw + 1u);
 
     let normals = array<vec3<f32>, 6>(
         vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
         vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
         vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0)
-    );
-    let uvs = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0)
     );
 
     var wave_normal = normals[n_idx % 6u];
@@ -231,8 +214,6 @@ fn vs_water(model: VertexInput) -> VertexOutput {
     out.clip_position = uniforms.view_proj * vec4(pos, 1.0);
     out.world_pos     = pos;
     out.wave_normal   = vec4(normalize(wave_normal), foam_val);
-    out.uv            = vec2(uvs[uv_idx % 4u].x * width, uvs[uv_idx % 4u].y * height);
-    out.view_depth    = out.clip_position.w;
     out.jacobian      = jac_val;
     return out;
 }
@@ -290,7 +271,6 @@ fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity:
         sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * night;
     }
 
-    // Simple tonemap to match sky
     sky = sky / (sky + vec3<f32>(0.15));
     return sky * 1.15;
 }
@@ -298,7 +278,7 @@ fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity:
 fn sample_depth(uv: vec2<f32>) -> f32 {
     let sz = vec2<i32>(uniforms.screen_size);
     let px = clamp(vec2<i32>(uv * uniforms.screen_size), vec2<i32>(0), sz - vec2<i32>(1));
-    return textureLoad(ssr_depth, px, 0);
+    return textureLoad(ssr_depth, px, 0).r;
 }
 
 fn reconstruct_world(uv: vec2<f32>, d: f32) -> vec3<f32> {
@@ -307,7 +287,6 @@ fn reconstruct_world(uv: vec2<f32>, d: f32) -> vec3<f32> {
     return wh.xyz / wh.w;
 }
 
-// SSR zostaje w f32 - precyzja ray marchingu jest krytyczna
 fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>) -> vec4<f32> {
     let dir  = normalize(refl_dir);
     var ray  = world_pos + dir * 0.3;
@@ -414,18 +393,12 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist      = length(to_camera);
     let view_dir  = to_camera / dist;
     let sun_dir   = normalize(uniforms.sun_position);
-    // f16: day to clamp [0,1]
     let day       = f16(clamp(sun_dir.y, 0.0, 1.0));
     let t         = uniforms.time;
-
-    let inv_w     = 1.0 / in.clip_position.w;
-    let clip_ndc  = in.clip_position.xyz * inv_w;
-    let screen_uv = vec2(clip_ndc.x * 0.5 + 0.5, 0.5 - clip_ndc.y * 0.5);
 
     let wave_n_raw = in.wave_normal.xyz;
     let foam_val   = f16(in.wave_normal.w);
 
-    // f16: blending factors [0,1]
     let perturb_blend = f16(clamp(1.0 - dist / 120.0, 0.0, 1.0));
     var normal = wave_n_raw;
     if perturb_blend > f16(0.005) {
@@ -442,7 +415,6 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
         normal = normalize(normal + vec3(mp.x, 0.0, mp.y));
     }
 
-    // f16: cos_theta, fresnel, grazing - wszystko [0,1]
     let cos_theta = f16(max(dot(view_dir, normal), 0.0));
     let fresnel   = schlick_fresnel(cos_theta, f16(FRESNEL_R0));
     let grazing   = f16(smoothstep(0.25, 0.98, f32(f16(1.0) - cos_theta)));
@@ -503,7 +475,6 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
                              f32(clamp(foam_val * f16(0.75) * foam_pulse, f16(0.0), f16(0.8))));
     }
 
-    // fog
     let delta_xz = in.world_pos.xz - uniforms.camera_pos.xz;
     let dist_xz  = f16(sqrt(dot(delta_xz, delta_xz)));
     let fog_t    = clamp((dist_xz - FOG_NEAR) / (FOG_FAR - FOG_NEAR), f16(0.0), f16(1.0));

@@ -39,10 +39,13 @@ fn vs_ui(model: VertexInput) -> VertexOutput {
     let r = f32((model.packed >> 21u) & 0xFu) / 15.0;
     let g = f32((model.packed >> 25u) & 0xFu) / 15.0;
     let b = f32((model.packed >> 29u) & 0x7u) / 7.0;
+    let alpha_lo = (model.packed >> 13u) & 0xFu;
+    let alpha_hi = (model.packed >> 17u) & 0xFu;
+    let a = f32((alpha_hi << 4u) | alpha_lo) / 255.0;
 
     var out: VertexOutput;
     out.clip_position = vec4<f32>(model.position.xy, 0.0, 1.0);
-    out.color = vec4<f32>(r, g, b, 1.0);
+    out.color = vec4<f32>(r, g, b, a);
     out.uv = vec2<f32>(0.0, 0.0);
     out.tex_index = f32((model.packed >> 3u) & 0xFFu);
     return out;

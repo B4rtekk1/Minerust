@@ -101,8 +101,8 @@ impl State {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
@@ -179,20 +179,29 @@ impl State {
             });
 
             // ── Depth-resolve bind group ──────────────────────────────────── //
-            // The depth-resolve shader reads the multisampled depth texture to
-            // produce the single-sampled Hi-Z seed and SSR depth.  The bind
-            // group must reference the freshly-created `depth_texture` view.
+            // The depth-resolve compute shader reads the multisampled depth
+            // texture and writes both single-sampled outputs.  The bind group
+            // must reference the freshly-created depth and output views.
             // Layout is retrieved from the pipeline to avoid storing a
             // redundant handle on `State`.
             self.depth_resolve_bind_group =
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Depth Resolve Bind Group"),
                     layout: &self.depth_resolve_pipeline.get_bind_group_layout(0),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        // ← new multisampled depth view
-                        resource: wgpu::BindingResource::TextureView(&self.depth_texture),
-                    }],
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.depth_texture),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_mips[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
+                        },
+                    ],
                 });
 
             // ── glyphon viewport ──────────────────────────────────────────── //
@@ -288,11 +297,8 @@ impl State {
                     format: wgpu::TextureFormat::R32Float,
                     // STORAGE_BINDING  – written by the Hi-Z compute shader.
                     // TEXTURE_BINDING  – read by the cull compute shader.
-                    // RENDER_ATTACHMENT – mip 0 is written as a color attachment
-                    //                    in the depth-resolve pass.
                     usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 });
 

@@ -76,7 +76,7 @@ impl TerrainSpline {
     /// 2. **Segment search** – walks the control-point list to find the segment
     ///    `[p1, p2]` that contains `t` (i.e., `p1.input ≤ t < p2.input`).
     /// 3. **Ghost points** – Catmull-Rom requires four points `(p0, p1, p2, p3)`.
-    ///    When the segment is at either end of the list the missing neighbour is
+    ///    When the segment is at either end of the list the missing neighbor is
     ///    duplicated from the nearest available point, effectively producing a
     ///    zero-slope tangent at the boundary.
     /// 4. **`segment_t`** – the parameter `t` is rescaled to `[0, 1]` within
@@ -300,14 +300,14 @@ pub fn blend_heights(h1: f64, h2: f64, blend_factor: f64) -> f64 {
 /// Computes a `[0, 1]` blend weight from how far a noise value is from a
 /// threshold boundary.
 ///
-/// Returns `0.0` exactly at the threshold (fully blended / transition centre)
+/// Returns `0.0` exactly at the threshold (fully blended / transition center)
 /// and `1.0` when the noise value is at least `blend_width` away from the
 /// threshold (fully committed to one side).
 ///
 /// This function is useful for softening hard biome edges: values well inside
 /// a biome region get weight `1.0` (use the local biome height unmodified),
 /// while values near the boundary get a fractional weight that can feed into
-/// [`blend_heights`] to cross-fade with the neighbouring biome.
+/// [`blend_heights`] to cross-fade with the neighboring biome.
 ///
 /// # Parameters
 /// - `noise_value`  – The raw noise sample at the query position.

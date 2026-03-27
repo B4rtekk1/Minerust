@@ -58,6 +58,18 @@ impl Vertex {
         n | (t << 3) | (uv << 11) | (w << 13) | (h << 17) | (r << 21) | (g << 25) | (b << 29)
     }
 
+    /// Packs a screen-space/UI vertex and stores alpha in the width/height bits.
+    ///
+    /// Those 8 bits are ignored by the world-space shaders but are available in
+    /// `ui.wgsl`, which makes them a compact place to carry per-vertex alpha for
+    /// menu panels, the crosshair, HUD quads, and similar overlays.
+    pub fn pack_ui(normal_idx: u8, color: [f32; 4], tex_index: u8, corner_idx: u8) -> u32 {
+        let alpha = ((color[3].clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
+        let width = ((alpha & 0x0F) as u8) + 1;
+        let height = (((alpha >> 4) & 0x0F) as u8) + 1;
+        Self::pack(normal_idx, [color[0], color[1], color[2]], tex_index, corner_idx, width, height)
+    }
+
     /// Legacy pack helpers (unused but kept for compatibility during refactor if needed)
     #[inline] pub fn pack_normal(n: [f32; 3]) -> u8 {
         if n[0] > 0.5 { 1 } else if n[0] < -0.5 { 0 }

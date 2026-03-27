@@ -16,7 +16,7 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
     CSM_SHADOW_MAP_SIZE, Camera, DiggingState, IndirectManager, InputState, OutlineVertex,
-    SEA_LEVEL, ShadowConfig, Uniforms, Vertex, World, build_crosshair,
+    RENDER_DISTANCE, SEA_LEVEL, ShadowConfig, Uniforms, Vertex, World, build_crosshair,
 };
 
 use super::state::State;
@@ -208,7 +208,26 @@ impl State {
             // `Immediate` disables vsync so the frame rate is uncapped.
             // Switch to `Fifo` (vsync) to reduce GPU power consumption.
             present_mode: wgpu::PresentMode::Immediate,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode: surface_caps
+                .alpha_modes
+                .iter()
+                .copied()
+                .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::PreMultiplied))
+                .or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .iter()
+                        .copied()
+                        .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::PostMultiplied))
+                })
+                .or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .iter()
+                        .copied()
+                        .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::Inherit))
+                })
+                .unwrap_or(surface_caps.alpha_modes[0]),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -646,8 +665,8 @@ impl State {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let ssr_depth_view = ssr_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -785,7 +804,7 @@ impl State {
                         binding: 6,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -1307,17 +1326,21 @@ impl State {
         // ------------------------------------------------------------------ //
         // World, camera, chunk loader
         // ------------------------------------------------------------------ //
-        log(LogLevel::Info, "Generating world...");
+        log(LogLevel::Info, "Generating world in background...");
         let world = Arc::new(parking_lot::RwLock::new(World::new()));
 
         // `find_spawn_point` searches downward from a candidate column until
         // it finds a non-air block, ensuring the player spawns on solid ground.
         let spawn = world.read().find_spawn_point();
         let camera = Camera::new(spawn);
-        log(
-            LogLevel::Info,
-            &format!("World generated! Spawn: {:?}", spawn),
-        );
+
+        {
+            let mut world = world.write();
+            world.generate_chunks_in_radius(0, 0, 2);
+        }
+        World::spawn_chunks_in_ring_async(Arc::clone(&world), 0, 0, 2, RENDER_DISTANCE);
+
+        log(LogLevel::Info, &format!("Spawn selected: {:?}", spawn));
 
         let seed = world.read().seed;
         // `ChunkLoader` generates chunk data (terrain noise, biomes, structures)
@@ -1416,14 +1439,13 @@ impl State {
         let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
 
         // ------------------------------------------------------------------ //
-        // Depth-resolve pipeline
+        // Depth-resolve compute pipeline
         // ------------------------------------------------------------------ //
 
-        // After all MSAA geometry passes we need a single-sampled depth texture
-        // for the SSR depth lookup.  The depth-resolve pipeline reads from the
-        // multisampled depth buffer (sample 0) and writes to the SSR depth
-        // target in a full-screen triangle pass.
-
+        // After the MSAA opaque pass we resolve the multisampled depth buffer
+        // into two single-sampled outputs:
+        //   • `hiz_mips[0]`    – conservative max-depth seed for Hi-Z
+        //   • `ssr_depth_view` – closest-depth copy for water refraction
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Resolve Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_resolve.wgsl").into()),
@@ -1431,25 +1453,39 @@ impl State {
         let depth_resolve_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Depth Resolve Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: true, // must match the MSAA depth texture
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: true, // must match the MSAA depth texture
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
             });
-        let depth_resolve_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Depth Resolve Bind Group"),
-            layout: &depth_resolve_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&depth_texture),
-            }],
-        });
         let depth_resolve_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Depth Resolve Pipeline Layout"),
@@ -1457,45 +1493,13 @@ impl State {
                 immediate_size: 0,
             });
         let depth_resolve_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Depth Resolve Pipeline"),
                 layout: Some(&depth_resolve_pipeline_layout),
                 cache: None,
-                vertex: wgpu::VertexState {
-                    module: &depth_resolve_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    // No vertex buffer – the vertex shader generates a full-screen
-                    // triangle from `gl_VertexIndex` alone (clip-space trick).
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &depth_resolve_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    // Output is R32Float so the water shader can fetch the raw
-                    // floating-point depth value without a comparison sampler.
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    // `Always` so every pixel is written regardless of its
-                    // depth value (we want an exact copy, not a cull).
-                    depth_compare: wgpu::CompareFunction::Always,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(), // single-sampled output
-                multiview_mask: None,
+                module: &depth_resolve_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
             });
 
         // ------------------------------------------------------------------ //
@@ -1665,8 +1669,7 @@ impl State {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING   // written by compute
-                | wgpu::TextureUsages::TEXTURE_BINDING    // read by compute & cull
-                | wgpu::TextureUsages::RENDER_ATTACHMENT, // mip 0 written by depth-resolve
+                | wgpu::TextureUsages::TEXTURE_BINDING,   // read by compute & cull
             view_formats: &[],
         });
 
@@ -1756,6 +1759,25 @@ impl State {
                 })
             })
             .collect::<Vec<_>>();
+
+        let depth_resolve_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Depth Resolve Bind Group"),
+            layout: &depth_resolve_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&depth_texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&hiz_mips[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
+                },
+            ],
+        });
 
         // Give both indirect managers access to the Hi-Z texture so the GPU
         // cull shader can sample it during the indirect dispatch.

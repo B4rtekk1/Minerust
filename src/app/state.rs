@@ -77,9 +77,9 @@ pub struct State {
     pub crosshair_pipeline: wgpu::RenderPipeline,
     /// Full-screen composite pipeline that resolves MSAA and applies post-FX.
     pub composite_pipeline: wgpu::RenderPipeline,
-    /// Depth-resolve pipeline that copies the MSAA depth buffer to a 1-sample
-    /// texture for use by the Hi-Z pass and SSR.
-    pub depth_resolve_pipeline: wgpu::RenderPipeline,
+    /// Compute pipeline that resolves the MSAA depth buffer into Hi-Z seed
+    /// level 0 and the single-sampled SSR depth texture.
+    pub depth_resolve_pipeline: wgpu::ComputePipeline,
 
     // -------------------------------------------------------------------------
     // Static geometry buffers
@@ -118,7 +118,7 @@ pub struct State {
     pub water_bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group for the composite pass (scene color + SSR resources).
     pub composite_bind_group: wgpu::BindGroup,
-    /// Bind group for the depth-resolve pass.
+    /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
 
     // -------------------------------------------------------------------------
@@ -154,9 +154,9 @@ pub struct State {
     pub ssr_color_texture: wgpu::Texture,
     /// View of `ssr_color_texture`.
     pub ssr_color_view: wgpu::TextureView,
-    /// Depth texture used by the SSR pass for ray-marching.
+    /// Single-sampled depth buffer used by the SSR pass for ray-marching.
     pub ssr_depth_texture: wgpu::Texture,
-    /// View of `ssr_depth_texture`.
+    /// View of `ssr_depth_texture` as an `R32Float` texture.
     pub ssr_depth_view: wgpu::TextureView,
     /// Sampler used when reading SSR textures in the water and composite passes.
     pub ssr_sampler: wgpu::Sampler,
@@ -215,7 +215,7 @@ pub struct State {
     pub digging: DiggingState,
     /// The OS window; shared with the event loop and network thread.
     pub window: Arc<Window>,
-    /// Whether the cursor is captured (hidden and locked to the window centre).
+    /// Whether the cursor is captured (hidden and locked to the window center).
     pub mouse_captured: bool,
     /// Last known cursor position in logical pixels (used for menu interaction).
     pub cursor_position: Option<(f32, f32)>,

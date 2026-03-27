@@ -139,7 +139,6 @@ pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     let size = 0.02;
     let thickness = 0.001;
     let n_idx = Vertex::pack_normal([0.0, 0.0, 1.0]);
-    let color_white = [1.0, 1.0, 1.0];
 
     // Compensate for widescreen aspect ratio so the crosshair isn't stretched.
     let aspect = 16.0 / 9.0;
@@ -152,38 +151,38 @@ pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
     // Horizontal bar.
     vertices.push(Vertex {
         position: [-size_x, -thickness, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 0, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 0),
     });
     vertices.push(Vertex {
         position: [size_x, -thickness, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 3, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 3),
     });
     vertices.push(Vertex {
         position: [size_x, thickness, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 2, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 2),
     });
     vertices.push(Vertex {
         position: [-size_x, thickness, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 1, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 1),
     });
     indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
 
     // Vertical bar.
     vertices.push(Vertex {
         position: [-thickness_x, -size, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 0, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 0),
     });
     vertices.push(Vertex {
         position: [thickness_x, -size, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 3, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 3),
     });
     vertices.push(Vertex {
         position: [thickness_x, size, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 2, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 2),
     });
     vertices.push(Vertex {
         position: [-thickness_x, size, 0.0],
-        packed: Vertex::pack(n_idx, color_white, 0, 1, 1, 1),
+        packed: Vertex::pack_ui(n_idx, [1.0, 1.0, 1.0, 1.0], 0, 1),
     });
     indices.extend_from_slice(&[4, 5, 6, 4, 6, 7]);
 
@@ -193,13 +192,13 @@ pub fn build_crosshair() -> (Vec<Vertex>, Vec<u32>) {
 /// Builds a screen-space thick outline for a single block at `(x, y, z)`.
 ///
 /// Only the exposed (visible) faces are outlined — faces that have no
-/// solid neighbour in the given direction. Each edge is emitted as a small
+/// solid neighbor in the given direction. Each edge is emitted as a small
 /// quad so the shader can expand it into a thick line in screen space.
 ///
 /// # Arguments
 /// * `x`, `y`, `z` - Block grid position.
 /// * `visible_faces` - A bitmask or six booleans indicating which of the
-///   six faces (+X, -X, +Y, -Y, +Z, -Z) have no solid neighbour.
+///   six faces (+X, -X, +Y, -Y, +Z, -Z) have no solid neighbor.
 pub fn build_block_outline(
     x: i32,
     y: i32,

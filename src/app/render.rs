@@ -61,7 +61,7 @@ fn push_rect(
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
     rect: Rect,
-    color: [f32; 3],  // Use raw floats for consistent packing
+    color: [f32; 4],
     width: f32,
     height: f32,
 ) {
@@ -77,18 +77,12 @@ fn push_rect(
     for (i, &(x, y)) in corners.iter().enumerate() {
         vertices.push(Vertex {
             position: [x, y, 0.0],
-            packed: Vertex::pack(normal_idx, color, 0, i as u8, 1, 1),
+            packed: Vertex::pack_ui(normal_idx, color, 0, i as u8),
         });
     }
 
     // Two counter-clockwise triangles covering the quad.
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-}
-
-/// Converts a normalized `[f32; 4]` RGBA color to the raw `[f32; 3]`
-/// format expected by [`Vertex::pack`].  (UI is opaque for now)
-fn color_to_f32x3(color: [f32; 4]) -> [f32; 3] {
-    [color[0], color[1], color[2]]
 }
 
 /// Computes which faces of the highlighted block should be outlined.
@@ -131,9 +125,9 @@ impl State {
     ///    the opaque terrain and water indirect managers.
     /// 6. **Opaque pass** – sky dome → terrain → remote player models → sun/moon.
     ///    Resolves MSAA into `ssr_color_view` for later water reflections.
-    /// 7. **Depth resolve pass** – copies the multisampled depth buffer to the
-    ///    single-sampled `ssr_depth_view` (for water refraction) and to the
-    ///    first Hi-Z mip level (for next-frame occlusion culling).
+    /// 7. **Depth resolve compute** – resolves the multisampled depth buffer
+    ///    into `ssr_depth_view` (for water refraction) and the first Hi-Z mip
+    ///    level (for next-frame occlusion culling).
     /// 8. **Hi-Z generation** (compute) – downsamples the depth mip chain.
     /// 9. **Transparent pass** – water surfaces, alpha-blended on top of the
     ///    opaque result.  Resolves MSAA into `scene_color_view`.
@@ -541,13 +535,19 @@ impl State {
         // Writes to the 4× MSAA color target which is resolved simultaneously
         // into `ssr_color_view` (used by the water pass for reflections).
         {
+            let opaque_resolve_target = if self.game_state == GameState::Menu {
+                &view
+            } else {
+                &self.ssr_color_view
+            };
+
             let mut opaque_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Opaque Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
                     // Resolve MSAA into the SSR color target so the water
                     // shader can sample the opaque scene for reflections.
-                    resolve_target: Some(&self.ssr_color_view),
+                    resolve_target: Some(opaque_resolve_target),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         // Clear to the sky color computed above.
@@ -646,52 +646,22 @@ impl State {
             opaque_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        // ── Depth resolve pass ────────────────────────────────────────────── //
-        // After the MSAA opaque pass we need two single-sampled depth outputs:
-        //   • `ssr_depth_view` – R32Float used by the water shader for
-        //     refraction depth comparisons.
-        //   • `hiz_mips[0]`    – seed mip level for the Hi-Z chain.
-        // A single full-screen triangle pass writes both simultaneously: the
-        // color attachment receives the R32Float depth value, and the depth
-        // attachment receives the raw depth for `ssr_depth_view`.
+        // ── Depth resolve compute pass ───────────────────────────────────── //
+        // Resolve the MSAA depth buffer into two single-sampled outputs:
+        //   • `hiz_mips[0]`    – conservative max-depth seed for Hi-Z
+        //   • `ssr_depth_view` – closest-depth copy for water refraction
         {
-            let mut depth_resolve_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Depth Resolve Pass (SSR + Hi-Z)"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    // Mip 0 of the Hi-Z texture receives the R32Float copy.
-                    view: &self.hiz_mips[0],
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), // 1.0 = far
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.ssr_depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
+            let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Depth Resolve Compute Pass"),
                 timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
             });
-            // Explicit viewport to match the surface resolution (the pass
-            // renders a single full-screen triangle using gl_VertexIndex).
-            depth_resolve_pass.set_viewport(
-                0.0,
-                0.0,
-                self.config.width as f32,
-                self.config.height as f32,
-                0.0,
-                1.0,
-            );
             depth_resolve_pass.set_pipeline(&self.depth_resolve_pipeline);
             depth_resolve_pass.set_bind_group(0, &self.depth_resolve_bind_group, &[]);
-            depth_resolve_pass.draw(0..3, 0..1); // 3 vertices → 1 full-screen triangle
+            depth_resolve_pass.dispatch_workgroups(
+                (self.config.width + 15) / 16,
+                (self.config.height + 15) / 16,
+                1,
+            );
         }
 
         // ── Hi-Z mip chain generation (compute) ───────────────────────────── //
@@ -722,7 +692,7 @@ impl State {
         // `scene_color_view` for the composite pass.
         let resolve_target = &self.scene_color_view;
 
-        {
+        if self.game_state != GameState::Menu {
             let mut transparent_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Transparent Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -775,7 +745,7 @@ impl State {
         // resolved scene color includes the visible edges. The pass uses the
         // MSAA color target and the main depth buffer so hidden edges are
         // rejected by depth testing instead of being painted over the scene.
-        {
+        if self.game_state != GameState::Menu {
             let mut outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Block Outline Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -837,7 +807,7 @@ impl State {
         // scene) and writes the post-processed result directly to the
         // swap-chain surface.  The composite shader handles underwater fog
         // color grading, vignette, and similar full-screen effects.
-        {
+        if self.game_state != GameState::Menu {
             let mut composite_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Composite Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -852,6 +822,7 @@ impl State {
                 depth_stencil_attachment: None, // no depth test for a full-screen blit
                 ..Default::default()
             });
+
             composite_pass.set_pipeline(&self.composite_pipeline);
             composite_pass.set_bind_group(0, &self.composite_bind_group, &[]);
             composite_pass.draw(0..3, 0..1); // full-screen triangle
@@ -951,7 +922,12 @@ impl State {
             for (i, (x, y)) in [(-bar_width, bar_y - bar_height), (bar_width, bar_y - bar_height), (bar_width, bar_y + bar_height), (-bar_width, bar_y + bar_height)].into_iter().enumerate() {
                 vertices.push(Vertex {
                     position: [x, y, 0.0],
-                    packed: Vertex::pack(normal_idx, bg_color, 0, i as u8, 1, 1),
+                    packed: Vertex::pack_ui(
+                        normal_idx,
+                        [bg_color[0], bg_color[1], bg_color[2], 1.0],
+                        0,
+                        i as u8,
+                    ),
                 });
             }
 
@@ -967,7 +943,12 @@ impl State {
             for (i, (x, y)) in fg_corners.into_iter().enumerate() {
                 vertices.push(Vertex {
                     position: [x, y, 0.0],
-                    packed: Vertex::pack(normal_idx, prog_color, 0, i as u8, 1, 1),
+                    packed: Vertex::pack_ui(
+                        normal_idx,
+                        [prog_color[0], prog_color[1], prog_color[2], 1.0],
+                        0,
+                        i as u8,
+                    ),
                 });
             }
 
@@ -1659,8 +1640,8 @@ impl State {
         let mut vertices = Vec::with_capacity(96);
         let mut indices = Vec::with_capacity(144);
 
-        // 1. Full-screen dark backdrop (semi-opaque so the 3-D world behind
-        //    bleeds through slightly, giving a sense of depth).
+        // 1. Full-screen backdrop. Keep it fully transparent so the world
+        //    stays visible behind the menu.
         push_rect(
             &mut vertices,
             &mut indices,
@@ -1670,7 +1651,7 @@ impl State {
                 w: width,
                 h: height,
             },
-            color_to_f32x3([0.03, 0.05, 0.08, 0.94]),
+            [0.0, 0.0, 0.0, 0.0],
             width,
             height,
         );
@@ -1685,7 +1666,7 @@ impl State {
                 w: panel.w + 20.0,
                 h: panel.h + 20.0,
             },
-            color_to_f32x3([0.05, 0.1, 0.16, 0.55]),
+            [0.08, 0.12, 0.18, 0.28],
             width,
             height,
         );
@@ -1695,7 +1676,7 @@ impl State {
             &mut vertices,
             &mut indices,
             panel,
-            color_to_f32x3([0.07, 0.09, 0.12, 0.96]),
+            [0.12, 0.15, 0.20, 0.72],
             width,
             height,
         );
@@ -1710,7 +1691,7 @@ impl State {
                 w: panel.w,
                 h: 6.0,
             },
-            color_to_f32x3([0.95, 0.72, 0.24, 1.0]),
+            [0.95, 0.72, 0.24, 1.0],
             width,
             height,
         );
@@ -1725,7 +1706,7 @@ impl State {
                 w: 180.0,
                 h: 34.0,
             },
-            color_to_f32x3([0.12, 0.16, 0.21, 0.95]),
+            [0.16, 0.20, 0.26, 0.82],
             width,
             height,
         );
@@ -1740,7 +1721,7 @@ impl State {
                 w: 8.0,
                 h: 40.0,
             },
-            color_to_f32x3([0.97, 0.74, 0.24, 1.0]),
+            [0.97, 0.74, 0.24, 1.0],
             width,
             height,
         );
@@ -1755,7 +1736,7 @@ impl State {
                 w: layout.quick_card.w,
                 h: layout.quick_card.h,
             },
-            color_to_f32x3([0.11, 0.14, 0.18, 0.98]),
+            [0.15, 0.19, 0.24, 0.76],
             width,
             height,
         );
@@ -1770,23 +1751,23 @@ impl State {
                 w: 4.0,
                 h: layout.quick_card.h,
             },
-            color_to_f32x3([0.35, 0.8, 0.78, 1.0]),
+            [0.35, 0.8, 0.78, 1.0],
             width,
             height,
         );
 
         // 7. Server address field (active = slightly brighter fill).
         let field_color = if self.menu_state.selected_field == MenuField::ServerAddress {
-            color_to_f32x3([0.13, 0.2, 0.27, 1.0])
+            [0.13, 0.2, 0.27, 0.88]
         } else {
-            color_to_f32x3([0.1, 0.13, 0.17, 1.0])
+            [0.13, 0.17, 0.22, 0.78]
         };
         // Outer dark border (1 px implied by the 2 px inset of the inner rect).
         push_rect(
             &mut vertices,
             &mut indices,
             layout.server_field,
-            color_to_f32x3([0.02, 0.03, 0.04, 1.0]),
+            [0.04, 0.05, 0.07, 0.78],
             width,
             height,
         );
@@ -1806,15 +1787,15 @@ impl State {
 
         // 8. Username field (same pattern as server field).
         let username_color = if self.menu_state.selected_field == MenuField::Username {
-            color_to_f32x3([0.13, 0.2, 0.27, 1.0])
+            [0.13, 0.2, 0.27, 0.88]
         } else {
-            color_to_f32x3([0.1, 0.13, 0.17, 1.0])
+            [0.13, 0.17, 0.22, 0.78]
         };
         push_rect(
             &mut vertices,
             &mut indices,
             layout.username_field,
-            color_to_f32x3([0.02, 0.03, 0.04, 1.0]),
+            [0.04, 0.05, 0.07, 0.78],
             width,
             height,
         );
@@ -1834,15 +1815,15 @@ impl State {
 
         // 9. Connect button (brighter fill on hover).
         let connect_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Connect)) {
-            color_to_f32x3([0.24, 0.52, 0.84, 1.0])
+            [0.24, 0.52, 0.84, 1.0]
         } else {
-            color_to_f32x3([0.2, 0.45, 0.74, 1.0])
+            [0.2, 0.45, 0.74, 1.0]
         };
         push_rect(
             &mut vertices,
             &mut indices,
             layout.connect_button,
-            color_to_f32x3([0.16, 0.33, 0.55, 1.0]),
+            [0.16, 0.33, 0.55, 1.0],
             width,
             height,
         ); // border
@@ -1862,15 +1843,15 @@ impl State {
 
         // 10. Singleplayer button (same pattern, darker palette).
         let single_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Singleplayer)) {
-            color_to_f32x3([0.19, 0.22, 0.28, 1.0])
+            [0.19, 0.22, 0.28, 1.0]
         } else {
-            color_to_f32x3([0.16, 0.19, 0.24, 1.0])
+            [0.16, 0.19, 0.24, 1.0]
         };
         push_rect(
             &mut vertices,
             &mut indices,
             layout.singleplayer_button,
-            color_to_f32x3([0.1, 0.11, 0.14, 1.0]),
+            [0.1, 0.11, 0.14, 1.0],
             width,
             height,
         );
@@ -1893,7 +1874,7 @@ impl State {
             &mut vertices,
             &mut indices,
             layout.status_pill,
-            color_to_f32x3([0.08, 0.1, 0.13, 0.96]),
+            [0.12, 0.15, 0.19, 0.82],
             width,
             height,
         );
@@ -1915,7 +1896,7 @@ impl State {
                     w: field.w + 4.0,
                     h: 3.0,
                 },
-                color_to_f32x3([0.97, 0.74, 0.24, 1.0]),
+                [0.97, 0.74, 0.24, 1.0],
                 width,
                 height,
             );
@@ -1945,7 +1926,7 @@ impl State {
                     w: 2.0,
                     h: field.h - 16.0,
                 },
-                color_to_f32x3([0.97, 0.74, 0.24, 0.95]),
+                [0.97, 0.74, 0.24, 0.95],
                 width,
                 height,
             );
@@ -1977,7 +1958,9 @@ impl State {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // composite on top of the scene
+                        // Preserve the already composited world and draw the
+                        // menu overlay on top of it.
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

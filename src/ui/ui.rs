@@ -34,12 +34,12 @@ pub fn block_type_to_index(block: BlockType) -> Option<f32> {
 /// Generates a row of nine block-preview slots centred horizontally at the
 /// bottom of the screen. Each slot is made up of three layered quads:
 ///
-/// 1. **Border quad** — white for the selected slot, dark grey otherwise.
-/// 2. **Background quad** — slightly lighter grey for the selected slot.
-/// 3. **Block-colour quad** — filled with the block's representative colour,
+/// 1. **Border quad** — white for the selected slot, dark gray otherwise.
+/// 2. **Background quad** — slightly lighter gray for the selected slot.
+/// 3. **Block-color quad** — filled with the block's representative color,
 ///    inset by a fixed padding fraction of the slot size.
 ///
-/// All coordinates are in normalised device coordinates (NDC): X and Y both
+/// All coordinates are in normalized device coordinates (NDC): X and Y both
 /// range from `-1.0` (left / bottom) to `+1.0` (right / top). The `aspect`
 /// ratio is applied to vertical measurements so slots appear square regardless
 /// of window dimensions.
@@ -81,7 +81,7 @@ pub fn build_hotbar(
         for (i, &(px, py)) in corners.iter().enumerate() {
             vertices.push(Vertex {
                 position: [px, py, 0.0],
-                packed: Vertex::pack(normal, color, 0, i as u8, 1, 1),
+                packed: Vertex::pack_ui(normal, [color[0], color[1], color[2], 1.0], 0, i as u8),
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -116,7 +116,7 @@ pub fn build_hotbar(
             bg_color,
         );
 
-        // Layer 3: block colour swatch — inset by 18% of slot size on all sides.
+        // Layer 3: block color swatch — inset by 18% of slot size on all sides.
         let block = HOTBAR_SLOTS[i];
         let [r, g, b] = block.color();
         let block_color = [r, g, b];
@@ -236,7 +236,7 @@ pub fn update_coords_ui(
             for (i, &(px, py)) in corners.iter().enumerate() {
                 verts.push(Vertex {
                     position: [px, py, 0.0],
-                    packed: Vertex::pack(normal, color, 0, i as u8, 1, 1),
+                    packed: Vertex::pack_ui(normal, [color[0], color[1], color[2], 1.0], 0, i as u8),
                 });
             }
             inds.extend_from_slice(&[
@@ -290,13 +290,13 @@ pub fn update_coords_ui(
 /// Returns the stroke segments that define `ch` in a simple seven-segment
 /// style font.
 ///
-/// Each segment is a tuple `(x1, y1, x2, y2)` in a normalised `[0, 1]²`
+/// Each segment is a tuple `(x1, y1, x2, y2)` in a normalized `[0, 1]²`
 /// glyph cell where `(0, 0)` is the bottom-left corner and `(1, 1)` is the
 /// top-right. The caller is responsible for scaling these coordinates into
 /// screen space.
 ///
 /// Supported characters: `0`–`9`, `X`, `Y`, `Z`, `:`, `.`, `-`.
-/// Any unrecognised character returns an empty `Vec`, producing no visible
+/// Any unrecognized character returns an empty `Vec`, producing no visible
 /// output (effectively a blank glyph).
 fn get_char_segments(ch: char) -> Vec<(f32, f32, f32, f32)> {
     // Named aliases for the seven standard segment positions.

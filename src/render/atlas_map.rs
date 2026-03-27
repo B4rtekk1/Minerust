@@ -65,9 +65,6 @@ fn create_atlas(tile_size: u32, textures: &[Vec<u8>]) -> Atlas {
     let mut data = vec![0u8; (atlas_size * atlas_size * 4) as usize];
 
     for (i, tex) in textures.iter().enumerate() {
-        // BUG FIX: was `i as u32 % atlas_size` and `i as u32 / atlas_size`,
-        // which divided by the pixel width instead of the tile count, producing
-        // wrong coordinates for every tile past the first row.
         let tile_col = i as u32 % tiles_per_row;
         let tile_row = i as u32 / tiles_per_row;
 

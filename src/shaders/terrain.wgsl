@@ -21,25 +21,17 @@ struct ShadowConfig {
 @group(0) @binding(4) var shadow_sampler:          sampler_comparison;
 @group(0) @binding(5) var<uniform> shadow_config: ShadowConfig;
 
-// ==================== G-BUFFER (dla compute) ====================
-
 @group(1) @binding(0) var gbuffer_world_pos:  texture_2d<f32>;
 @group(1) @binding(1) var gbuffer_normal:     texture_2d<f32>;
 @group(1) @binding(2) var gbuffer_view_depth: texture_2d<f32>;
 
-// ==================== WYNIK COMPUTE ====================
-
 @group(2) @binding(0) var output_shadow: texture_storage_2d<r32float, write>;
 
-// ==================== FINALNY FRAGMENT (shadow mask) ====================
-
 @group(3) @binding(0) var shadow_mask:   texture_2d<f32>;
-@group(3) @binding(1) var point_sampler: sampler;   // nearest sampler
+@group(3) @binding(1) var point_sampler: sampler;
 
 const PI:               f32 = 3.14159265359;
 const MAX_PCF_SAMPLES:  i32 = 16;
-
-// ====================== FUNKCJE POMOCNICZE ======================
 
 fn world_space_noise(world_pos: vec3<f32>) -> f32 {
     return fract(sin(dot(world_pos.xz, vec2<f32>(127.1, 311.7))) * 43758.5453);
@@ -82,7 +74,6 @@ fn sample_cascade_pcf(
     let edge_fade = smoothstep(0.0, em, uv.x) * smoothstep(1.0, 1.0 - em, uv.x)
                   * smoothstep(0.0, em, uv.y) * smoothstep(1.0, 1.0 - em, uv.y);
 
-    // POPRAWKA #2: ogranicz do MAX_PCF_SAMPLES, żeby nie wyjść poza tablicę Poissona
     let pcf_samples = min(i32(shadow_config.pcf_samples), MAX_PCF_SAMPLES);
     var shadow = 0.0;
     let shadow_dims = vec2<f32>(textureDimensions(shadow_map).xy);
@@ -92,8 +83,6 @@ fn sample_cascade_pcf(
         if any(suv < vec2<f32>(0.0)) || any(suv > vec2<f32>(1.0)) {
             shadow += select(0.0, 1.0, is_last);
         } else {
-            // Compute cannot use comparison sampling, so we perform a manual
-            // nearest-depth lookup and compare it explicitly.
             let texel = vec2<i32>(clamp(suv * shadow_dims, vec2<f32>(0.0), shadow_dims - vec2<f32>(1.0)));
             let depth = textureLoad(shadow_map, texel, cascade_idx, 0);
             if sc.z - bias <= depth {
@@ -153,16 +142,13 @@ fn calculate_shadow(
     return shadow_a;
 }
 
-// ====================== COMPUTE SHADER ======================
-
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(8, 8, 1)
 fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tex_size = textureDimensions(gbuffer_world_pos);
     if (gid.x >= tex_size.x || gid.y >= tex_size.y) {
         return;
     }
 
-    // POPRAWKA #4: sprawdzamy alpha G-buffera — sky/brak geometrii daje shadow = 1.0
     let gbuffer_sample = textureLoad(gbuffer_world_pos, gid.xy, 0);
     if gbuffer_sample.a < 0.5 {
         textureStore(output_shadow, gid.xy, vec4<f32>(1.0, 0.0, 0.0, 0.0));
@@ -182,8 +168,6 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(output_shadow, gid.xy, vec4<f32>(shadow_factor, 0.0, 0.0, 0.0));
 }
-
-// ====================== VERTEX SHADER ======================
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -231,7 +215,6 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.normal        = normals[n_idx % 6u];
     out.color         = vec3<f32>(r, g, b);
 
-    // Apply greedy meshing UV scaling
     let raw_uv = uvs[uv_idx % 4u];
     out.uv = vec2<f32>(raw_uv.x * width, raw_uv.y * height);
 
@@ -245,14 +228,11 @@ fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
     return uniforms.view_proj * vec4<f32>(model.position, 1.0);
 }
 
-// ====================== FRAGMENT SHADER (lekki) ======================
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
     if tex.a < 0.5 { discard; }
 
-    // Pobierz shadow z compute shadera
     let shadow_tex_size = vec2<f32>(textureDimensions(shadow_mask));
     let screen_uv = in.clip_position.xy / shadow_tex_size;
     let shadow = textureSampleLevel(shadow_mask, point_sampler, screen_uv, 0.0).r;
@@ -267,8 +247,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         0.18 * twilight_factor,
     );
 
-    // POPRAWKA #5: normalizujemy in.normal przed dot product,
-    // bo interpolacja między wierzchołkami może rozciągnąć wektor.
     let normal = normalize(in.normal);
 
     let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.55 * shadow * day_factor;
@@ -283,13 +261,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let total_light = (ambient + sun_diff + fill_diff) * face_shade;
     var lit = tex.rgb * total_light;
 
-    // Sunset tint
     let sunset_factor = 1.0 - abs(sun_dir.y);
     if sunset_factor > 0.3 && sun_dir.y > -0.2 {
         lit *= mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.85, 0.7), sunset_factor * 0.5);
     }
 
-    // Underwater + caustic + fog
     let dist = length(in.world_pos.xz - uniforms.camera_pos.xz);
     let is_underwater = uniforms.is_underwater > 0.5;
 

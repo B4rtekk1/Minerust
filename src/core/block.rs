@@ -123,7 +123,7 @@ impl BlockType {
     /// Returns `true` if this block is both non-transparent and non-air.
     ///
     /// Used by [`SubChunk::check_fully_opaque`](crate::core::chunk::SubChunk::check_fully_opaque)
-    /// to determine whether an entire sub-chunk can occlude its neighbours.
+    /// to determine whether an entire sub-chunk can occlude its neighbors.
     pub fn is_solid_opaque(&self) -> bool {
         !self.is_transparent() && *self != BlockType::Air
     }
@@ -138,7 +138,7 @@ impl BlockType {
     /// 4. [`BlockType::Leaves`] renders against other leaves (avoids solid
     ///    interior artifacts).
     /// 5. Any block renders against [`BlockType::WoodStairs`] (partial geometry).
-    /// 6. Any block renders against a transparent neighbour.
+    /// 6. Any block renders against a transparent neighbor.
     pub fn should_render_face_against(&self, neighbor: BlockType) -> bool {
         if neighbor == BlockType::Air {
             return true;

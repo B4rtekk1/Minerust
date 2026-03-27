@@ -144,13 +144,13 @@ F3               → Debug info
 
 | Constant | Default | Purpose |
 |----------|---------|---------|
-| `RENDER_DISTANCE` | 10 | Chunks to load around player |
+| `RENDER_DISTANCE` | 12 | Chunks to load around player |
 | `WORLD_HEIGHT` | 256 | Maximum build height |
 | `CHUNK_SIZE` | 16 | Horizontal chunk dimension |
 | `SUBCHUNK_HEIGHT` | 16 | Vertical subchunk size |
 | `CSM_CASCADE_COUNT` | 4 | Shadow cascades |
 | `CSM_SHADOW_MAP_SIZE` | 2048 | Shadow texture resolution |
-| `MAX_CHUNKS_PER_FRAME` | 4 | Mesh uploads/frame limit |
+| `MAX_CHUNKS_PER_FRAME` | 8 | Mesh uploads/frame limit |
 
 ---
 
@@ -342,11 +342,11 @@ Contributions are welcome! Please follow these guidelines:
 
 | Metric | Target |
 |--------|--------|
-| **FPS** | 200+ (RTX 3050 4GB @ 1080p) |
+| **FPS** | 300+ (RTX 3050 4GB @ 1080p) |
 | **Memory** | < 0.5GB (with render distance 12) |
 | **GPU Memory** | ~1.5GB |
-| **Chunk Load Time** | < 6ms |
-| **Frame Time** | 4-7ms |
+| **Chunk Load Time** | < 4ms |
+| **Frame Time** | 2-4ms |
 
 *Performance varies by hardware and settings.*
 

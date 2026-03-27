@@ -1,4 +1,7 @@
+use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
+use std::thread;
 
 use crate::constants::*;
 use crate::core::biome::Biome;
@@ -62,10 +65,20 @@ pub struct World {
 }
 
 impl World {
-    /// Creates a new world with the default seed (`2137`) and pre-generates
-    /// the initial render-distance ring of chunks around the origin.
+    /// Creates a new world with the default seed (`2137`) and no loaded chunks.
     pub fn new() -> Self {
-        Self::new_with_seed(42)
+        Self::new_empty_with_seed(42)
+    }
+
+    /// Creates a new empty world with the given `seed`.
+    pub fn new_empty_with_seed(seed: u32) -> Self {
+        World {
+            chunks: FxHashMap::default(),
+            last_cleanup_cx: i32::MIN,
+            last_cleanup_cz: i32::MIN,
+            seed,
+            generator: ChunkGenerator::new(seed),
+        }
     }
 
     /// Creates a new world with the given `seed` and pre-generates the initial
@@ -75,31 +88,54 @@ impl World {
     /// chunk X and Z, giving the player visible terrain immediately on spawn
     /// without waiting for the background `ChunkLoader`.
     pub fn new_with_seed(seed: u32) -> Self {
-        let generator = ChunkGenerator::new(seed);
+        let mut world = Self::new_empty_with_seed(seed);
+        world.generate_chunks_in_radius(0, 0, RENDER_DISTANCE);
+        world
+    }
 
-        let mut world = World {
-            chunks: FxHashMap::default(),
-            last_cleanup_cx: i32::MIN,
-            last_cleanup_cz: i32::MIN,
-            seed,
-            generator,
-        };
-
-        // Pre-generate the spawn-area chunks synchronously so the player has
-        // terrain to stand on the moment the window appears.
-        let spawn_cx = 0;
-        let spawn_cz = 0;
-        let initial_radius = RENDER_DISTANCE;
-        for cx in (spawn_cx - initial_radius)..=(spawn_cx + initial_radius) {
-            for cz in (spawn_cz - initial_radius)..=(spawn_cz + initial_radius) {
-                if !world.chunks.contains_key(&(cx, cz)) {
-                    let chunk = world.generator.generate_chunk(cx, cz);
-                    world.chunks.insert((cx, cz), chunk);
+    /// Generates all chunks within `radius` of `(center_cx, center_cz)` on the
+    /// calling thread.
+    pub fn generate_chunks_in_radius(&mut self, center_cx: i32, center_cz: i32, radius: i32) {
+        for cx in (center_cx - radius)..=(center_cx + radius) {
+            for cz in (center_cz - radius)..=(center_cz + radius) {
+                if !self.chunks.contains_key(&(cx, cz)) {
+                    let chunk = self.generator.generate_chunk(cx, cz);
+                    self.chunks.insert((cx, cz), chunk);
                 }
             }
         }
+    }
 
-        world
+    /// Starts background generation of all chunks within `outer_radius` of
+    /// `(center_cx, center_cz)`, skipping the inner square with radius
+    /// `inner_radius`.
+    ///
+    /// Existing chunks are left untouched, so this can be called after a small
+    /// synchronous preload without duplicating work.
+    pub fn spawn_chunks_in_ring_async(
+        world: Arc<RwLock<Self>>,
+        center_cx: i32,
+        center_cz: i32,
+        inner_radius: i32,
+        outer_radius: i32,
+    ) {
+        thread::spawn(move || {
+            let seed = world.read().seed;
+            let generator = ChunkGenerator::new(seed);
+
+            for cx in (center_cx - outer_radius)..=(center_cx + outer_radius) {
+                for cz in (center_cz - outer_radius)..=(center_cz + outer_radius) {
+                    if (cx - center_cx).abs().max((cz - center_cz).abs()) <= inner_radius {
+                        continue;
+                    }
+                    let chunk = generator.generate_chunk(cx, cz);
+                    let mut world = world.write();
+                    if !world.chunks.contains_key(&(cx, cz)) {
+                        world.chunks.insert((cx, cz), chunk);
+                    }
+                }
+            }
+        });
     }
 
     /// Ensures chunk `(cx, cz)` is present in the world, generating it

@@ -50,7 +50,7 @@ pub struct SubChunk {
 
     /// `true` when every block in this sub-chunk is solid and opaque.
     ///
-    /// When `true`, neighbouring sub-chunks can skip rendering faces that are
+    /// When `true`, neighboring sub-chunks can skip rendering faces that are
     /// adjacent to this one. Updated by [`SubChunk::check_fully_opaque`].
     pub is_fully_opaque: bool,
 }
@@ -91,7 +91,7 @@ impl SubChunk {
     /// Returns the block at local position `(x, y, z)`.
     ///
     /// Returns [`BlockType::Air`] for any coordinate outside the valid range
-    /// rather than panicking, making neighbour lookups safe without prior bounds checks.
+    /// rather than panicking, making neighbor lookups safe without prior bounds checks.
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
             self.blocks[x as usize][y as usize][z as usize]
@@ -167,7 +167,7 @@ pub struct Chunk {
 
     /// `true` if a player has placed or broken any block in this chunk.
     ///
-    /// Used to prioritise saving and to distinguish generated chunks from
+    /// Used to prioritize saving and to distinguish generated chunks from
     /// player-modified ones.
     pub player_modified: bool,
 }
@@ -175,7 +175,7 @@ pub struct Chunk {
 impl Chunk {
     /// Creates a new chunk at chunk-grid position `(x, z)`.
     ///
-    /// Allocates [`NUM_SUBCHUNKS`] sub-chunks, all initialised to air.
+    /// Allocates [`NUM_SUBCHUNKS`] sub-chunks, all initialized to air.
     pub fn new(x: i32, z: i32) -> Self {
         let mut subchunks = Vec::with_capacity(NUM_SUBCHUNKS as usize);
         for sy in 0..NUM_SUBCHUNKS {

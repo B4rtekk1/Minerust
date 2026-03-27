@@ -14,7 +14,7 @@ pub enum Biome {
     Desert,
     /// Cold, snowy landscape. Muted green tint, sparse trees.
     Tundra,
-    /// High-altitude rocky terrain. Reduced vegetation, grey-green tint.
+    /// High-altitude rocky terrain. Reduced vegetation, gray-green tint.
     Mountains,
     /// Waterlogged lowland. Dark, murky green tint, moderate trees.
     Swamp,

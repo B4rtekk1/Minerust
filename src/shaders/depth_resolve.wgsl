@@ -1,30 +1,31 @@
-override MSAA_SAMPLES: i32 = 4;
+@group(0) @binding(0)
+var msaa_depth: texture_depth_multisampled_2d;
 
-@group(0) @binding(0) var msaa_depth: texture_depth_multisampled_2d;
+@group(0) @binding(1)
+var hiz_seed: texture_storage_2d<r32float, write>;
 
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    return vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+@group(0) @binding(2)
+var ssr_depth: texture_storage_2d<r32float, write>;
+
+fn resolve_min_max_depth(coords: vec2<u32>) -> vec2<f32> {
+    let s0 = textureLoad(msaa_depth, vec2<i32>(coords), 0);
+    let s1 = textureLoad(msaa_depth, vec2<i32>(coords), 1);
+    let s2 = textureLoad(msaa_depth, vec2<i32>(coords), 2);
+    let s3 = textureLoad(msaa_depth, vec2<i32>(coords), 3);
+
+    let min_depth = min(min(s0, s1), min(s2, s3));
+    let max_depth = max(max(s0, s1), max(s2, s3));
+    return vec2<f32>(min_depth, max_depth);
 }
 
-struct ResolveOutput {
-    @builtin(frag_depth) depth: f32,
-    @location(0) color: f32,
-};
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(msaa_depth);
+    if id.x >= size.x || id.y >= size.y {
+        return;
+    }
 
-@fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> ResolveOutput {
-    let coords = vec2<i32>(pos.xy);
-
-    let d0 = textureLoad(msaa_depth, coords, 0);
-    let d1 = textureLoad(msaa_depth, coords, 1);
-    let d2 = textureLoad(msaa_depth, coords, 2);
-    let d3 = textureLoad(msaa_depth, coords, 3);
-
-    var out: ResolveOutput;
-    out.depth = min(min(d0, d1), min(d2, d3));
-    out.color = max(max(d0, d1), max(d2, d3));
-    return out;
+    let depths = resolve_min_max_depth(id.xy);
+    textureStore(ssr_depth, vec2<i32>(id.xy), vec4<f32>(depths.x, 0.0, 0.0, 1.0));
+    textureStore(hiz_seed, vec2<i32>(id.xy), vec4<f32>(depths.y, 0.0, 0.0, 1.0));
 }

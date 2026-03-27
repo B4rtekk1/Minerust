@@ -216,7 +216,7 @@ impl Rect {
 /// the renderer (for drawing) and [`MenuLayout::hit_test`] (for input). All
 /// coordinates are in pixels with the origin at the top-left of the window.
 ///
-/// Layout overview (top → bottom within the centre panel):
+/// Layout overview (top → bottom within the center panel):
 /// ```text
 /// ┌─────────────────────────────────┐
 /// │ header                          │
