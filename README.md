@@ -36,8 +36,6 @@ Tested on windows 11, might not work on windows 10. You can clone repo and try c
 
 <https://github.com/user-attachments/assets/3f86d46e-7a33-4144-ae3d-f78887f2b1a7>
 
-<https://github.com/user-attachments/assets/306f1229-8aa5-43d7-90c9-7e312252fc4a>
-
 ## ✨ Features
 
 ### 🎨 Rendering System
