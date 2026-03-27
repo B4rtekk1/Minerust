@@ -107,7 +107,7 @@ impl State {
 
         // Use all available backends; on Windows, wgpu will prefer DX12 over
         // Vulkan because DX12 typically yields better frame times there.
-        let backend = wgpu::Backends::all();
+        let backend = wgpu::Backends::DX12;
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: backend,
