@@ -6,15 +6,15 @@ use winit::{
     event::{DeviceEvent, ElementState, Event, KeyEvent, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{CursorGrabMode, WindowBuilder, Fullscreen},
+    window::{CursorGrabMode, Fullscreen, WindowBuilder},
 };
 
 use minerust::{
     CHUNK_SIZE, DEFAULT_WORLD_FILE, SUBCHUNK_HEIGHT, SavedWorld, World, load_world, save_world,
 };
 
+use crate::logger::{LogLevel, log};
 use crate::ui::menu::GameState;
-use crate::logger::{log, LogLevel};
 
 use super::server::run_dedicated_server;
 use super::state::State;
@@ -114,9 +114,18 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
     // ── Dedicated server mode ─────────────────────────────────────────────── //
     if args.server {
         let addr = format!("0.0.0.0:{}", args.port);
-        log(LogLevel::Info, &format!("Starting headless server on {}...", addr));
-        log(LogLevel::Info, "Note: This is a console-only server. No game window will appear.");
-        log(LogLevel::Info, "To play the game, run the application without --server.");
+        log(
+            LogLevel::Info,
+            &format!("Starting headless server on {}...", addr),
+        );
+        log(
+            LogLevel::Info,
+            "Note: This is a console-only server. No game window will appear.",
+        );
+        log(
+            LogLevel::Info,
+            "To play the game, run the application without --server.",
+        );
         log(LogLevel::Info, "Press Ctrl+C to stop the server.");
         // Flush so the operator sees the startup messages immediately even
         // when stdout is piped (e.g., `minerust --server | tee server.log`).
@@ -140,7 +149,10 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
         // handle Ok/Err.
         Ok(ev) => ev,
         Err(e) => {
-            log(LogLevel::Error, &format!("Failed to create event loop: {}", e));
+            log(
+                LogLevel::Error,
+                &format!("Failed to create event loop: {}", e),
+            );
             return Err(Box::new(e) as Box<dyn std::error::Error>);
         }
     };
@@ -229,16 +241,16 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                 // ── Keyboard input ────────────────────────────────────────── //
                 Event::WindowEvent {
                     event:
-                    WindowEvent::KeyboardInput {
-                        event:
-                        KeyEvent {
-                            physical_key: PhysicalKey::Code(key),
-                            state: key_state,
-                            text,
+                        WindowEvent::KeyboardInput {
+                            event:
+                                KeyEvent {
+                                    physical_key: PhysicalKey::Code(key),
+                                    state: key_state,
+                                    text,
+                                    ..
+                                },
                             ..
                         },
-                        ..
-                    },
                     ..
                 } => {
                     state.last_input_time = Instant::now();
@@ -268,18 +280,20 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 KeyCode::Enter => {
                                     state.connect_to_server();
                                 }
-                            KeyCode::Escape => {
-                                // Dismiss the menu and return to the game
-                                // without disconnecting, and immediately
-                                // recapture the cursor for gameplay.
-                                state.game_state = GameState::Playing;
-                                state.mouse_captured = true;
-                                let _ = state
-                                    .window
-                                    .set_cursor_grab(CursorGrabMode::Confined)
-                                    .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked));
-                                state.window.set_cursor_visible(false);
-                            }
+                                KeyCode::Escape => {
+                                    // Dismiss the menu and return to the game
+                                    // without disconnecting, and immediately
+                                    // recapture the cursor for gameplay.
+                                    state.game_state = GameState::Playing;
+                                    state.mouse_captured = true;
+                                    let _ = state
+                                        .window
+                                        .set_cursor_grab(CursorGrabMode::Confined)
+                                        .or_else(|_| {
+                                            state.window.set_cursor_grab(CursorGrabMode::Locked)
+                                        });
+                                    state.window.set_cursor_visible(false);
+                                }
                                 KeyCode::Backspace => {
                                     state.menu_state.handle_backspace();
                                 }
@@ -302,12 +316,12 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         // ---- In-game key bindings ----------------------------
                         match key {
                             // Movement – held state polled each frame by `update`.
-                            KeyCode::KeyW => state.input.forward  = pressed,
+                            KeyCode::KeyW => state.input.forward = pressed,
                             KeyCode::KeyS => state.input.backward = pressed,
-                            KeyCode::KeyA => state.input.left     = pressed,
-                            KeyCode::KeyD => state.input.right    = pressed,
-                            KeyCode::Space      => state.input.jump   = pressed,
-                            KeyCode::ShiftLeft  => state.input.sprint = pressed,
+                            KeyCode::KeyA => state.input.left = pressed,
+                            KeyCode::KeyD => state.input.right = pressed,
+                            KeyCode::Space => state.input.jump = pressed,
+                            KeyCode::ShiftLeft => state.input.sprint = pressed,
 
                             KeyCode::Escape if pressed => {
                                 // Escape always returns to the menu from gameplay.
@@ -364,14 +378,20 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Err(e) = save_world(DEFAULT_WORLD_FILE, &saved) {
                                     log(LogLevel::Error, &format!("Failed to save world: {}", e));
                                 } else {
-                                    log(LogLevel::Info, &format!("World saved to {}", DEFAULT_WORLD_FILE));
+                                    log(
+                                        LogLevel::Info,
+                                        &format!("World saved to {}", DEFAULT_WORLD_FILE),
+                                    );
                                 }
                             }
 
                             // ---- F9: Load world from disk -------------------
                             KeyCode::F9 if pressed => match load_world(DEFAULT_WORLD_FILE) {
                                 Ok(saved) => {
-                                    log(LogLevel::Info, &format!("Regenerating world with seed {}...", saved.seed));
+                                    log(
+                                        LogLevel::Info,
+                                        &format!("Regenerating world with seed {}...", saved.seed),
+                                    );
 
                                     // Reinitialize the world from the saved seed
                                     // so procedurally-generated terrain is
@@ -392,8 +412,8 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     state.camera.position.x = saved.player_x;
                                     state.camera.position.y = saved.player_y;
                                     state.camera.position.z = saved.player_z;
-                                    state.camera.yaw        = saved.player_yaw;
-                                    state.camera.pitch      = saved.player_pitch;
+                                    state.camera.yaw = saved.player_yaw;
+                                    state.camera.pitch = saved.player_pitch;
 
                                     // Overwrite sub-chunk block data with the
                                     // serialized player edits.  Block data is
@@ -425,7 +445,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                                                 }
                                                             }
                                                         }
-                                                        subchunk.is_empty  = false;
+                                                        subchunk.is_empty = false;
                                                         subchunk.mesh_dirty = true;
                                                     }
                                                     chunk.player_modified = true;
@@ -445,10 +465,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
-                                    log(LogLevel::Info, &format!(
-                                        "World loaded from {} (seed: {})",
-                                        DEFAULT_WORLD_FILE, saved.seed
-                                    ));
+                                    log(
+                                        LogLevel::Info,
+                                        &format!(
+                                            "World loaded from {} (seed: {})",
+                                            DEFAULT_WORLD_FILE, saved.seed
+                                        ),
+                                    );
                                 }
                                 Err(e) => log(LogLevel::Error, &format!("Error loading: {}", e)),
                             },
@@ -456,15 +479,42 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             // ---- Hotbar slot selection (1–9) ----------------
                             // Setting `hotbar_dirty` triggers a mesh rebuild of
                             // the hotbar UI on the next frame.
-                            KeyCode::Digit1 if pressed => { state.hotbar_slot = 0; state.hotbar_dirty = true; }
-                            KeyCode::Digit2 if pressed => { state.hotbar_slot = 1; state.hotbar_dirty = true; }
-                            KeyCode::Digit3 if pressed => { state.hotbar_slot = 2; state.hotbar_dirty = true; }
-                            KeyCode::Digit4 if pressed => { state.hotbar_slot = 3; state.hotbar_dirty = true; }
-                            KeyCode::Digit5 if pressed => { state.hotbar_slot = 4; state.hotbar_dirty = true; }
-                            KeyCode::Digit6 if pressed => { state.hotbar_slot = 5; state.hotbar_dirty = true; }
-                            KeyCode::Digit7 if pressed => { state.hotbar_slot = 6; state.hotbar_dirty = true; }
-                            KeyCode::Digit8 if pressed => { state.hotbar_slot = 7; state.hotbar_dirty = true; }
-                            KeyCode::Digit9 if pressed => { state.hotbar_slot = 8; state.hotbar_dirty = true; }
+                            KeyCode::Digit1 if pressed => {
+                                state.hotbar_slot = 0;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit2 if pressed => {
+                                state.hotbar_slot = 1;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit3 if pressed => {
+                                state.hotbar_slot = 2;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit4 if pressed => {
+                                state.hotbar_slot = 3;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit5 if pressed => {
+                                state.hotbar_slot = 4;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit6 if pressed => {
+                                state.hotbar_slot = 5;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit7 if pressed => {
+                                state.hotbar_slot = 6;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit8 if pressed => {
+                                state.hotbar_slot = 7;
+                                state.hotbar_dirty = true;
+                            }
+                            KeyCode::Digit9 if pressed => {
+                                state.hotbar_slot = 8;
+                                state.hotbar_dirty = true;
+                            }
                             _ => {}
                         }
                     }
@@ -498,11 +548,11 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                 // ── Mouse button input ────────────────────────────────────── //
                 Event::WindowEvent {
                     event:
-                    WindowEvent::MouseInput {
-                        state: btn_state,
-                        button,
-                        ..
-                    },
+                        WindowEvent::MouseInput {
+                            state: btn_state,
+                            button,
+                            ..
+                        },
                     ..
                 } => {
                     state.last_input_time = Instant::now();
@@ -563,7 +613,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     state.last_input_time = Instant::now();
                     if state.mouse_captured {
                         let sensitivity = 0.002; // radians per pixel
-                        state.camera.yaw   += delta.0 as f32 * sensitivity;
+                        state.camera.yaw += delta.0 as f32 * sensitivity;
                         // Subtract because a downward mouse movement (positive Y
                         // on most OS conventions) should pitch the camera down
                         // (decreasing pitch in our coordinate system).
@@ -588,8 +638,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                 Event::AboutToWait => {
                     let is_idle = state.last_input_time.elapsed().as_secs() >= 30;
                     if is_idle {
-                        let next_frame =
-                            Instant::now() + std::time::Duration::from_millis(33);
+                        let next_frame = Instant::now() + std::time::Duration::from_millis(33);
                         elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
                     } else {
                         elwt.set_control_flow(ControlFlow::Poll);
@@ -607,5 +656,5 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Ok(())
+    Ok(())
 }

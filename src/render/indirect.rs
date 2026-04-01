@@ -4,8 +4,8 @@ use rustc_hash::FxHashMap;
 use crate::core::vertex::Vertex;
 use crate::render::frustum::AABB;
 
+use crate::logger::{LogLevel, log};
 use ::std::collections::BTreeMap;
-use crate::logger::{log, LogLevel};
 
 /// Maximum number of subchunks that can be tracked simultaneously.
 const MAX_SUBCHUNKS: usize = 65536;
@@ -605,11 +605,13 @@ impl IndirectManager {
             }
             None => {
                 if self.next_vertex_offset + vertex_count > MAX_VERTICES as u32 {
-                    log(LogLevel::Warning, &format!(
-                        "Unified vertex buffer full ({}/{} vertices used), clearing indirect draw cache...",
-                        self.next_vertex_offset,
-                        MAX_VERTICES
-                    ));
+                    log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Unified vertex buffer full ({}/{} vertices used), clearing indirect draw cache...",
+                            self.next_vertex_offset, MAX_VERTICES
+                        ),
+                    );
                     self.clear_gpu_data(queue);
                     return false;
                 }
@@ -633,7 +635,13 @@ impl IndirectManager {
             }
             None => {
                 if self.next_index_offset + index_count > MAX_INDICES as u32 {
-                    log(LogLevel::Warning, &format!("Unified index buffer full ({}/{} indices used), clearing indirect draw cache...", self.next_index_offset, MAX_INDICES));
+                    log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Unified index buffer full ({}/{} indices used), clearing indirect draw cache...",
+                            self.next_index_offset, MAX_INDICES
+                        ),
+                    );
                     self.clear_gpu_data(queue);
                     return false;
                 }
@@ -645,7 +653,10 @@ impl IndirectManager {
         let slot_index = match self.free_slots.pop() {
             Some(idx) => idx,
             None => {
-                log(LogLevel::Warning, "No free metadata slots available, clearing indirect draw cache...");
+                log(
+                    LogLevel::Warning,
+                    "No free metadata slots available, clearing indirect draw cache...",
+                );
                 return false;
             }
         };
@@ -831,7 +842,7 @@ impl IndirectManager {
     ///
     /// Called as a last resort when a unified buffer overflows.  After this
     /// returns the caller must re-upload all subchunks from scratch.
-    fn clear_gpu_data(&mut self, queue: &wgpu::Queue) {
+    pub fn clear_gpu_data(&mut self, queue: &wgpu::Queue) {
         // Zero every live metadata slot so stale entries don't survive.
         for alloc in self.allocations.values() {
             let subchunk_meta = SubchunkGpuMeta {

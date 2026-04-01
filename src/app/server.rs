@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::logger::{LogLevel, log};
 use crate::multiplayer::protocol::Packet;
 use crate::multiplayer::tcp::TcpServer;
-use crate::logger::{log, LogLevel};
 
 /// Runs a standalone dedicated multiplayer server that accepts TCP connections
 /// and relays packets between all connected clients.
@@ -47,20 +47,32 @@ pub async fn run_dedicated_server(addr: &str) {
             // Wrap in Arc so the handle can be cheaply cloned into each
             // per-client task without requiring a global or thread-local.
             let server = Arc::new(server_inst);
-            log(LogLevel::Info, &format!("Server successfully bound to {}", addr));
+            log(
+                LogLevel::Info,
+                &format!("Server successfully bound to {}", addr),
+            );
             log(LogLevel::Info, "Waiting for connections...");
             // Flush stdout immediately so the operator sees the startup
             // message even if stdout is line-buffered (e.g., piped to a file).
             let _ = std::io::Write::flush(&mut std::io::stdout());
 
-            // ── Accept loop ───────────────────────────────────────────────── //
+            let server_seed: u32 = rand::random();
+            log(LogLevel::Info, &format!("Server world seed: {}", server_seed));
+
             // Runs on the calling task forever.  Each accepted connection is
             // handed off to a new Tokio task so `accept` is free to resume
             // waiting for the next client immediately.
             loop {
                 match server.accept().await {
                     Ok((id, conn)) => {
-                        log(LogLevel::Info, &format!("Accepted connection from {} with assigned ID {}", conn.addr(), id));
+                        log(
+                            LogLevel::Info,
+                            &format!(
+                                "Accepted connection from {} with assigned ID {}",
+                                conn.addr(),
+                                id
+                            ),
+                        );
                         // Clone the Arc handle; the spawned task takes ownership
                         // of this clone so the borrow checker is satisfied.
                         let server_clone = server.clone();
@@ -89,6 +101,7 @@ pub async fn run_dedicated_server(addr: &str) {
                                                 let ack = Packet::ConnectAck {
                                                     success: true,
                                                     player_id: id,
+                                                    seed: server_seed,
                                                 };
                                                 let _ = conn.send(&ack).await;
                                             }
@@ -130,7 +143,13 @@ pub async fn run_dedicated_server(addr: &str) {
                                     // Any receive error is treated as a clean
                                     // disconnect (TCP RST, EOF, decode failure).
                                     Err(_) => {
-                                        log(LogLevel::Info, &format!("Connection error with client {}; treating as disconnect", id));
+                                        log(
+                                            LogLevel::Info,
+                                            &format!(
+                                                "Connection error with client {}; treating as disconnect",
+                                                id
+                                            ),
+                                        );
                                         // Synthesize a Disconnect packet so that
                                         // remaining clients can remove this player
                                         // from their local state (despawn model,
@@ -165,7 +184,10 @@ pub async fn run_dedicated_server(addr: &str) {
         }
 
         Err(e) => {
-            log(LogLevel::Error, &format!("Failed to bind server to {}: {}", addr, e));
+            log(
+                LogLevel::Error,
+                &format!("Failed to bind server to {}: {}", addr, e),
+            );
         }
     }
 }

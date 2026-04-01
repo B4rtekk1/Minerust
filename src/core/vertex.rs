@@ -37,19 +37,19 @@ pub struct Vertex {
 impl Vertex {
     /// Packs normal, color, texture, corner, and dimensions into the 32-bit `packed` field.
     pub fn pack(
-        normal_idx: u8,      // 0-5 (3 bits)
-        color: [f32; 3],     // 0.0-1.0 (11 bits: 4R, 4G, 3B)
-        tex_index: u8,       // 0-255 (8 bits)
-        corner_idx: u8,      // 0-3 (2 bits)
-        width: u8,           // 1-16 (4 bits)
-        height: u8,          // 1-16 (4 bits)
+        normal_idx: u8,  // 0-5 (3 bits)
+        color: [f32; 3], // 0.0-1.0 (11 bits: 4R, 4G, 3B)
+        tex_index: u8,   // 0-255 (8 bits)
+        corner_idx: u8,  // 0-3 (2 bits)
+        width: u8,       // 1-16 (4 bits)
+        height: u8,      // 1-16 (4 bits)
     ) -> u32 {
         let n = (normal_idx as u32) & 0x7;
         let t = (tex_index as u32) & 0xFF;
         let uv = (corner_idx as u32) & 0x3;
         let w = ((width.saturating_sub(1)) as u32) & 0xF;
         let h = ((height.saturating_sub(1)) as u32) & 0xF;
-        
+
         // 11-bit color: 4 bits Red, 4 bits Green, 3 bits Blue
         let r = ((color[0].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
         let g = ((color[1].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
@@ -67,22 +67,51 @@ impl Vertex {
         let alpha = ((color[3].clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
         let width = ((alpha & 0x0F) as u8) + 1;
         let height = (((alpha >> 4) & 0x0F) as u8) + 1;
-        Self::pack(normal_idx, [color[0], color[1], color[2]], tex_index, corner_idx, width, height)
+        Self::pack(
+            normal_idx,
+            [color[0], color[1], color[2]],
+            tex_index,
+            corner_idx,
+            width,
+            height,
+        )
     }
 
     /// Legacy pack helpers (unused but kept for compatibility during refactor if needed)
-    #[inline] pub fn pack_normal(n: [f32; 3]) -> u8 {
-        if n[0] > 0.5 { 1 } else if n[0] < -0.5 { 0 }
-        else if n[1] > 0.5 { 3 } else if n[1] < -0.5 { 2 }
-        else if n[2] > 0.5 { 5 } else { 4 }
+    #[inline]
+    pub fn pack_normal(n: [f32; 3]) -> u8 {
+        if n[0] > 0.5 {
+            1
+        } else if n[0] < -0.5 {
+            0
+        } else if n[1] > 0.5 {
+            3
+        } else if n[1] < -0.5 {
+            2
+        } else if n[2] > 0.5 {
+            5
+        } else {
+            4
+        }
     }
 
-    #[inline] pub fn pack_color(c: [f32; 3]) -> [u8; 3] {
-        [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8]
+    #[inline]
+    pub fn pack_color(c: [f32; 3]) -> [u8; 3] {
+        [
+            (c[0] * 255.0) as u8,
+            (c[1] * 255.0) as u8,
+            (c[2] * 255.0) as u8,
+        ]
     }
 
-    #[inline] pub fn pack_color_rgba(c: [f32; 4]) -> [u8; 4] {
-        [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, (c[3] * 255.0) as u8]
+    #[inline]
+    pub fn pack_color_rgba(c: [f32; 4]) -> [u8; 4] {
+        [
+            (c[0] * 255.0) as u8,
+            (c[1] * 255.0) as u8,
+            (c[2] * 255.0) as u8,
+            (c[3] * 255.0) as u8,
+        ]
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {

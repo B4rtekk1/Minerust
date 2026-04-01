@@ -20,8 +20,8 @@ use tokio::sync::mpsc;
 /// the event-consumption code.
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
-    /// The local player successfully connected and was assigned `player_id`.
-    Connected(PlayerId),
+    /// The local player successfully connected and was assigned `player_id` and world `seed`.
+    Connected(PlayerId, u32),
     /// The local player's connection was closed (graceful or error).
     Disconnected,
     /// A remote player joined the session with the given username.
@@ -176,13 +176,13 @@ impl GameClient {
 
                 let response = client.recv().await?;
                 match response {
-                    Packet::ConnectAck { success, player_id } => {
+                    Packet::ConnectAck { success, player_id, seed } => {
                         if success {
                             self.tcp_client = Some(client);
                             self.state = ConnectionState::Connected;
                             self.player_id = Some(player_id);
                             // Non-fatal if the receiver was already dropped.
-                            let _ = self.event_tx.send(ClientEvent::Connected(player_id));
+                            let _ = self.event_tx.send(ClientEvent::Connected(player_id, seed));
                             Ok(())
                         } else {
                             Err(Error::new(
@@ -258,12 +258,21 @@ impl GameClient {
                     .event_tx
                     .send(ClientEvent::PlayerMoved(player_id, x, y, z));
             }
-            Packet::Rotation { player_id, yaw, pitch } => {
+            Packet::Rotation {
+                player_id,
+                yaw,
+                pitch,
+            } => {
                 let _ = self
                     .event_tx
                     .send(ClientEvent::PlayerRotated(player_id, yaw, pitch));
             }
-            Packet::BlockChange { x, y, z, block_type } => {
+            Packet::BlockChange {
+                x,
+                y,
+                z,
+                block_type,
+            } => {
                 let _ = self
                     .event_tx
                     .send(ClientEvent::BlockChanged(x, y, z, block_type));
@@ -275,7 +284,10 @@ impl GameClient {
             }
             // A `Connect` packet arriving after the handshake means another
             // player joined the session; map it to `PlayerJoined`.
-            Packet::Connect { player_id, username } => {
+            Packet::Connect {
+                player_id,
+                username,
+            } => {
                 let _ = self
                     .event_tx
                     .send(ClientEvent::PlayerJoined(player_id, username));
@@ -358,7 +370,7 @@ impl GameClient {
                 y,
                 z,
             })
-                .await
+            .await
         } else {
             Err(Error::new(ErrorKind::NotConnected, "Not connected"))
         }
@@ -378,7 +390,7 @@ impl GameClient {
                 yaw,
                 pitch,
             })
-                .await
+            .await
         } else {
             Err(Error::new(ErrorKind::NotConnected, "Not connected"))
         }
@@ -389,14 +401,14 @@ impl GameClient {
     /// Unlike position and rotation, block changes do not require a connected
     /// `player_id` in the packet (the server identifies the sender from the
     /// connection), so this helper does not gate on `player_id`.
-    pub async fn send_block_change(
-        &self,
-        x: i32,
-        y: i32,
-        z: i32,
-        block_type: u8,
-    ) -> Result<()> {
-        self.send(&Packet::BlockChange { x, y, z, block_type }).await
+    pub async fn send_block_change(&self, x: i32, y: i32, z: i32, block_type: u8) -> Result<()> {
+        self.send(&Packet::BlockChange {
+            x,
+            y,
+            z,
+            block_type,
+        })
+        .await
     }
 
     /// Sends a chat message to the server, which broadcasts it to all peers.
@@ -409,7 +421,7 @@ impl GameClient {
                 player_id: id,
                 message: message.to_string(),
             })
-                .await
+            .await
         } else {
             Err(Error::new(ErrorKind::NotConnected, "Not connected"))
         }

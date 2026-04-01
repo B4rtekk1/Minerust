@@ -141,11 +141,11 @@ impl ChunkLoader {
     /// Panics if any worker thread cannot be spawned.
     pub fn with_worker_count(num_workers: usize, seed: u32) -> Self {
         let (request_tx, request_rx) = bounded::<ChunkGenRequest>(256);
-        let (result_tx, result_rx)   = bounded::<ChunkGenResult>(256);
+        let (result_tx, result_rx) = bounded::<ChunkGenResult>(256);
 
         for worker_id in 0..num_workers {
-            let rx        = request_rx.clone();
-            let tx        = result_tx.clone();
+            let rx = request_rx.clone();
+            let tx = result_tx.clone();
             // Each worker owns its own generator — no mutex needed.
             let generator = ChunkGenerator::new(seed);
 
@@ -291,7 +291,7 @@ impl ChunkLoader {
                     self.pending.remove(&(result.cx, result.cz));
                     results.push(result);
                 }
-                Err(TryRecvError::Empty)        => break,
+                Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
         }

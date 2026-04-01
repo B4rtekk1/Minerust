@@ -33,7 +33,7 @@ fn load_textures(paths: &[&str], tile_size: u32) -> Vec<Vec<u8>> {
 
     for path in paths {
         let img = image::open(path).expect("failed to open image").to_rgba8();
-        assert_eq!(img.width(),  tile_size, "tile width mismatch in {path}");
+        assert_eq!(img.width(), tile_size, "tile width mismatch in {path}");
         assert_eq!(img.height(), tile_size, "tile height mismatch in {path}");
 
         textures.push(img.into_raw());
@@ -77,8 +77,7 @@ fn create_atlas(tile_size: u32, textures: &[Vec<u8>]) -> Atlas {
             let dst_start = ((y + row) * atlas_size + x) as usize * 4;
             let src_start = (row * tile_size) as usize * 4;
             let len = (tile_size * 4) as usize;
-            data[dst_start..dst_start + len]
-                .copy_from_slice(&tex[src_start..src_start + len]);
+            data[dst_start..dst_start + len].copy_from_slice(&tex[src_start..src_start + len]);
         }
     }
 

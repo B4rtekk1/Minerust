@@ -38,6 +38,8 @@ pub enum Packet {
         success: bool,
         /// The authoritative player ID assigned by the server.
         player_id: PlayerId,
+        /// The world seed of the server.
+        seed: u32,
     },
 
     /// Reports a player's world-space position.
@@ -160,9 +162,10 @@ impl Packet {
                 buf.extend_from_slice(&player_id.to_le_bytes());
                 write_string(&mut buf, username);
             }
-            Packet::ConnectAck { success, player_id } => {
+            Packet::ConnectAck { success, player_id, seed } => {
                 buf.push(if *success { 1 } else { 0 });
                 buf.extend_from_slice(&player_id.to_le_bytes());
+                buf.extend_from_slice(&seed.to_le_bytes());
             }
             Packet::Position { player_id, x, y, z } => {
                 buf.extend_from_slice(&player_id.to_le_bytes());
@@ -252,9 +255,11 @@ impl Packet {
                 let mut b = [0u8; 1];
                 cursor.read_exact(&mut b)?;
                 let player_id = read_u32(&mut cursor)?;
+                let seed = read_u32(&mut cursor)?;
                 Ok(Packet::ConnectAck {
                     success: b[0] != 0,
                     player_id,
+                    seed,
                 })
             }
             0x10 => {

@@ -22,7 +22,7 @@ impl DeviceInfo {
 
         let cpu_physical_cores = System::physical_core_count();
 
-        let cpu_name = cpus 
+        let cpu_name = cpus
             .first()
             .map(|c| c.name().to_string())
             .unwrap_or_default();

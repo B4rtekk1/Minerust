@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
+use crate::logger::{LogLevel, log};
 use crate::multiplayer::protocol::Packet;
-use crate::logger::{log, LogLevel};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::SocketAddr;
@@ -190,7 +190,10 @@ impl TcpServer {
     /// in use, permission denied).
     pub async fn bind(addr: &str) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
-        log(LogLevel::Info, &format!("[TCP Server] Listening on {}", addr));
+        log(
+            LogLevel::Info,
+            &format!("[TCP Server] Listening on {}", addr),
+        );
         Ok(Self {
             listener: Some(listener),
             connections: Arc::new(RwLock::new(HashMap::new())),
@@ -231,7 +234,10 @@ impl TcpServer {
             let mut conns = self.connections.write().await;
             conns.insert(id, connection.clone());
         }
-        log(LogLevel::Info, &format!("[TCP Server] Client {} connected from {}", id, addr));
+        log(
+            LogLevel::Info,
+            &format!("[TCP Server] Client {} connected from {}", id, addr),
+        );
         Ok((id, connection))
     }
 
@@ -247,7 +253,10 @@ impl TcpServer {
         let conns = self.connections.read().await;
         for (id, conn) in conns.iter() {
             if let Err(e) = conn.send(packet).await {
-                log(LogLevel::Warning, &format!("[TCP Server] Failed to send to client {}: {}", id, e));
+                log(
+                    LogLevel::Warning,
+                    &format!("[TCP Server] Failed to send to client {}: {}", id, e),
+                );
             }
         }
         Ok(())
@@ -267,7 +276,10 @@ impl TcpServer {
         for (id, conn) in conns.iter() {
             if *id != except_id {
                 if let Err(e) = conn.send(packet).await {
-                    log(LogLevel::Warning, &format!("[TCP Server] Failed to send to client {}: {}", id, e));
+                    log(
+                        LogLevel::Warning,
+                        &format!("[TCP Server] Failed to send to client {}: {}", id, e),
+                    );
                 }
             }
         }
@@ -283,7 +295,10 @@ impl TcpServer {
     pub async fn remove_client(&self, id: u32) {
         let mut conns = self.connections.write().await;
         if conns.remove(&id).is_some() {
-            log(LogLevel::Info, &format!("[TCP Server] Client {} removed", id));
+            log(
+                LogLevel::Info,
+                &format!("[TCP Server] Client {} removed", id),
+            );
         }
     }
 
@@ -339,7 +354,10 @@ impl TcpClient {
     ///
     /// Returns an I/O error if the connection attempt or `set_nodelay` call fails.
     pub async fn connect(&mut self, addr: &str) -> Result<()> {
-        log(LogLevel::Info, &format!("[TCP Client] Attempting to connect to {}...", addr));
+        log(
+            LogLevel::Info,
+            &format!("[TCP Client] Attempting to connect to {}...", addr),
+        );
         let stream = TcpStream::connect(addr).await?;
         // Disable Nagle's algorithm so small game packets are sent immediately.
         stream.set_nodelay(true)?;
@@ -347,7 +365,10 @@ impl TcpClient {
         let socket_addr = stream.peer_addr()?;
         self.connection = Some(Arc::new(TcpConnection::new(stream, socket_addr)));
 
-        log(LogLevel::Info, &format!("[TCP Client] Successfully connected to {}", addr));
+        log(
+            LogLevel::Info,
+            &format!("[TCP Client] Successfully connected to {}", addr),
+        );
         Ok(())
     }
 

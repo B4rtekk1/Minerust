@@ -91,13 +91,13 @@ pub fn add_greedy_quad(
     let base_idx = vertices.len() as u32;
 
     // For greedy quads, we are still using unit UV corners in the vertex,
-    // but the shader will multiply them by width/height? 
+    // but the shader will multiply them by width/height?
     // Wait, width and height are not in my current 16-byte pack.
     // I should add them or pass them differently.
-    
+
     // Actually, I can put width/height into the packed data for greedy quads!
     // I need to update Vertex::pack to include width/height if it fits.
-    
+
     let w = width as u8;
     let h = height as u8;
 
@@ -220,17 +220,47 @@ pub fn build_block_outline(
     // Order: [+X, -X, +Y, -Y, +Z, -Z]
     let face_corners: [[[f32; 3]; 4]; 6] = [
         // +X face
-        [[max_x, min_y, min_z], [max_x, max_y, min_z], [max_x, max_y, max_z], [max_x, min_y, max_z]],
+        [
+            [max_x, min_y, min_z],
+            [max_x, max_y, min_z],
+            [max_x, max_y, max_z],
+            [max_x, min_y, max_z],
+        ],
         // -X face
-        [[min_x, min_y, max_z], [min_x, max_y, max_z], [min_x, max_y, min_z], [min_x, min_y, min_z]],
+        [
+            [min_x, min_y, max_z],
+            [min_x, max_y, max_z],
+            [min_x, max_y, min_z],
+            [min_x, min_y, min_z],
+        ],
         // +Y face
-        [[min_x, max_y, min_z], [min_x, max_y, max_z], [max_x, max_y, max_z], [max_x, max_y, min_z]],
+        [
+            [min_x, max_y, min_z],
+            [min_x, max_y, max_z],
+            [max_x, max_y, max_z],
+            [max_x, max_y, min_z],
+        ],
         // -Y face
-        [[min_x, min_y, max_z], [min_x, min_y, min_z], [max_x, min_y, min_z], [max_x, min_y, max_z]],
+        [
+            [min_x, min_y, max_z],
+            [min_x, min_y, min_z],
+            [max_x, min_y, min_z],
+            [max_x, min_y, max_z],
+        ],
         // +Z face
-        [[min_x, min_y, max_z], [max_x, min_y, max_z], [max_x, max_y, max_z], [min_x, max_y, max_z]],
+        [
+            [min_x, min_y, max_z],
+            [max_x, min_y, max_z],
+            [max_x, max_y, max_z],
+            [min_x, max_y, max_z],
+        ],
         // -Z face
-        [[max_x, min_y, min_z], [min_x, min_y, min_z], [min_x, max_y, min_z], [max_x, max_y, min_z]],
+        [
+            [max_x, min_y, min_z],
+            [min_x, min_y, min_z],
+            [min_x, max_y, min_z],
+            [max_x, max_y, min_z],
+        ],
     ];
 
     let mut vertices = Vec::new();
@@ -266,14 +296,7 @@ pub fn build_block_outline(
             uv: [half_width_px, 0.0],
             tex_index: 0.0,
         });
-        indices.extend_from_slice(&[
-            base,
-            base + 1,
-            base + 2,
-            base,
-            base + 2,
-            base + 3,
-        ]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
 
     for (face_idx, &visible) in visible_faces.iter().enumerate() {

@@ -250,25 +250,25 @@ fn fbm_normal_perturb(p: vec2<f32>, t: f32) -> vec2<f32> {
 fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity: f32) -> vec3<f32> {
     let sun_h = sun_dir.y;
     let view_h = max(view_dir.y, 0.0);
-    
+
     let day = smoothstep(-0.15, 0.15, sun_h);
     let night = smoothstep(0.12, -0.12, sun_h);
     let dusk = 1.0 - smoothstep(0.0, 0.45, abs(sun_h));
-    
+
     let day_zenith = vec3<f32>(0.08, 0.32, 0.72);
     let day_horizon = vec3<f32>(0.56, 0.82, 0.98);
     let night_zenith = vec3<f32>(0.001, 0.003, 0.012);
     let night_horizon = vec3<f32>(0.008, 0.012, 0.024);
     let sunset_horizon = vec3<f32>(1.0, 0.42, 0.12);
     let sunset_zenith = vec3<f32>(0.18, 0.12, 0.35);
-    
+
     var sky = mix(day_horizon, day_zenith, pow(view_h, 0.65)) * day;
     sky += mix(night_horizon, night_zenith, pow(view_h, 0.55)) * night;
-    
+
     let dusk_color = mix(sunset_horizon, sunset_zenith, pow(view_h, 0.75));
     let sun_prox = max(dot(view_dir, sun_dir), 0.0);
     sky += dusk_color * dusk * (0.45 * pow(sun_prox, 2.0) + 0.15);
-    
+
     if moon_intensity > 0.01 {
         sky += vec3<f32>(0.20, 0.26, 0.40) * moon_intensity * night;
     }

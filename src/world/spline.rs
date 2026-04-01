@@ -60,7 +60,7 @@ impl TerrainSpline {
         let points = pairs
             .iter()
             .map(|(i, o)| SplinePoint {
-                input:  *i,
+                input: *i,
                 output: *o,
             })
             .collect();
@@ -96,7 +96,7 @@ impl TerrainSpline {
         }
 
         let first = &self.points[0];
-        let last  = &self.points[self.points.len() - 1];
+        let last = &self.points[self.points.len() - 1];
 
         // Clamp: do not extrapolate beyond the defined range.
         if t <= first.input {
@@ -158,16 +158,16 @@ impl TerrainSpline {
     /// |  1.00  | 200             | Extreme mountains  |
     pub fn continental() -> Self {
         Self::new(&[
-            (-1.05, 25.0),  // Deep ocean floor
-            (-0.5,  40.0),  // Ocean
-            (-0.2,  58.0),  // Coast/Beach
-            (-0.1,  62.0),  // Shore
-            (0.0,   68.0),  // Lowlands
-            (0.2,   76.0),  // Plains
-            (0.4,   90.0),  // Hills
-            (0.6,  120.0),  // Highlands
-            (0.8,  160.0),  // Mountains
-            (1.0,  200.0),  // Extreme mountains
+            (-1.05, 25.0), // Deep ocean floor
+            (-0.5, 40.0),  // Ocean
+            (-0.2, 58.0),  // Coast/Beach
+            (-0.1, 62.0),  // Shore
+            (0.0, 68.0),   // Lowlands
+            (0.2, 76.0),   // Plains
+            (0.4, 90.0),   // Hills
+            (0.6, 120.0),  // Highlands
+            (0.8, 160.0),  // Mountains
+            (1.0, 200.0),  // Extreme mountains
         ])
     }
 
@@ -190,9 +190,9 @@ impl TerrainSpline {
         Self::new(&[
             (-1.0, 1.5), // Very rough (deep canyons)
             (-0.5, 1.2), // Rough
-            (0.0,  1.0), // Normal
-            (0.5,  0.6), // Smooth
-            (1.0,  0.3), // Very smooth (flat plains)
+            (0.0, 1.0),  // Normal
+            (0.5, 0.6),  // Smooth
+            (1.0, 0.3),  // Very smooth (flat plains)
         ])
     }
 
@@ -219,9 +219,9 @@ impl TerrainSpline {
         Self::new(&[
             (-1.0, -40.0), // Deep valley
             (-0.5, -15.0), // Shallow valley
-            (0.0,    0.0), // Flat
-            (0.5,   25.0), // Hill
-            (1.0,   80.0), // Sharp peak
+            (0.0, 0.0),    // Flat
+            (0.5, 25.0),   // Hill
+            (1.0, 80.0),   // Sharp peak
         ])
     }
 }

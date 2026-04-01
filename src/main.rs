@@ -1,10 +1,10 @@
 mod app;
-mod multiplayer;
-mod ui;
 mod logger;
 mod minerust_data;
+mod multiplayer;
+mod ui;
+use logger::{LogLevel, init_logger, log};
 use minerust_data::data;
-use logger::{init_logger, LogLevel, log};
 use std::fs;
 
 fn main() {
@@ -16,7 +16,10 @@ fn main() {
     log(LogLevel::Info, "Starting Minerust...");
 
     if let Err(e) = app::run_game() {
-        log(LogLevel::Error, &format!("Error occurred while starting game: {}", e));
+        log(
+            LogLevel::Error,
+            &format!("Error occurred while starting game: {}", e),
+        );
         std::process::exit(1);
     }
 }
@@ -28,7 +31,8 @@ fn setup_logger() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&log_dir)?;
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let log_path = log_dir.join(format!("minerust-{}.log", timestamp));
-    let log_path_str = log_path.to_str()
+    let log_path_str = log_path
+        .to_str()
         .ok_or("File path contains illegal chars")?;
 
     init_logger(log_path_str);

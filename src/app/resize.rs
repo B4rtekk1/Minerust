@@ -44,7 +44,7 @@ impl State {
         // transiently when the window is minimized on some platforms.
         if new_size.width > 0 && new_size.height > 0 {
             // ── Swap-chain reconfiguration ────────────────────────────────── //
-            self.config.width  = new_size.width;
+            self.config.width = new_size.width;
             self.config.height = new_size.height;
             // Reconfiguring the surface implicitly invalidates the old
             // swap-chain textures; any `SurfaceTexture` acquired before this
@@ -55,9 +55,8 @@ impl State {
             // Both must exactly match the new surface dimensions; mismatched
             // sizes cause validation errors when beginning render passes.
             let msaa_sample_count: u32 = 4;
-            self.depth_texture = Self::create_depth_texture(
-                &self.device, &self.config, msaa_sample_count,
-            );
+            self.depth_texture =
+                Self::create_depth_texture(&self.device, &self.config, msaa_sample_count);
             self.msaa_texture_view = Self::create_msaa_texture(
                 &self.device,
                 &self.config,
@@ -102,8 +101,7 @@ impl State {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::R32Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             self.ssr_depth_view = self
@@ -226,14 +224,15 @@ impl State {
                 });
 
             // ── Shadow-mask compute bind groups + sampling bind group ─────── //
-            self.terrain_gbuffer_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("terrain_gbuffer_bind_group"),
-                layout: &self.shadow_mask_pipeline.get_bind_group_layout(1),
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
-                }],
-            });
+            self.terrain_gbuffer_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("terrain_gbuffer_bind_group"),
+                    layout: &self.shadow_mask_pipeline.get_bind_group_layout(1),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
+                    }],
+                });
             self.terrain_shadow_output_bind_group =
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("terrain_shadow_output_bind_group"),
@@ -251,20 +250,21 @@ impl State {
                     }],
                 });
 
-            self.shadow_mask_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("shadow_mask_bind_group"),
-                layout: &self.render_pipeline.get_bind_group_layout(3),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_mask_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
-                    },
-                ],
-            });
+            self.shadow_mask_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow_mask_bind_group"),
+                    layout: &self.render_pipeline.get_bind_group_layout(3),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_mask_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
+                        },
+                    ],
+                });
 
             // ── glyphon viewport ──────────────────────────────────────────── //
             // The text renderer uses the physical resolution to convert between
@@ -273,7 +273,7 @@ impl State {
             self.viewport.update(
                 &self.queue,
                 Resolution {
-                    width:  new_size.width,
+                    width: new_size.width,
                     height: new_size.height,
                 },
             );
@@ -343,13 +343,13 @@ impl State {
             let new_hiz_size = [new_size.width, new_size.height];
             if new_hiz_size != self.hiz_size {
                 self.hiz_size = new_hiz_size;
-                let hiz_max_dim    = new_size.width.max(new_size.height);
+                let hiz_max_dim = new_size.width.max(new_size.height);
                 let hiz_mips_count = (hiz_max_dim as f32).log2().floor() as u32 + 1;
 
                 let hiz_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Hi-Z Texture"),
                     size: wgpu::Extent3d {
-                        width:  new_hiz_size[0],
+                        width: new_hiz_size[0],
                         height: new_hiz_size[1],
                         depth_or_array_layers: 1,
                     },
@@ -365,8 +365,7 @@ impl State {
                 });
 
                 // Full-mip view used when any level needs to be sampled.
-                let new_hiz_view =
-                    hiz_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let new_hiz_view = hiz_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
                 // Individual single-mip views for the compute downsampling pairs.
                 let new_hiz_mips: Vec<_> = (0..hiz_mips_count)
@@ -416,9 +415,9 @@ impl State {
                     .update_bind_group(&self.device, &new_hiz_view);
 
                 // Commit all new Hi-Z resources to State, dropping the old ones.
-                self.hiz_texture    = hiz_texture;
-                self.hiz_view       = new_hiz_view;
-                self.hiz_mips       = new_hiz_mips;
+                self.hiz_texture = hiz_texture;
+                self.hiz_view = new_hiz_view;
+                self.hiz_mips = new_hiz_mips;
                 self.hiz_bind_groups = new_hiz_bind_groups;
             }
         }

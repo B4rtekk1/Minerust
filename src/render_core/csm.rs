@@ -91,10 +91,7 @@ impl CsmManager {
             );
 
             let opengl_to_wgpu = Mat4::from_cols_array(&[
-                1.0, 0.0, 0.0, 0.0, 
-                0.0, 1.0, 0.0, 0.0, 
-                0.0, 0.0, 0.5, 0.0, 
-                0.0, 0.0, 0.5, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 1.0,
             ]);
 
             self.cascades[cascade_idx] = CascadeData {
@@ -151,11 +148,7 @@ fn calculate_frustum_corners(
 /// an exact texel boundary.  This eliminates sub-texel crawling of the shadow
 /// map when the camera moves, because the frustum is always anchored to the
 /// same texel grid (GPU Gems 3 – "Stable Cascaded Shadow Maps").
-fn snap_to_texel_grid(
-    matrix: Mat4,
-    world_center: Vec3,
-    shadow_map_size: f32,
-) -> Mat4 {
+fn snap_to_texel_grid(matrix: Mat4, world_center: Vec3, shadow_map_size: f32) -> Mat4 {
     if shadow_map_size <= 1.0 {
         return matrix;
     }
@@ -163,8 +156,7 @@ fn snap_to_texel_grid(
     // Project the cascade center into shadow clip space, then shift the
     // matrix so the center lands on the nearest texel boundary. This keeps
     // the shadow map stable as the camera moves.
-    let center_clip =
-        matrix * Vec4::new(world_center.x, world_center.y, world_center.z, 1.0);
+    let center_clip = matrix * Vec4::new(world_center.x, world_center.y, world_center.z, 1.0);
     let inv_w = if center_clip.w.abs() > f32::EPSILON {
         1.0 / center_clip.w
     } else {

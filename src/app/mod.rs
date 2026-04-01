@@ -8,5 +8,4 @@ mod state;
 mod texture_cache;
 mod update;
 
-
 pub use game::run_game;

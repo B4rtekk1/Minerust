@@ -50,9 +50,21 @@ impl AABB {
 
         for plane in frustum_planes {
             let p = Vec3::new(
-                if plane.x > 0.0 { expanded_max.x } else { expanded_min.x },
-                if plane.y > 0.0 { expanded_max.y } else { expanded_min.y },
-                if plane.z > 0.0 { expanded_max.z } else { expanded_min.z },
+                if plane.x > 0.0 {
+                    expanded_max.x
+                } else {
+                    expanded_min.x
+                },
+                if plane.y > 0.0 {
+                    expanded_max.y
+                } else {
+                    expanded_min.y
+                },
+                if plane.z > 0.0 {
+                    expanded_max.z
+                } else {
+                    expanded_min.z
+                },
             );
             if plane.x * p.x + plane.y * p.y + plane.z * p.z + plane.w < 0.0 {
                 return false;

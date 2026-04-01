@@ -1,8 +1,8 @@
+use crate::logger::{LogLevel, log};
 use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::{Packet, decode_pitch, decode_yaw};
 use crate::multiplayer::tcp::TcpClient;
 use crate::ui::menu::{GameState, MenuState};
-use crate::logger::{log, LogLevel};
 use std::time::Instant;
 use winit::window::Window;
 
@@ -64,7 +64,7 @@ pub fn connect_to_server(
 ) {
     // Clone the strings up front so they can be moved into the async block
     // without creating a borrow conflict with `menu_state`.
-    let addr     = menu_state.server_address.clone();
+    let addr = menu_state.server_address.clone();
     let username = menu_state.username.clone();
 
     menu_state.set_status(&format!("Connecting to {}...", addr));
@@ -82,7 +82,10 @@ pub fn connect_to_server(
 
         match result {
             Ok(client) => {
-                log(LogLevel::Info, &format!("Successfully connected to server at {}", addr));
+                log(
+                    LogLevel::Info,
+                    &format!("Successfully connected to server at {}", addr),
+                );
                 // ── Channel setup ─────────────────────────────────────────── //
                 // `rx_rx` → polled each frame by `update_network` to drain
                 //           arriving packets.
@@ -199,10 +202,14 @@ pub fn update_network(
     game_state: &mut GameState,
     mouse_captured: &mut bool,
     window: &Window,
-) {
+) -> (Option<u32>, Vec<(i32, i32, i32, u8)>) {
+    let mut new_seed = None;
+    let mut block_changes = Vec::new();
+
     // ── Outgoing: position and rotation (throttled to 20 Hz) ─────────────── //
     if last_position_send.elapsed().as_millis() > 50 {
         *last_position_send = Instant::now();
+
 
         let pos_packet = Packet::Position {
             player_id: *my_player_id,
@@ -215,7 +222,7 @@ pub fn update_network(
         // quantized values verbatim to other clients, who decode them back.
         let rot_packet = Packet::Rotation {
             player_id: *my_player_id,
-            yaw:   crate::multiplayer::protocol::encode_yaw(camera_yaw),
+            yaw: crate::multiplayer::protocol::encode_yaw(camera_yaw),
             pitch: crate::multiplayer::protocol::encode_pitch(camera_pitch),
         };
 
@@ -234,10 +241,17 @@ pub fn update_network(
         while let Ok(packet) = rx.try_recv() {
             match packet {
                 // ---- ConnectAck: server accepted or rejected our Connect ---- //
-                Packet::ConnectAck { success, player_id } => {
+                Packet::ConnectAck { success, player_id, seed } => {
                     if success {
                         *my_player_id = player_id;
-                        log(LogLevel::Info, &format!("Server accepted connection; assigned Player ID {}", player_id));
+                        new_seed = Some(seed);
+                        log(
+                            LogLevel::Info,
+                            &format!(
+                                "Server accepted connection; assigned Player ID {}",
+                                player_id
+                            ),
+                        );
                         *game_state = GameState::Playing;
 
                         // Capture the cursor so mouse motion drives the camera.
@@ -277,7 +291,7 @@ pub fn update_network(
                                     x,
                                     y,
                                     z,
-                                    yaw:   0.0,
+                                    yaw: 0.0,
                                     pitch: 0.0,
                                     username: format!("Player{}", player_id),
                                 },
@@ -287,10 +301,14 @@ pub fn update_network(
                 }
 
                 // ---- Rotation: a remote player turned ---------------------- //
-                Packet::Rotation { player_id, yaw, pitch } => {
+                Packet::Rotation {
+                    player_id,
+                    yaw,
+                    pitch,
+                } => {
                     if player_id != *my_player_id {
                         if let Some(player) = remote_players.get_mut(&player_id) {
-                            player.yaw   = decode_yaw(yaw);
+                            player.yaw = decode_yaw(yaw);
                             player.pitch = decode_pitch(pitch);
                         }
                         // If the player is unknown we silently drop the rotation
@@ -302,8 +320,17 @@ pub fn update_network(
                 // The server broadcasts a `Connect` packet to all peers when a
                 // new player joins.  We use this as a "player joined" event to
                 // attach the real username to the remote player's entry.
-                Packet::Connect { player_id, username } => {
-                    log(LogLevel::Info, &format!("Received Connect packet: player_id={}, username={}", player_id, username));
+                Packet::Connect {
+                    player_id,
+                    username,
+                } => {
+                    log(
+                        LogLevel::Info,
+                        &format!(
+                            "Received Connect packet: player_id={}, username={}",
+                            player_id, username
+                        ),
+                    );
                     if let Some(player) = remote_players.get_mut(&player_id) {
                         player.username = username;
                     } else {
@@ -312,10 +339,10 @@ pub fn update_network(
                         remote_players.insert(
                             player_id,
                             RemotePlayer {
-                                x:     0.0,
-                                y:     70.0, // above ground level, not inside terrain
-                                z:     0.0,
-                                yaw:   0.0,
+                                x: 0.0,
+                                y: 70.0, // above ground level, not inside terrain
+                                z: 0.0,
+                                yaw: 0.0,
                                 pitch: 0.0,
                                 username,
                             },
@@ -326,13 +353,28 @@ pub fn update_network(
                 // ---- Disconnect: a remote player left ---------------------- //
                 Packet::Disconnect { player_id } => {
                     remote_players.remove(&player_id);
-                    log(LogLevel::Info, &format!("Received Disconnect packet: player_id={}", player_id));
+                    log(
+                        LogLevel::Info,
+                        &format!("Received Disconnect packet: player_id={}", player_id),
+                    );
                 }
 
-                // Other packet types (BlockChange, Chat, Pong, etc.) are not
+                // ---- BlockChange: remote player broke/placed a block ------- //
+                Packet::BlockChange {
+                    x,
+                    y,
+                    z,
+                    block_type,
+                } => {
+                    block_changes.push((x, y, z, block_type));
+                }
+
+                // Other packet types (Chat, Pong, etc.) are not
                 // yet handled in this path; they can be added here as needed.
                 _ => {}
             }
         }
     }
+
+    (new_seed, block_changes)
 }

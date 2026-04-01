@@ -62,7 +62,7 @@ impl State {
     ///   griefing by walling another player in.
     ///
     /// When all guards pass, the block currently selected in the hotbar is
-    /// written to the world and the affected chunk is marked dirty so its
+    /// written to the world and the affected chunk is mark`ed dirty so its
     /// mesh is rebuilt on the next frame.
     ///
     /// # Parameters
@@ -111,6 +111,16 @@ impl State {
                 self.world
                     .write()
                     .set_block_player(px, py, pz, block_to_place);
+
+                // Send the block change to the server so other players see it.
+                if let Some(tx) = &self.network_tx {
+                    let _ = tx.send(crate::multiplayer::protocol::Packet::BlockChange {
+                        x: px,
+                        y: py,
+                        z: pz,
+                        block_type: block_to_place as u8,
+                    });
+                }
 
                 // Invalidate the mesh of every sub-chunk that touches this
                 // block position so the geometry is rebuilt before next render.

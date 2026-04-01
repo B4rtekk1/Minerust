@@ -1,8 +1,8 @@
 use chrono;
-use std::fs::{OpenOptions};
+use lazy_static::lazy_static;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
-use lazy_static::lazy_static;
 
 pub enum LogLevel {
     Debug,
@@ -49,11 +49,14 @@ pub fn log(level: LogLevel, message: &str) {
         timestamp,
         message: message.to_string(),
     };
-    let formatted = format!("[{}] [{}] {}\n", log_message.timestamp, log_message.level.as_str(), log_message.message);
+    let formatted = format!(
+        "[{}] [{}] {}\n",
+        log_message.timestamp,
+        log_message.level.as_str(),
+        log_message.message
+    );
     print!("{}", formatted);
     if let Some(ref mut file) = *LOG_FILE.lock().unwrap() {
         let _ = file.write_all(formatted.as_bytes());
     }
 }
-
-

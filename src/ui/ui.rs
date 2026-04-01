@@ -213,41 +213,45 @@ pub fn update_coords_ui(
     // The quad is extruded perpendicular to the segment direction so it always
     // appears as a constant-width stroke regardless of angle.
     // Segments shorter than 0.001 NDC units are skipped to avoid divide-by-zero.
-    let add_segment =
-        |x1: f32, y1: f32, x2: f32, y2: f32, verts: &mut Vec<Vertex>, inds: &mut Vec<u32>| {
-            let base_idx = verts.len() as u32;
-            let dx = x2 - x1;
-            let dy = y2 - y1;
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 0.001 {
-                return;
-            }
-            // Perpendicular offset vector, scaled to half the desired thickness.
-            let nx = -dy / len * line_thickness * 0.5;
-            let ny = dx / len * line_thickness * 0.5;
+    let add_segment = |x1: f32,
+                       y1: f32,
+                       x2: f32,
+                       y2: f32,
+                       verts: &mut Vec<Vertex>,
+                       inds: &mut Vec<u32>| {
+        let base_idx = verts.len() as u32;
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.001 {
+            return;
+        }
+        // Perpendicular offset vector, scaled to half the desired thickness.
+        let nx = -dy / len * line_thickness * 0.5;
+        let ny = dx / len * line_thickness * 0.5;
 
-            // BL, BR, TR, TL (corner_idx 0..3)
-            let corners = [
-                (x1 - nx, y1 - ny),
-                (x2 - nx, y2 - ny),
-                (x2 + nx, y2 + ny),
-                (x1 + nx, y1 + ny),
-            ];
-            for (i, &(px, py)) in corners.iter().enumerate() {
-                verts.push(Vertex {
-                    position: [px, py, 0.0],
-                    packed: Vertex::pack_ui(normal, [color[0], color[1], color[2], 1.0], 0, i as u8),
-                });
-            }
-            inds.extend_from_slice(&[
-                base_idx,
-                base_idx + 1,
-                base_idx + 2,
-                base_idx,
-                base_idx + 2,
-                base_idx + 3,
-            ]);
-        };
+        // BL, BR, TR, TL (corner_idx 0..3)
+        let corners = [
+            (x1 - nx, y1 - ny),
+            (x2 - nx, y2 - ny),
+            (x2 + nx, y2 + ny),
+            (x1 + nx, y1 + ny),
+        ];
+        for (i, &(px, py)) in corners.iter().enumerate() {
+            verts.push(Vertex {
+                position: [px, py, 0.0],
+                packed: Vertex::pack_ui(normal, [color[0], color[1], color[2], 1.0], 0, i as u8),
+            });
+        }
+        inds.extend_from_slice(&[
+            base_idx,
+            base_idx + 1,
+            base_idx + 2,
+            base_idx,
+            base_idx + 2,
+            base_idx + 3,
+        ]);
+    };
 
     for ch in text.chars() {
         if ch == ' ' {

@@ -51,17 +51,16 @@ pub mod chunk_loader {
     pub use crate::world::loader::*;
 }
 
-pub mod constants;
-pub mod save;
 mod commands;
-mod shader_utils;
+pub mod constants;
 mod logger;
 mod minerust_data;
+pub mod save;
+mod shader_utils;
 
 pub use constants::*;
 pub use constants::{get_active_cascade_count, get_chunk_worker_count, get_mesh_worker_count};
 pub use core::{Biome, BlockType, Chunk, GameItem, ShadowConfig, SubChunk, Uniforms, Vertex};
-pub use vertex::OutlineVertex;
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
     AABB, DrawIndexedIndirect, IndirectManager, MeshLoader, SubchunkKey, add_greedy_quad, add_quad,
@@ -69,4 +68,5 @@ pub use render::{
     generate_texture_atlas, load_texture_atlas_from_file,
 };
 pub use save::{DEFAULT_WORLD_FILE, SavedWorld, load_world, save_world};
+pub use vertex::OutlineVertex;
 pub use world::{ChunkGenResult, ChunkGenerator, ChunkLoader, World};

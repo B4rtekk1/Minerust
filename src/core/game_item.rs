@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 
 /// A single game item type with its static properties.
 ///
@@ -150,5 +150,3 @@ register_items! {
     "minerust:cactus" => "Cactus", true, 64, None, 1;
     "minerust:WoodStairs" => "Wood Stairs", true, 64, None, 5;
 }
-
-

@@ -113,7 +113,7 @@ pub fn generate_texture_atlas() -> Vec<u8> {
         let idx = layer_offset + pixel_offset;
 
         if idx + 3 < data.len() {
-            data[idx]     = r;
+            data[idx] = r;
             data[idx + 1] = g;
             data[idx + 2] = b;
             data[idx + 3] = a;
@@ -304,8 +304,8 @@ pub fn generate_texture_atlas() -> Vec<u8> {
 
                     // --- Cactus side: green with darker border pixels ---
                     14 => {
-                        let edge = x == 0 || x == TEXTURE_SIZE - 1
-                            || y == 0 || y == TEXTURE_SIZE - 1;
+                        let edge =
+                            x == 0 || x == TEXTURE_SIZE - 1 || y == 0 || y == TEXTURE_SIZE - 1;
                         let noise = hash(x, y, 15) as i32 - 128;
                         if edge {
                             (30, 80, 20, 255) // Darker outline simulates the cactus ridge.

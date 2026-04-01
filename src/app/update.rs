@@ -140,7 +140,24 @@ impl State {
         let snapshot = {
             let world = self.world.read();
 
-            self.camera.update(&*world, dt, &self.input);
+            // Only step physics if the 3x3 chunk area around the player is loaded.
+            // This prevents falling through the world upon joining or when moving
+            // into ungenerated terrain, keeping the player above ground and
+            // preventing x-raying from inside solid blocks.
+            let mut chunks_loaded = true;
+            for cx in (player_cx - 1)..=(player_cx + 1) {
+                for cz in (player_cz - 1)..=(player_cz + 1) {
+                    if !world.chunks.contains_key(&(cx, cz)) {
+                        chunks_loaded = false;
+                        break;
+                    }
+                }
+                if !chunks_loaded { break; }
+            }
+
+            if chunks_loaded {
+                self.camera.update(&*world, dt, &self.input);
+            }
 
             // Collect chunks that need to be generated.
             let mut missing_chunks = Vec::new();
@@ -268,12 +285,22 @@ impl State {
         {
             let mut world = self.world.write();
 
+            let mut newly_inserted_chunks = Vec::new();
             for (cx, cz, chunk) in write_ops.completed_chunks {
                 world.chunks.insert((cx, cz), chunk);
+                newly_inserted_chunks.push((cx, cz));
             }
 
             if let Some((bx, by, bz)) = write_ops.block_break {
                 world.set_block_player(bx, by, bz, BlockType::Air);
+                if let Some(tx) = &self.network_tx {
+                    let _ = tx.send(crate::multiplayer::protocol::Packet::BlockChange {
+                        x: bx,
+                        y: by,
+                        z: bz,
+                        block_type: BlockType::Air as u8,
+                    });
+                }
             }
 
             // Evict chunks that have moved outside the generation radius and
@@ -282,6 +309,23 @@ impl State {
                 world.update_chunks_around_player(self.camera.position.x, self.camera.position.z);
 
             drop(world); // Release the write lock before GPU work.
+
+            // Mark neighbors of fully loaded chunks as dirty so their faces update.
+            for (cx, cz) in newly_inserted_chunks {
+                // To safely update boundary faces, we mark the neighboring blocks of the new chunk dirty.
+                for bx in 0..CHUNK_SIZE {
+                    for by in 0..minerust::constants::WORLD_HEIGHT as i32 {
+                        self.mark_chunk_dirty(cx * CHUNK_SIZE + bx, by, cz * CHUNK_SIZE);
+                        self.mark_chunk_dirty(cx * CHUNK_SIZE + bx, by, cz * CHUNK_SIZE + CHUNK_SIZE - 1);
+                    }
+                }
+                for bz in 0..CHUNK_SIZE {
+                    for by in 0..minerust::constants::WORLD_HEIGHT as i32 {
+                        self.mark_chunk_dirty(cx * CHUNK_SIZE, by, cz * CHUNK_SIZE + bz);
+                        self.mark_chunk_dirty(cx * CHUNK_SIZE + CHUNK_SIZE - 1, by, cz * CHUNK_SIZE + bz);
+                    }
+                }
+            }
 
             self.remove_chunk_gpu_data(&removed_chunks);
         }
@@ -327,7 +371,8 @@ impl State {
                     subchunk_y: sy,
                 };
                 self.indirect_manager.remove_subchunk(&self.queue, key);
-                self.water_indirect_manager.remove_subchunk(&self.queue, key);
+                self.water_indirect_manager
+                    .remove_subchunk(&self.queue, key);
             }
         }
     }
@@ -417,7 +462,7 @@ impl State {
     /// transitions.  Called at the very start of each frame so network state is
     /// fresh before any physics or world queries run.
     fn update_network_state(&mut self) {
-        update_network(
+        let (new_seed, block_changes) = update_network(
             &mut self.my_player_id,
             &self.camera.position,
             self.camera.yaw,
@@ -430,5 +475,59 @@ impl State {
             &mut self.mouse_captured,
             &self.window,
         );
+
+        if let Some(seed) = new_seed {
+            // Apply new world seed from server
+            {
+                let mut world_lock = self.world.write();
+                *world_lock = minerust::World::new_empty_with_seed(seed);
+
+                // Spawning inside terrain causes "ghost chunk" x-ray glitches because
+                // face-culling hides all geometry. Move the local player to the surface
+                // of the nearest chunks at spawn if we are switching servers.
+                // We fallback to Y=255.0 to allow gravity to pull them down safely.
+                self.camera.position = glam::Vec3::new(0.0, minerust::constants::WORLD_HEIGHT as f32 - 1.0, 0.0);
+            }
+            // Clear rendering buffers and loaders to match the empty world
+            self.chunk_loader = minerust::ChunkLoader::new(seed);
+            self.mesh_loader = minerust::MeshLoader::new(
+                self.world.clone(),
+                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
+            );
+            self.indirect_manager.clear_gpu_data(&self.queue);
+            self.water_indirect_manager.clear_gpu_data(&self.queue);
+        }
+
+        if !block_changes.is_empty() {
+            // Drop lock before calling &mut self methods
+            for (bx, by, bz, block_type) in block_changes {
+                let bt = match block_type {
+                    0 => BlockType::Air,
+                    1 => BlockType::Grass,
+                    2 => BlockType::Dirt,
+                    3 => BlockType::Stone,
+                    4 => BlockType::Sand,
+                    5 => BlockType::Water,
+                    6 => BlockType::Wood,
+                    7 => BlockType::Leaves,
+                    8 => BlockType::Bedrock,
+                    9 => BlockType::Snow,
+                    10 => BlockType::Gravel,
+                    11 => BlockType::Clay,
+                    12 => BlockType::Ice,
+                    13 => BlockType::Cactus,
+                    14 => BlockType::DeadBush,
+                    15 => BlockType::WoodStairs,
+                    _ => BlockType::Air, // fallback
+                };
+
+                {
+                    let mut world = self.world.write();
+                    world.set_block_player(bx, by, bz, bt);
+                }
+
+                self.mark_chunk_dirty(bx, by, bz);
+            }
+        }
     }
 }
