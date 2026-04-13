@@ -3,15 +3,15 @@ enable f16;
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
 
-const SSR_MAX_STEPS:     i32 = 48;
-const SSR_BINARY_STEPS:  i32 = 8;
-const SSR_MAX_DISTANCE:  f32 = 120.0;
+const SSR_MAX_STEPS:     i32 = 24;
+const SSR_BINARY_STEPS:  i32 = 5;
+const SSR_MAX_DISTANCE:  f32 = 80.0;
 const SSR_THICKNESS:     f32 = 0.06;
 const SSR_EDGE_FADE:     f32 = 0.06;
-const SSR_FADE_DISTANCE: f32 = 300.0;
+const SSR_FADE_DISTANCE: f32 = 180.0;
 
 const SHADOW_MAP_SIZE: f16 = 2048.0;
-const PCF_SAMPLES:     i32 = 16;
+const PCF_SAMPLES:     i32 = 8;
 
 const LOD_FAR: f32 = 300.0;
 
@@ -22,9 +22,6 @@ const FRESNEL_R0:          f32 = 0.018;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
 const WATER_ROUGHNESS_MIN: f32 = 0.03;
 const WATER_ROUGHNESS_MAX: f32 = 0.14;
-
-const FOAM_THRESHOLD: f32 = 0.30;
-const FOAM_INTENSITY: f32 = 0.70;
 
 const FOG_NEAR: f16 = 0.0;
 const FOG_FAR:  f16 = 200.0;
@@ -68,8 +65,7 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos:    vec3<f32>,
-    @location(1) wave_normal:  vec4<f32>,
-    @location(2) jacobian:     f32,
+    @location(1) wave_normal:  vec3<f32>,
 };
 
 const SW_K:     array<f32, 4> = array(0.38,  0.84,  2.10,  5.60);
@@ -91,8 +87,6 @@ const CP_PH:    array<f32, 4> = array( 1.047,  3.665,  2.094,  4.712);
 struct GerstnerResult {
     displacement: vec3<f32>,
     normal:       vec3<f32>,
-    foam:         f32,
-    jacobian:     f32,
 }
 
 fn smooth5(x: f32) -> f32 { return x * x * x * (x * (x * 6.0 - 15.0) + 10.0); }
@@ -110,8 +104,6 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     var result: GerstnerResult;
     result.displacement = vec3(0.0);
     result.normal       = vec3(0.0, 1.0, 0.0);
-    result.foam         = 0.0;
-    result.jacobian     = 1.0;
 
     if lod < f16(0.01) { return result; }
 
@@ -121,7 +113,6 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
 
     var x_off = 0.0; var y_off = 0.0; var z_off = 0.0;
     var dx = 0.0;    var dz = 0.0;
-    var j_xx = 0.0;  var j_zz = 0.0;  var j_xz = 0.0;
 
     for (var i: i32 = 0; i < 4; i++) {
         let base_dir = vec2(SW_DX[i], SW_DZ[i]);
@@ -142,11 +133,6 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
         let df = amp * SW_K[i] * cf;
         dx += dmod.x * df;
         dz += dmod.y * df;
-
-        let ka_sf_Q = SW_K[i] * amp * sf * steep;
-        j_xx += dmod.x * dmod.x * ka_sf_Q;
-        j_zz += dmod.y * dmod.y * ka_sf_Q;
-        j_xz += dmod.x * dmod.y * ka_sf_Q;
     }
 
     let cap_lod = f16(clamp(1.0 - dist / (LOD_FAR * 0.4), 0.0, 1.0));
@@ -168,20 +154,11 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
             let df = amp * CP_K[i] * cf;
             dx += dmod.x * df;
             dz += dmod.y * df;
-
-            let ka_sf_Q = CP_K[i] * amp * sf * steep;
-            j_xx += dmod.x * dmod.x * ka_sf_Q;
-            j_zz += dmod.y * dmod.y * ka_sf_Q;
-            j_xz += dmod.x * dmod.y * ka_sf_Q;
         }
     }
 
     result.displacement = vec3(x_off, y_off, z_off);
     result.normal       = normalize(vec3(-dx, 1.0, -dz));
-
-    let jacobian    = (1.0 - j_xx) * (1.0 - j_zz) - j_xz * j_xz;
-    result.jacobian = jacobian;
-    result.foam     = clamp(1.0 - jacobian - FOAM_THRESHOLD, 0.0, 1.0) * FOAM_INTENSITY;
 
     return result;
 }
@@ -200,21 +177,15 @@ fn vs_water(model: VertexInput) -> VertexOutput {
     );
 
     var wave_normal = normals[n_idx % 6u];
-    var foam_val    = 0.0;
-    var jac_val     = 1.0;
-
     if n_idx == 3u {
         let w  = calculate_gerstner(pos, uniforms.time);
         pos   += w.displacement - vec3(0.0, WATER_LEVEL_OFFSET, 0.0);
         wave_normal = w.normal;
-        foam_val    = w.foam;
-        jac_val     = w.jacobian;
     }
 
     out.clip_position = uniforms.view_proj * vec4(pos, 1.0);
     out.world_pos     = pos;
-    out.wave_normal   = vec4(normalize(wave_normal), foam_val);
-    out.jacobian      = jac_val;
+    out.wave_normal   = normalize(wave_normal);
     return out;
 }
 
@@ -289,6 +260,24 @@ fn reconstruct_world(uv: vec2<f32>, d: f32) -> vec3<f32> {
     return wh.xyz / wh.w;
 }
 
+fn ssr_hit_stability(uv: vec2<f32>, center_depth: f32) -> f32 {
+    let texel = 1.0 / uniforms.screen_size;
+
+    let depth_x0 = sample_depth(clamp(uv - vec2(texel.x, 0.0), vec2(0.0), vec2(1.0)));
+    let depth_x1 = sample_depth(clamp(uv + vec2(texel.x, 0.0), vec2(0.0), vec2(1.0)));
+    let depth_y0 = sample_depth(clamp(uv - vec2(0.0, texel.y), vec2(0.0), vec2(1.0)));
+    let depth_y1 = sample_depth(clamp(uv + vec2(0.0, texel.y), vec2(0.0), vec2(1.0)));
+
+    let max_delta = max(
+        max(abs(center_depth - depth_x0), abs(center_depth - depth_x1)),
+        max(abs(center_depth - depth_y0), abs(center_depth - depth_y1)),
+    );
+
+    // Thin cutout geometry like leaves produces sharp depth discontinuities.
+    // Fade SSR there to avoid reflections appearing detached from the water.
+    return 1.0 - smoothstep(0.0015, 0.012, max_delta);
+}
+
 fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>) -> vec4<f32> {
     let dir  = normalize(refl_dir);
     var ray  = world_pos + dir * 0.3;
@@ -329,10 +318,11 @@ fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>) -> vec4<f32> {
             if fc.w > 0.0 {
                 let fn_ = fc.xyz / fc.w;
                 let fu  = vec2(fn_.x * 0.5 + 0.5, 0.5 - fn_.y * 0.5);
-                let fd  = abs(fn_.z - sample_depth(fu));
+                let hit_depth = sample_depth(fu);
+                let fd  = abs(fn_.z - hit_depth);
                 if fd < SSR_THICKNESS {
                     hit_uv   = fu;
-                    hit_conf = 1.0 - fd / SSR_THICKNESS;
+                    hit_conf = (1.0 - fd / SSR_THICKNESS) * ssr_hit_stability(fu, hit_depth);
                     found    = true;
                 }
             }
@@ -364,6 +354,7 @@ const POISSON8: array<vec2<f32>, 8> = array(
 
 fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
     if sun_dir.y < 0.05 { return 0.0; }
+    if distance(world_pos.xz, uniforms.camera_pos.xz) > 96.0 { return 1.0; }
 
     let shadow_pos = uniforms.csm_view_proj[0] * vec4(world_pos, 1.0);
     let sc         = shadow_pos.xyz / shadow_pos.w;
@@ -398,17 +389,16 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let day       = f16(clamp(sun_dir.y, 0.0, 1.0));
     let t         = uniforms.time;
 
-    let wave_n_raw = in.wave_normal.xyz;
-    let foam_val   = f16(in.wave_normal.w);
+    let wave_n_raw = in.wave_normal;
 
-    let perturb_blend = f16(clamp(1.0 - dist / 120.0, 0.0, 1.0));
+    let perturb_blend = f16(clamp(1.0 - dist / 80.0, 0.0, 1.0));
     var normal = wave_n_raw;
     if perturb_blend > f16(0.005) {
         let perturb = fbm_normal_perturb(in.world_pos.xz * 0.15, t) * f32(perturb_blend);
         normal = normalize(wave_n_raw + vec3(perturb.x, 0.0, perturb.y));
     }
 
-    let micro_blend = f16(clamp(1.0 - dist / 50.0, 0.0, 1.0));
+    let micro_blend = f16(clamp(1.0 - dist / 30.0, 0.0, 1.0));
     if micro_blend > f16(0.005) {
         let mp = 0.08 * sin(vec2(
             in.world_pos.x * 11.3 + t * 2.1,
@@ -455,8 +445,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     water_color = mix(water_color, refl_color, f32(reflection_mix));
 
     if sun_dir.y > 0.0 {
-        let jac_rough   = f16(clamp(1.0 - in.jacobian, 0.0, 1.0));
-        let roughness   = f32(mix(f16(WATER_ROUGHNESS_MIN), f16(WATER_ROUGHNESS_MAX), jac_rough)
+        let roughness   = f32(f16(WATER_ROUGHNESS_MIN)
                         * mix(f16(1.0), f16(0.82), f16(1.0) - day));
         let spec        = ggx_spec_simple(normal, view_dir, sun_dir, roughness);
         let spec_color  = mix(vec3(1.0, 0.97, 0.88), vec3(1.0, 0.84, 0.58), f32(f16(1.0) - day));
@@ -468,13 +457,6 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
             water_color  += vec3(0.82, 0.88, 1.0) * spec_moon * uniforms.moon_intensity
                             * f32(f16(1.0) - day) * 0.6;
         }
-    }
-
-    if foam_val > f16(0.01) {
-        let foam_pulse = f16(mix(0.85, 1.0, sin(t * 3.7 + in.world_pos.x * 2.1) * 0.5 + 0.5));
-        let lit_foam   = vec3(0.88, 0.92, 0.96) * f32(ambient + f16(shadow) * day * f16(0.7));
-        water_color    = mix(water_color, lit_foam,
-                             f32(clamp(foam_val * f16(0.75) * foam_pulse, f16(0.0), f16(0.8))));
     }
 
     let delta_xz = in.world_pos.xz - uniforms.camera_pos.xz;

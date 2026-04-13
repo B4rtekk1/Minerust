@@ -93,6 +93,8 @@ impl State {
                 chunk.subchunks[sy as usize].mesh_dirty = true;
             }
         }
+
+        self.visible_chunk_columns_dirty = true;
     }
 
     /// Main per-frame update: advances physics, processes input, loads chunks,
@@ -310,6 +312,10 @@ impl State {
 
             drop(world); // Release the write lock before GPU work.
 
+            if !newly_inserted_chunks.is_empty() || !removed_chunks.is_empty() {
+                self.visible_chunk_columns_dirty = true;
+            }
+
             // Mark neighbors of fully loaded chunks as dirty so their faces update.
             for (cx, cz) in newly_inserted_chunks {
                 // To safely update boundary faces, we mark the neighboring blocks of the new chunk dirty.
@@ -496,6 +502,9 @@ impl State {
             );
             self.indirect_manager.clear_gpu_data(&self.queue);
             self.water_indirect_manager.clear_gpu_data(&self.queue);
+            self.visible_chunk_columns.clear();
+            self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
+            self.visible_chunk_columns_dirty = true;
         }
 
         if !block_changes.is_empty() {

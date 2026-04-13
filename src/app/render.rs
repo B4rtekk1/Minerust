@@ -106,6 +106,34 @@ fn visible_outline_faces(world: &World, bx: i32, by: i32, bz: i32) -> [bool; 6] 
 }
 
 impl State {
+    fn rebuild_visible_chunk_cache(&mut self, player_cx: i32, player_cz: i32) {
+        if !self.visible_chunk_columns_dirty
+            && self.visible_chunk_cache_center == (player_cx, player_cz)
+        {
+            return;
+        }
+
+        self.visible_chunk_columns.clear();
+        {
+            let world = self.world.read();
+            for cx in (player_cx - RENDER_DISTANCE)..=(player_cx + RENDER_DISTANCE) {
+                for cz in (player_cz - RENDER_DISTANCE)..=(player_cz + RENDER_DISTANCE) {
+                    if world.chunks.contains_key(&(cx, cz)) {
+                        self.visible_chunk_columns.push((cx, cz));
+                    }
+                }
+            }
+        }
+
+        self.visible_chunk_columns.sort_by_key(|&(cx, cz)| {
+            let dx = cx - player_cx;
+            let dz = cz - player_cz;
+            dx * dx + dz * dz
+        });
+        self.visible_chunk_cache_center = (player_cx, player_cz);
+        self.visible_chunk_columns_dirty = false;
+    }
+
     /// Produces one complete frame and presents it to the OS window.
     ///
     /// # Render pipeline overview
@@ -264,6 +292,11 @@ impl State {
         // The moon is always opposite the sun direction.
         let moon_position = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
 
+        // Chunk coordinates of the camera, used to center the render window.
+        let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
+        let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
+        self.rebuild_visible_chunk_cache(player_cx, player_cz);
+
         // ── CSM (Cascaded Shadow Maps) update ─────────────────────────────── //
         // `CsmManager::update` computes the four tight orthographic light-space
         // matrices that cover successive depth ranges of the camera frustum.
@@ -325,10 +358,6 @@ impl State {
         // Six half-space planes derived from the combined view-projection
         // matrix, used both for CPU-side mesh gating and the GPU cull shader.
         let frustum_planes = extract_frustum_planes(&view_proj);
-
-        // Chunk coordinates of the camera, used to center the render window.
-        let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
-        let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
 
         // Fewer cascades are needed at short render distances because the far
         // splits collapse below useful thresholds.
@@ -441,39 +470,29 @@ impl State {
 
         {
             let world = self.world.read();
-            for cx in (player_cx - RENDER_DISTANCE)..=(player_cx + RENDER_DISTANCE) {
-                for cz in (player_cz - RENDER_DISTANCE)..=(player_cz + RENDER_DISTANCE) {
-                    if let Some(chunk) = world.chunks.get(&(cx, cz)) {
-                        let mut chunk_has_visible = false;
-                        for (sy, subchunk) in chunk.subchunks.iter().enumerate() {
-                            if subchunk.is_empty {
-                                continue; // skip fully empty sub-chunks early
-                            }
-                            if subchunk.mesh_dirty
-                                && !self.mesh_loader.is_pending(cx, cz, sy as i32)
-                            {
-                                meshes_to_request.push((cx, cz, sy as i32));
-                            }
-                            if subchunk.num_indices > 0 || subchunk.num_water_indices > 0 {
-                                subchunks_rendered += 1;
-                                chunk_has_visible = true;
-                            }
+            for &(cx, cz) in &self.visible_chunk_columns {
+                if let Some(chunk) = world.chunks.get(&(cx, cz)) {
+                    let mut chunk_has_visible = false;
+                    for (sy, subchunk) in chunk.subchunks.iter().enumerate() {
+                        if subchunk.is_empty {
+                            continue; // skip fully empty sub-chunks early
                         }
-                        if chunk_has_visible {
-                            chunks_rendered += 1;
+                        if subchunk.mesh_dirty
+                            && !self.mesh_loader.is_pending(cx, cz, sy as i32)
+                        {
+                            meshes_to_request.push((cx, cz, sy as i32));
                         }
+                        if subchunk.num_indices > 0 || subchunk.num_water_indices > 0 {
+                            subchunks_rendered += 1;
+                            chunk_has_visible = true;
+                        }
+                    }
+                    if chunk_has_visible {
+                        chunks_rendered += 1;
                     }
                 }
             }
         }
-
-        // Nearest-first ordering ensures that the player sees close geometry
-        // rebuild quickly after entering a new area.
-        meshes_to_request.sort_by_key(|&(cx, cz, _sy)| {
-            let dx = cx - player_cx;
-            let dz = cz - player_cz;
-            dx * dx + dz * dz
-        });
         for (cx, cz, sy) in &meshes_to_request {
             self.mesh_loader.request_mesh(*cx, *cz, *sy);
         }

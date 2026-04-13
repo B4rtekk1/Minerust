@@ -835,111 +835,31 @@ impl World {
                         let world_z = base_z + lz;
                         let block = get_block_world(world_x, y, world_z);
 
-                        // Water is emitted immediately (no greedy merge).
-                        if block == BlockType::Water {
-                            let neighbors = [
-                                get_block_world(world_x - 1, y, world_z),
-                                get_block_world(world_x + 1, y, world_z),
-                                get_block_world(world_x, y - 1, world_z),
-                                get_block_world(world_x, y + 1, world_z),
-                                get_block_world(world_x, y, world_z - 1),
-                                get_block_world(world_x, y, world_z + 1),
-                            ];
-
-                            if block.should_render_face_against(neighbors[face_dir as usize]) {
+                        // Water top faces are vertex-displaced in the shader.
+                        // Keep them as 1x1 quads so the wave deformation has
+                        // enough tessellation and does not produce large planar
+                        // facets across merged surfaces.
+                        if block == BlockType::Water && face_dir == 3 {
+                            let neighbor = get_block_world(world_x, y + 1, world_z);
+                            if block.should_render_face_against(neighbor) {
                                 let x = world_x as f32;
                                 let y_f = y as f32;
                                 let z = world_z as f32;
-                                let color = block.color();
-                                let tex = block.tex_top();
-                                let r = block.roughness();
-                                let m = block.metallic();
-
-                                // One quad per visible face; direction determines
-                                // vertex winding so normals point outward.
-                                match face_dir {
-                                    0 => add_quad(
-                                        &mut water_vertices,
-                                        &mut water_indices,
-                                        [x, y_f, z],
-                                        [x, y_f, z + 1.0],
-                                        [x, y_f + 1.0, z + 1.0],
-                                        [x, y_f + 1.0, z],
-                                        [-1.0, 0.0, 0.0],
-                                        color,
-                                        tex,
-                                        r,
-                                        m,
-                                    ),
-                                    1 => add_quad(
-                                        &mut water_vertices,
-                                        &mut water_indices,
-                                        [x + 1.0, y_f, z + 1.0],
-                                        [x + 1.0, y_f, z],
-                                        [x + 1.0, y_f + 1.0, z],
-                                        [x + 1.0, y_f + 1.0, z + 1.0],
-                                        [1.0, 0.0, 0.0],
-                                        color,
-                                        tex,
-                                        r,
-                                        m,
-                                    ),
-                                    2 => add_quad(
-                                        &mut water_vertices,
-                                        &mut water_indices,
-                                        [x, y_f, z + 1.0],
-                                        [x, y_f, z],
-                                        [x + 1.0, y_f, z],
-                                        [x + 1.0, y_f, z + 1.0],
-                                        [0.0, -1.0, 0.0],
-                                        color,
-                                        tex,
-                                        r,
-                                        m,
-                                    ),
-                                    3 => add_quad(
-                                        &mut water_vertices,
-                                        &mut water_indices,
-                                        [x, y_f + 1.0, z],
-                                        [x, y_f + 1.0, z + 1.0],
-                                        [x + 1.0, y_f + 1.0, z + 1.0],
-                                        [x + 1.0, y_f + 1.0, z],
-                                        [0.0, 1.0, 0.0],
-                                        color,
-                                        tex,
-                                        r,
-                                        m,
-                                    ),
-                                    4 => add_quad(
-                                        &mut water_vertices,
-                                        &mut water_indices,
-                                        [x + 1.0, y_f, z],
-                                        [x, y_f, z],
-                                        [x, y_f + 1.0, z],
-                                        [x + 1.0, y_f + 1.0, z],
-                                        [0.0, 0.0, -1.0],
-                                        color,
-                                        tex,
-                                        r,
-                                        m,
-                                    ),
-                                    5 => add_quad(
-                                        &mut water_vertices,
-                                        &mut water_indices,
-                                        [x, y_f, z + 1.0],
-                                        [x + 1.0, y_f, z + 1.0],
-                                        [x + 1.0, y_f + 1.0, z + 1.0],
-                                        [x, y_f + 1.0, z + 1.0],
-                                        [0.0, 0.0, 1.0],
-                                        color,
-                                        tex,
-                                        r,
-                                        m,
-                                    ),
-                                    _ => {}
-                                }
+                                add_quad(
+                                    &mut water_vertices,
+                                    &mut water_indices,
+                                    [x, y_f + 1.0, z],
+                                    [x, y_f + 1.0, z + 1.0],
+                                    [x + 1.0, y_f + 1.0, z + 1.0],
+                                    [x + 1.0, y_f + 1.0, z],
+                                    [0.0, 1.0, 0.0],
+                                    block.color(),
+                                    block.tex_top(),
+                                    block.roughness(),
+                                    block.metallic(),
+                                );
                             }
-                            continue; // water handled; do not enter mask
+                            continue;
                         }
 
                         // Skip Air and Stairs (handled in pass 1 or by transparency).
@@ -1064,17 +984,19 @@ impl World {
                             }
                         }
 
-                        let _block = face.block;
-                        let (target_verts, target_inds) = (&mut vertices, &mut indices);
-
                         let color = [
                             face.color[0] as f32 / 255.0,
                             face.color[1] as f32 / 255.0,
                             face.color[2] as f32 / 255.0,
                         ];
                         let tex_index = face.tex_index as f32;
-                        let roughness = 1.0;
-                        let metallic = 0.0;
+                        let roughness = face.block.roughness();
+                        let metallic = face.block.metallic();
+                        let (target_verts, target_inds) = if face.block == BlockType::Water {
+                            (&mut water_vertices, &mut water_indices)
+                        } else {
+                            (&mut vertices, &mut indices)
+                        };
 
                         // Convert (slice, d1, d2, width, height) back to world-
                         // space corner coordinates for the merged quad.

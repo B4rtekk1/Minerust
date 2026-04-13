@@ -269,6 +269,12 @@ pub struct State {
     pub last_gen_player_cz: i32,
     /// Submits subchunk mesh-build requests to background threads and collects results.
     pub mesh_loader: minerust::MeshLoader,
+    /// Cached list of currently loaded chunk columns inside the render radius.
+    pub visible_chunk_columns: Vec<(i32, i32)>,
+    /// Player chunk coordinate at which `visible_chunk_columns` was last rebuilt.
+    pub visible_chunk_cache_center: (i32, i32),
+    /// Forces `visible_chunk_columns` to be rebuilt before the next render.
+    pub visible_chunk_columns_dirty: bool,
 
     // -------------------------------------------------------------------------
     // Indirect rendering managers
