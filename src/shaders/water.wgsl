@@ -461,7 +461,11 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let shore_w = 1.0 - smoothstep(0.15, 1.85, thickness);
 
     let flow = flow_vector(in.world_pos.xz, t);
-    let caust = caustic_factor(in.world_pos.xz, t, sun_dir, flow);
+    let caust = select(
+        0.0,
+        caustic_factor(in.world_pos.xz, t, sun_dir, flow),
+        (shore_w > 0.02) && (dist < 90.0),
+    );
 
     // Absorption coefficients (m^-1-ish). Red dies first; green/blue linger.
     let sigma_a = vec3<f32>(0.62, 0.16, 0.055);
@@ -477,7 +481,6 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     water_color   *= f32(mix(f16(0.75), f16(1.18), wave_pulse));
 
     let shadow  = calculate_shadow(in.world_pos, sun_dir);
-    let ambient = f16(mix(0.01, 0.35, f32(day)));
     let night_factor = f32(1.0 - day);
     let night_dark = vec3(0.0, 0.0, 0.01);
     let night_mix = clamp(night_factor * 1.5, 0.0, 1.0);
@@ -488,8 +491,17 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var refl_color = sky_reflection_color(refl_dir, sun_dir, uniforms.moon_intensity);
 
-    if uniforms.reflection_mode != 0.0 {
-        let ssr_fade = f16(clamp(1.0 - dist / SSR_FADE_DISTANCE, 0.0, 1.0));
+    // Reflection mode enum (from Rust `Uniforms` docs):
+    // 0 = none, 1 = planar, 2 = SSR.
+    //
+    // This shader only implements SSR; planar reflections (if present) should
+    // be handled by binding a different texture or a different shader variant.
+    if uniforms.reflection_mode >= 2.0 {
+        // Fade SSR with distance and with "effective roughness" (rainy/rough water breaks SSR).
+        let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
+        let roughness_base = mix(WATER_ROUGHNESS_MIN, WATER_ROUGHNESS_MAX, rain * 0.85);
+        let rough_fade = 1.0 - smoothstep(0.06, 0.16, roughness_base);
+        let ssr_fade = f16(clamp((1.0 - dist / SSR_FADE_DISTANCE) * rough_fade, 0.0, 1.0));
         if ssr_fade > f16(0.01) {
             let ssr  = ssr_trace(in.world_pos, refl_dir, dist);
             let conf = f16(smoothstep(0.05, 0.9, ssr.w)) * ssr_fade;
@@ -502,20 +514,34 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     refl_color *= f32(f16(1.0) - grazing * f16(0.18));
     let reflection_mix = f16(clamp(f32(fresnel * (f16(0.78) - grazing * f16(0.20))), 0.0, 0.80));
 
-    // --- Refraction: normal + flow distortion; subtle chromatic split at glancing angles ---
-    // cos_theta is f16 — promote for f32 math (WGSL disallows f16 * f32).
+    // --- Refraction (screen-space) ---
+    // Use only the vertex wave normal for UV offsets. High-frequency normal/detail + flow
+    // animates the sample every frame while the opaque texture is static → “double image”.
     let cos_v = f32(cos_theta);
+    let n_refract = normalize(wave_n_raw);
+    let cos_v_refract = max(dot(view_dir, n_refract), 0.0);
+
     let dist_fade = clamp(1.0 - dist / 120.0, 0.0, 1.0);
-    let distort_strength = (0.012 + 0.026 * (1.0 - cos_v)) * dist_fade;
-    let distort = (vec2(normal.x, -normal.z) + flow * 0.55) * distort_strength;
-    let chroma = (1.0 - cos_v) * 0.0018 * dist_fade * (1.0 + shore_w * 0.35);
+    // Thicker water column → less screen-space wobble (seabed should not “swim”).
+    let thick_stab = smoothstep(0.25, 3.5, thickness);
+    let distort_strength =
+        (0.008 + 0.020 * (1.0 - cos_v_refract)) * dist_fade * (1.0 - 0.62 * thick_stab);
+    // Flow map only near shore; never full strength or the refracted layer slides over geometry.
+    let flow_refract = flow * (0.08 * shore_w * shore_w);
+    let distort = (vec2(n_refract.x, -n_refract.z) + flow_refract) * distort_strength;
+    let chroma =
+        (1.0 - cos_v_refract) * 0.0010 * dist_fade * (1.0 - 0.65 * thick_stab) * (1.0 + shore_w * 0.2);
     let refr_uv0 = clamp(uv + distort, vec2(0.0), vec2(1.0));
-    let refr_uv_r = clamp(uv + distort + vec2(chroma, -chroma * 0.35), vec2(0.0), vec2(1.0));
-    let refr_uv_b = clamp(uv + distort - vec2(chroma * 0.85, chroma * 0.2), vec2(0.0), vec2(1.0));
-    let sr = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_r, 0.0).r;
-    let sg = textureSampleLevel(ssr_color, ssr_sampler, refr_uv0, 0.0).g;
-    let sb = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_b, 0.0).b;
-    let refracted_scene = vec3(sr, sg, sb);
+    // Far from camera, chromatic split is subpixel: fall back to a single tap.
+    var refracted_scene = textureSampleLevel(ssr_color, ssr_sampler, refr_uv0, 0.0).rgb;
+    if chroma > 0.00025 {
+        let refr_uv_r = clamp(uv + distort + vec2(chroma, -chroma * 0.35), vec2(0.0), vec2(1.0));
+        let refr_uv_b = clamp(uv + distort - vec2(chroma * 0.85, chroma * 0.2), vec2(0.0), vec2(1.0));
+        let sr = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_r, 0.0).r;
+        let sg = refracted_scene.g;
+        let sb = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_b, 0.0).b;
+        refracted_scene = vec3(sr, sg, sb);
+    }
 
     // Apply absorption to the refracted color, then add in-scattered tint.
     let refracted = refracted_scene * trans;
@@ -570,9 +596,12 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let crest = smoothstep(0.68, 0.90, 1.0 - normal.y);
     let wind_along = dot(normalize(in.world_pos.xz + flow * 3.0), normalize(uniforms.wind_dir + vec2(0.01, 0.01)));
     let streak = pow(max(wind_along, 0.0), 3.0) * crest * 0.45;
-    let n0 = hash21(in.world_pos.xz * 3.1 + flow + vec2(t * 0.15, -t * 0.11));
-    let n1 = hash21(in.world_pos.xz * 7.7 - vec2(t * 0.09, t * 0.13));
-    let foam_break = mix(0.78, 1.12, n0) * mix(0.85, 1.08, n1);
+    var foam_break = 1.0;
+    if dist < 160.0 {
+        let n0 = hash21(in.world_pos.xz * 3.1 + flow + vec2(t * 0.15, -t * 0.11));
+        let n1 = hash21(in.world_pos.xz * 7.7 - vec2(t * 0.09, t * 0.13));
+        foam_break = mix(0.78, 1.12, n0) * mix(0.85, 1.08, n1);
+    }
     let foam_raw = clamp((shore * 0.92 + crest * 0.42 + streak) * foam_break, 0.0, 1.0);
     let foam_col = mix(vec3(0.78, 0.88, 0.96), vec3(1.0, 1.0, 1.0), f32(day));
     let foam_vis = foam_raw * shadow * (1.0 - f32(grazing) * 0.5);
