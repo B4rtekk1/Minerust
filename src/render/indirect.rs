@@ -1,20 +1,31 @@
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 
+use crate::constants::{CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS};
 use crate::core::vertex::Vertex;
 use crate::render::frustum::AABB;
 
-use crate::logger::{LogLevel, log};
-use ::std::collections::BTreeMap;
+use crate::logger::{log, LogLevel};
+use std::collections::BTreeMap;
 
 /// Maximum number of subchunks that can be tracked simultaneously.
-const MAX_SUBCHUNKS: usize = 65536;
+///
+/// This follows the chunk unload radius instead of reserving for an arbitrary
+/// world-sized ceiling. With the default render settings this is 35 x 35 chunk
+/// columns x 16 vertical subchunks = 19,600 slots per terrain/water manager.
+const MAX_CHUNK_COLUMNS: usize =
+    (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1) * (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1);
+const MAX_SUBCHUNKS: usize = MAX_CHUNK_COLUMNS * NUM_SUBCHUNKS as usize;
 
-/// Maximum number of vertices across all subchunks in the unified vertex buffer.
-const MAX_VERTICES: usize = 20_000_000;
-
-/// Maximum number of indices across all subchunks in the unified index buffer.
-const MAX_INDICES: usize = 60_000_000;
+/// Geometry budget for the unified buffers.
+///
+/// Greedy meshing keeps most subchunks far below these averages. If a pathological
+/// area exceeds the budget, upload_subchunk falls back to the existing cache clear
+/// and retry path instead of overflowing the GPU buffers.
+const VERTICES_PER_SUBCHUNK_BUDGET: usize = 384;
+const INDICES_PER_SUBCHUNK_BUDGET: usize = 768;
+const MAX_VERTICES: usize = MAX_SUBCHUNKS * VERTICES_PER_SUBCHUNK_BUDGET;
+const MAX_INDICES: usize = MAX_SUBCHUNKS * INDICES_PER_SUBCHUNK_BUDGET;
 
 /// GPU-side arguments for a single `draw_indexed_indirect` call.
 ///

@@ -289,8 +289,10 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Computes and stores the per-cascade light-space view-projection matrices.
     pub csm: CsmManager,
-    /// Active shadow-cascade mode selector (reserved for future multi-mode support).
+    /// Active water reflection mode (`0 = off`, `1 = SSR`).
     pub reflection_mode: u32,
+    /// Toggles runtime shadow rendering without rebuilding pipelines.
+    pub shadows_enabled: bool,
 
     // -------------------------------------------------------------------------
     // HUD: coordinate display

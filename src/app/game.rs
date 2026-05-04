@@ -93,6 +93,7 @@ struct Args {
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
 /// | R | Cycle water reflection mode (Off → SSR). |
+/// | H | Toggle shadows on/off. |
 ///
 /// # Key bindings (menu)
 ///
@@ -356,6 +357,12 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => "Unknown",
                                 };
                                 log(LogLevel::Info, &format!("Reflection mode: {}", mode_name));
+                            }
+
+                            KeyCode::KeyH if pressed => {
+                                state.shadows_enabled = !state.shadows_enabled;
+                                let state_name = if state.shadows_enabled { "On" } else { "Off" };
+                                log(LogLevel::Info, &format!("Shadows: {}", state_name));
                             }
 
                             // ---- F5: Save world to disk ---------------------

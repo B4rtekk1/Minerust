@@ -3,8 +3,9 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
-    build_block_outline, build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL,
+    ShadowConfig, Uniforms, Vertex, World, build_block_outline, build_player_model,
+    extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -351,6 +352,17 @@ impl State {
                 wind_speed: 1.0,
                 _pad: 0.0,
                 rain_factor: 0.0,
+                shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
+                _pad2: [0.0; 1],
+            }]),
+        );
+        self.queue.write_buffer(
+            &self.shadow_config_buffer,
+            0,
+            bytemuck::cast_slice(&[ShadowConfig {
+                shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
+                pcf_samples: if self.shadows_enabled { 16 } else { 0 },
+                _pad: [0; 2],
             }]),
         );
 
@@ -365,42 +377,44 @@ impl State {
 
         // ── Shadow cascade buffer upload + shadow cull ────────────────────── //
         let mut shadow_frustum_arrays = [[[0f32; 4]; 6]; 4];
-        for i in 0..active_cascades {
-            // Pack the cascade's light-space matrix into a 256-byte aligned
-            // uniform slot so the dynamic-offset shadow bind group can select
-            // the correct cascade without rebinding.
-            let cascade_matrix: [[f32; 4]; 4] = csm.cascades[i].view_proj.to_cols_array_2d();
-            let mut shadow_uniform_data = [0f32; 64]; // 64 × 4 bytes = 256 bytes
-            shadow_uniform_data[0..16].copy_from_slice(cascade_matrix.as_flattened());
+        if self.shadows_enabled {
+            for i in 0..active_cascades {
+                // Pack the cascade's light-space matrix into a 256-byte aligned
+                // uniform slot so the dynamic-offset shadow bind group can select
+                // the correct cascade without rebinding.
+                let cascade_matrix: [[f32; 4]; 4] = csm.cascades[i].view_proj.to_cols_array_2d();
+                let mut shadow_uniform_data = [0f32; 64]; // 64 × 4 bytes = 256 bytes
+                shadow_uniform_data[0..16].copy_from_slice(cascade_matrix.as_flattened());
 
-            self.queue.write_buffer(
-                &self.shadow_cascade_buffer,
-                (i * 256) as u64,
-                bytemuck::cast_slice(&shadow_uniform_data),
-            );
+                self.queue.write_buffer(
+                    &self.shadow_cascade_buffer,
+                    (i * 256) as u64,
+                    bytemuck::cast_slice(&shadow_uniform_data),
+                );
 
-            // Extract the light-space frustum planes for this cascade so the
-            // GPU can cull chunks that are outside the cascade's projection.
-            let cascade_view_proj = csm.cascades[i].view_proj;
-            let shadow_frustum = extract_frustum_planes(&cascade_view_proj);
-            shadow_frustum_arrays[i] = frustum_planes_to_array(&shadow_frustum);
-        }
+                // Extract the light-space frustum planes for this cascade so the
+                // GPU can cull chunks that are outside the cascade's projection.
+                let cascade_view_proj = csm.cascades[i].view_proj;
+                let shadow_frustum = extract_frustum_planes(&cascade_view_proj);
+                shadow_frustum_arrays[i] = frustum_planes_to_array(&shadow_frustum);
+            }
 
-        // Dispatch GPU occlusion + frustum culling for each active cascade,
-        // for both opaque terrain and water chunks.
-        for i in 0..active_cascades {
-            self.indirect_manager.dispatch_shadow_culling(
-                &mut encoder,
-                &self.queue,
-                i,
-                &shadow_frustum_arrays[i],
-            );
-            self.water_indirect_manager.dispatch_shadow_culling(
-                &mut encoder,
-                &self.queue,
-                i,
-                &shadow_frustum_arrays[i],
-            );
+            // Dispatch GPU occlusion + frustum culling for each active cascade,
+            // for both opaque terrain and water chunks.
+            for i in 0..active_cascades {
+                self.indirect_manager.dispatch_shadow_culling(
+                    &mut encoder,
+                    &self.queue,
+                    i,
+                    &shadow_frustum_arrays[i],
+                );
+                self.water_indirect_manager.dispatch_shadow_culling(
+                    &mut encoder,
+                    &self.queue,
+                    i,
+                    &shadow_frustum_arrays[i],
+                );
+            }
         }
 
         // ── Shadow depth passes (one per active cascade) ──────────────────── //
@@ -413,7 +427,12 @@ impl State {
             "Shadow Pass Cascade 2",
             "Shadow Pass Cascade 3",
         ];
-        for i in 0..active_cascades {
+        let shadow_pass_count = if self.shadows_enabled {
+            active_cascades
+        } else {
+            0
+        };
+        for i in 0..shadow_pass_count {
             let offset = (i * 256) as u32;
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(SHADOW_PASS_LABELS[i]),
@@ -431,31 +450,33 @@ impl State {
                 multiview_mask: None,
             });
 
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
-            // Dynamic offset selects cascade i's light-space matrix in the
-            // 256-byte-aligned shadow cascade buffer.
-            shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[offset]);
-            shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
-            shadow_pass.set_index_buffer(
-                self.indirect_manager.index_buffer().slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            // Use count-based indirect if supported so only GPU-visible chunks
-            // are drawn; fall back to a fixed count otherwise.
-            if self.supports_indirect_count {
-                shadow_pass.multi_draw_indexed_indirect_count(
-                    self.indirect_manager.shadow_draw_commands(i),
-                    0,
-                    self.indirect_manager.shadow_visible_count_buffer(i),
-                    0,
-                    self.indirect_manager.active_count(),
+            if self.shadows_enabled && i < active_cascades {
+                shadow_pass.set_pipeline(&self.shadow_pipeline);
+                // Dynamic offset selects cascade i's light-space matrix in the
+                // 256-byte-aligned shadow cascade buffer.
+                shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[offset]);
+                shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
+                shadow_pass.set_index_buffer(
+                    self.indirect_manager.index_buffer().slice(..),
+                    wgpu::IndexFormat::Uint32,
                 );
-            } else {
-                shadow_pass.multi_draw_indexed_indirect(
-                    self.indirect_manager.shadow_draw_commands(i),
-                    0,
-                    self.indirect_manager.active_count(),
-                );
+                // Use count-based indirect if supported so only GPU-visible chunks
+                // are drawn; fall back to a fixed count otherwise.
+                if self.supports_indirect_count {
+                    shadow_pass.multi_draw_indexed_indirect_count(
+                        self.indirect_manager.shadow_draw_commands(i),
+                        0,
+                        self.indirect_manager.shadow_visible_count_buffer(i),
+                        0,
+                        self.indirect_manager.active_count(),
+                    );
+                } else {
+                    shadow_pass.multi_draw_indexed_indirect(
+                        self.indirect_manager.shadow_draw_commands(i),
+                        0,
+                        self.indirect_manager.active_count(),
+                    );
+                }
             }
         }
 
@@ -477,9 +498,7 @@ impl State {
                         if subchunk.is_empty {
                             continue; // skip fully empty sub-chunks early
                         }
-                        if subchunk.mesh_dirty
-                            && !self.mesh_loader.is_pending(cx, cz, sy as i32)
-                        {
+                        if subchunk.mesh_dirty && !self.mesh_loader.is_pending(cx, cz, sy as i32) {
                             meshes_to_request.push((cx, cz, sy as i32));
                         }
                         if subchunk.num_indices > 0 || subchunk.num_water_indices > 0 {

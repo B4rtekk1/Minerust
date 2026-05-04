@@ -95,6 +95,12 @@ pub struct Uniforms {
     /// Used by the sky shader to desaturate the atmosphere and dim the sun
     /// / cloud response under overcast conditions.
     pub rain_factor: f32,
+
+    /// Non-zero when runtime shadow rendering is enabled.
+    pub shadows_enabled: f32,
+
+    /// Explicit padding so the uniform block size stays 16-byte aligned.
+    pub _pad2: [f32; 1],
 }
 
 /// Small shadow-specific configuration uploaded separately from the main

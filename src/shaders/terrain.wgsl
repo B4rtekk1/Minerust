@@ -150,6 +150,11 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
+    if (shadow_config.pcf_samples == 0u) {
+        textureStore(output_shadow, gid.xy, vec4<f32>(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
     let depth = textureLoad(ssr_depth, gid.xy, 0).r;
     if depth >= 0.999999 {
         textureStore(output_shadow, gid.xy, vec4<f32>(1.0, 0.0, 0.0, 0.0));

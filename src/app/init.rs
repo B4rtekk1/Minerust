@@ -337,6 +337,8 @@ impl State {
                 wind_speed: 1.0,
                 _pad: 0.0,
                 rain_factor: 0.0,
+                shadows_enabled: 1.0,
+                _pad2: [0.0; 1],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1972,6 +1974,7 @@ impl State {
             game_state: GameState::Menu,
             menu_state: MenuState::default(),
             reflection_mode: 1,
+            shadows_enabled: true,
             is_underwater: 0.0,
             remote_players: HashMap::new(),
             my_player_id: 0,

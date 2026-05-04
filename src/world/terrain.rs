@@ -64,6 +64,20 @@ pub struct World {
     generator: ChunkGenerator,
 }
 
+const MESH_CACHE_PAD: usize = 1;
+const MESH_CACHE_SIZE: usize = CHUNK_SIZE as usize + MESH_CACHE_PAD * 2;
+const MESH_CACHE_HEIGHT: usize = SUBCHUNK_HEIGHT as usize + MESH_CACHE_PAD * 2;
+const MESH_CACHE_LEN: usize = MESH_CACHE_SIZE * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE;
+
+#[derive(Clone)]
+pub struct SubchunkMeshSnapshot {
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+    pub subchunk_y: i32,
+    pub has_blocks: bool,
+    pub block_cache: [BlockType; MESH_CACHE_LEN],
+}
+
 impl World {
     /// Creates a new world with the default seed (`2137`) and no loaded chunks.
     pub fn new() -> Self {
@@ -495,17 +509,102 @@ impl World {
     /// A pair of `(vertices, indices)` tuples:
     /// - First tuple: opaque geometry.
     /// - Second tuple: water (translucent) geometry.
+    pub fn snapshot_subchunk_mesh(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        subchunk_y: i32,
+    ) -> Option<SubchunkMeshSnapshot> {
+        if !self.chunks.contains_key(&(chunk_x, chunk_z)) {
+            return None;
+        }
+
+        let base_x = chunk_x * CHUNK_SIZE;
+        let base_y = subchunk_y * SUBCHUNK_HEIGHT;
+        let base_z = chunk_z * CHUNK_SIZE;
+
+        let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
+        let mut has_blocks = false;
+
+        for px in 0..MESH_CACHE_SIZE as i32 {
+            for py in 0..MESH_CACHE_HEIGHT as i32 {
+                for pz in 0..MESH_CACHE_SIZE as i32 {
+                    let wx = base_x + px - MESH_CACHE_PAD as i32;
+                    let wy = base_y + py - MESH_CACHE_PAD as i32;
+                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
+                    let block = if wy < 0 || wy >= WORLD_HEIGHT {
+                        BlockType::Air
+                    } else {
+                        let cx = wx.div_euclid(CHUNK_SIZE);
+                        let cz = wz.div_euclid(CHUNK_SIZE);
+                        let lx = wx.rem_euclid(CHUNK_SIZE);
+                        let lz = wz.rem_euclid(CHUNK_SIZE);
+                        if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                            chunk.get_block(lx, wy, lz)
+                        } else if wy < SEA_LEVEL {
+                            BlockType::Water
+                        } else {
+                            BlockType::Air
+                        }
+                    };
+
+                    if px > 0
+                        && px < (MESH_CACHE_SIZE - 1) as i32
+                        && py > 0
+                        && py < (MESH_CACHE_HEIGHT - 1) as i32
+                        && pz > 0
+                        && pz < (MESH_CACHE_SIZE - 1) as i32
+                        && block != BlockType::Air
+                    {
+                        has_blocks = true;
+                    }
+
+                    block_cache[(px as usize) * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE
+                        + (py as usize) * MESH_CACHE_SIZE
+                        + (pz as usize)] = block;
+                }
+            }
+        }
+
+        Some(SubchunkMeshSnapshot {
+            chunk_x,
+            chunk_z,
+            subchunk_y,
+            has_blocks,
+            block_cache,
+        })
+    }
+
     pub fn build_subchunk_mesh(
         &self,
         chunk_x: i32,
         chunk_z: i32,
         subchunk_y: i32,
     ) -> ((Vec<Vertex>, Vec<u32>), (Vec<Vertex>, Vec<u32>)) {
+        let snapshot = match self.snapshot_subchunk_mesh(chunk_x, chunk_z, subchunk_y) {
+            Some(snapshot) => snapshot,
+            None => return ((Vec::new(), Vec::new()), (Vec::new(), Vec::new())),
+        };
+
+        Self::build_subchunk_mesh_from_snapshot(&self.generator, &snapshot)
+    }
+
+    pub fn build_subchunk_mesh_from_snapshot(
+        generator: &ChunkGenerator,
+        snapshot: &SubchunkMeshSnapshot,
+    ) -> ((Vec<Vertex>, Vec<u32>), (Vec<Vertex>, Vec<u32>)) {
         let mut vertices = Vec::with_capacity(4096);
         let mut indices = Vec::with_capacity(2048);
         let mut water_vertices = Vec::with_capacity(1024);
         let mut water_indices = Vec::with_capacity(512);
 
+        if !snapshot.has_blocks {
+            return ((vertices, indices), (water_vertices, water_indices));
+        }
+
+        let chunk_x = snapshot.chunk_x;
+        let chunk_z = snapshot.chunk_z;
+        let subchunk_y = snapshot.subchunk_y;
         let base_x = chunk_x * CHUNK_SIZE;
         let base_y = subchunk_y * SUBCHUNK_HEIGHT;
         let base_z = chunk_z * CHUNK_SIZE;
@@ -513,44 +612,10 @@ impl World {
         // ── Block cache setup ─────────────────────────────────────────────── //
         // 1-block padding on all sides so neighbor lookups never need a
         // hash-map access during the face visibility and greedy merge tests.
-        const PAD: usize = 1;
-        const S: usize = CHUNK_SIZE as usize + PAD * 2; // 18
-        const SH: usize = SUBCHUNK_HEIGHT as usize + PAD * 2; // 18
-
-        let mut block_cache = [BlockType::Air; S * SH * S];
-
-        // Fetch a block from the world, defaulting to Water/Air for unloaded
-        // neighboring chunks (below/above sea level respectively).
-        let fetch = |wx: i32, wy: i32, wz: i32| -> BlockType {
-            if wy < 0 || wy >= WORLD_HEIGHT {
-                return BlockType::Air;
-            }
-            let cx = wx.div_euclid(CHUNK_SIZE);
-            let cz = wz.div_euclid(CHUNK_SIZE);
-            let lx = wx.rem_euclid(CHUNK_SIZE);
-            let lz = wz.rem_euclid(CHUNK_SIZE);
-            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                chunk.get_block(lx, wy, lz)
-            } else if wy < SEA_LEVEL {
-                BlockType::Water // fill unloaded ocean columns with water
-            } else {
-                BlockType::Air
-            }
-        };
-
-        // Populate the cache: layout is [px][py][pz] linearised as
-        // `px * SH * S + py * S + pz` with (px, py, pz) being padded coords.
-        for px in 0..S as i32 {
-            for py in 0..SH as i32 {
-                for pz in 0..S as i32 {
-                    let wx = base_x + px - PAD as i32;
-                    let wy = base_y + py - PAD as i32;
-                    let wz = base_z + pz - PAD as i32;
-                    block_cache[(px as usize) * SH * S + (py as usize) * S + (pz as usize)] =
-                        fetch(wx, wy, wz);
-                }
-            }
-        }
+        const PAD: usize = MESH_CACHE_PAD;
+        const S: usize = MESH_CACHE_SIZE;
+        const SH: usize = MESH_CACHE_HEIGHT;
+        let block_cache = &snapshot.block_cache;
 
         // Fast cache lookup in sub-chunk-local coordinates.
         let get_block_fast = |lx: i32, ly: i32, lz: i32| -> BlockType {
@@ -603,6 +668,8 @@ impl World {
                 ((c[2] * 255.0) as u8) & 0xFC,
             ]
         };
+        let empty_face = FaceAttrs::default();
+        let mut mask = [empty_face; (CHUNK_SIZE as usize) * (SUBCHUNK_HEIGHT as usize)];
 
         // ── Pass 1: WoodStairs custom geometry ────────────────────────────── //
         // Stair blocks are composed of two non-unit-height quads that cannot
@@ -816,8 +883,8 @@ impl World {
 
             for slice in 0..slice_count {
                 // The mask stores one FaceAttrs entry per (d1, d2) cell.
-                let mut mask: Vec<FaceAttrs> =
-                    vec![FaceAttrs::default(); (dim1_size * dim2_size) as usize];
+                let mask_len = (dim1_size * dim2_size) as usize;
+                mask[..mask_len].fill(empty_face);
 
                 // ── Populate mask for this slice ──────────────────────────── //
                 for d1 in 0..dim1_size {
@@ -893,7 +960,8 @@ impl World {
                             let lx_idx = lx as usize;
                             let lz_idx = lz as usize;
                             if biome_map[lx_idx][lz_idx].is_none() {
-                                biome_map[lx_idx][lz_idx] = Some(self.get_biome(world_x, world_z));
+                                biome_map[lx_idx][lz_idx] =
+                                    Some(generator.get_biome(world_x, world_z));
                             }
                             biome_map[lx_idx][lz_idx]
                         } else {

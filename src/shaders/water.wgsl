@@ -15,8 +15,9 @@ const PCF_SAMPLES:     i32 = 8;
 
 const LOD_FAR: f32 = 300.0;
 
-const WATER_COLOR_SHALLOW: vec3<f32> = vec3<f32>(0.035, 0.24, 0.34);
-const WATER_COLOR_DEEP:    vec3<f32> = vec3<f32>(0.008, 0.075, 0.18);
+// Slightly richer coastal palette: turquoise shallows → deep blue-violet.
+const WATER_COLOR_SHALLOW: vec3<f32> = vec3<f32>(0.05, 0.32, 0.38);
+const WATER_COLOR_DEEP:    vec3<f32> = vec3<f32>(0.006, 0.055, 0.16);
 const WATER_OPACITY:       f32 = 0.40;
 const FRESNEL_R0:          f32 = 0.018;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
@@ -47,6 +48,8 @@ struct Uniforms {
     wind_dir:            vec2<f32>,
     wind_speed:          f32,
     _pad:                f32,
+    rain_factor:         f32,
+    shadows_enabled:     f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms:  Uniforms;
@@ -55,6 +58,8 @@ struct Uniforms {
 @group(0) @binding(5) var ssr_color:          texture_2d<f32>;
 @group(0) @binding(6) var ssr_depth:          texture_2d<f32>;
 @group(0) @binding(7) var ssr_sampler:        sampler;
+@group(0) @binding(8) var flow_map:           texture_2d<f32>;
+@group(0) @binding(9) var flow_sampler:       sampler;
 
 
 struct VertexInput {
@@ -260,6 +265,30 @@ fn reconstruct_world(uv: vec2<f32>, d: f32) -> vec3<f32> {
     return wh.xyz / wh.w;
 }
 
+fn beer_lambert(transmittance_coeff: vec3<f32>, distance: f32) -> vec3<f32> {
+    // transmittance_coeff is per-meter absorption; exp(-sigma * d)
+    return exp(-transmittance_coeff * distance);
+}
+
+fn flow_vector(world_xz: vec2<f32>, time: f32) -> vec2<f32> {
+    let wind = normalize(uniforms.wind_dir + vec2(0.001, 0.001));
+    let uv = world_xz * 0.018 + wind * time * 0.035 + vec2(time * 0.01, -time * 0.008);
+    let s = textureSampleLevel(flow_map, flow_sampler, uv, 0.0).rg;
+    return (s - vec2(0.5)) * 2.0;
+}
+
+// Cheap screen-space caustic bands (view-dependent shimmer on shallow water).
+fn caustic_factor(world_xz: vec2<f32>, time: f32, sun_dir: vec3<f32>, flow: vec2<f32>) -> f32 {
+    if sun_dir.y < 0.08 { return 0.0; }
+    let p = (world_xz + flow * 1.8) * 0.42;
+    let w = uniforms.wind_speed;
+    let a = sin(p.x * 5.9 + time * w * 1.05) * sin(p.y * 5.1 - time * w * 0.95);
+    let b = sin((p.x + p.y) * 4.4 + time * 0.65);
+    let c = sin(p.x * 11.3 + p.y * 7.7 - time * 1.2);
+    let bands = a * 0.55 + b * 0.35 + c * 0.22;
+    return clamp(bands * 0.5 + 0.5, 0.0, 1.0);
+}
+
 fn ssr_hit_stability(uv: vec2<f32>, center_depth: f32) -> f32 {
     let texel = 1.0 / uniforms.screen_size;
 
@@ -278,7 +307,7 @@ fn ssr_hit_stability(uv: vec2<f32>, center_depth: f32) -> f32 {
     return 1.0 - smoothstep(0.0015, 0.012, max_delta);
 }
 
-fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>) -> vec4<f32> {
+fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>, water_view_dist: f32) -> vec4<f32> {
     let dir  = normalize(refl_dir);
     var ray  = world_pos + dir * 0.3;
     var prev = ray;
@@ -321,9 +350,18 @@ fn ssr_trace(world_pos: vec3<f32>, refl_dir: vec3<f32>) -> vec4<f32> {
                 let hit_depth = sample_depth(fu);
                 let fd  = abs(fn_.z - hit_depth);
                 if fd < SSR_THICKNESS {
-                    hit_uv   = fu;
-                    hit_conf = (1.0 - fd / SSR_THICKNESS) * ssr_hit_stability(fu, hit_depth);
-                    found    = true;
+                    let hit_world = reconstruct_world(fu, hit_depth);
+                    let hit_view_dist = length(hit_world - uniforms.camera_pos);
+
+                    // The opaque depth buffer contains foreground occluders too.
+                    // If the SSR candidate is closer to the camera than this water
+                    // fragment, it is usually an object standing between the camera
+                    // and the water, not something the water surface should reflect.
+                    if hit_view_dist + 0.35 >= water_view_dist {
+                        hit_uv   = fu;
+                        hit_conf = (1.0 - fd / SSR_THICKNESS) * ssr_hit_stability(fu, hit_depth);
+                        found    = true;
+                    }
                 }
             }
             break;
@@ -353,6 +391,7 @@ const POISSON8: array<vec2<f32>, 8> = array(
 );
 
 fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
+    if uniforms.shadows_enabled < 0.5 { return 1.0; }
     if sun_dir.y < 0.05 { return 0.0; }
     if distance(world_pos.xz, uniforms.camera_pos.xz) > 96.0 { return 1.0; }
 
@@ -411,8 +450,28 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let fresnel   = schlick_fresnel(cos_theta, f16(FRESNEL_R0));
     let grazing   = f16(smoothstep(0.25, 0.98, f32(f16(1.0) - cos_theta)));
 
-    let depth_t     = f16(clamp(f32(f16(1.0) - cos_theta * f16(1.4)), 0.0, 1.0));
-    var water_color = mix(WATER_COLOR_SHALLOW, WATER_COLOR_DEEP, f32(depth_t));
+    // --- Screen-space thickness (water -> opaque hit) ---
+    // Use resolved opaque depth to estimate how much water the ray traverses.
+    // This drives shallow/deep color, absorption, refraction and shoreline foam.
+    // Pixel coords (same builtin as a lone @builtin(position) param; must not duplicate it).
+    let uv = vec2<f32>(in.clip_position.x, in.clip_position.y) / uniforms.screen_size;
+    let scene_depth = sample_depth(uv);
+    let scene_world = reconstruct_world(uv, scene_depth);
+    let thickness = clamp(length(scene_world - in.world_pos), 0.0, 30.0);
+    let shore_w = 1.0 - smoothstep(0.15, 1.85, thickness);
+
+    let flow = flow_vector(in.world_pos.xz, t);
+    let caust = caustic_factor(in.world_pos.xz, t, sun_dir, flow);
+
+    // Absorption coefficients (m^-1-ish). Red dies first; green/blue linger.
+    let sigma_a = vec3<f32>(0.62, 0.16, 0.055);
+    let trans   = beer_lambert(sigma_a, thickness);
+
+    // Base "scattering" tint: shallow is brighter/greener, deep is darker/bluer.
+    let depth_t = clamp(thickness / 5.5, 0.0, 1.0);
+    var water_color = mix(WATER_COLOR_SHALLOW, WATER_COLOR_DEEP, depth_t);
+    // Slight depth-dependent saturation shift (deep water reads cooler).
+    water_color = mix(water_color, water_color * vec3(0.92, 0.97, 1.08), depth_t * 0.35);
 
     let wave_pulse = f16(clamp(in.world_pos.y * 1.4 + 0.5, 0.0, 1.0));
     water_color   *= f32(mix(f16(0.75), f16(1.18), wave_pulse));
@@ -432,7 +491,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     if uniforms.reflection_mode != 0.0 {
         let ssr_fade = f16(clamp(1.0 - dist / SSR_FADE_DISTANCE, 0.0, 1.0));
         if ssr_fade > f16(0.01) {
-            let ssr  = ssr_trace(in.world_pos, refl_dir);
+            let ssr  = ssr_trace(in.world_pos, refl_dir, dist);
             let conf = f16(smoothstep(0.05, 0.9, ssr.w)) * ssr_fade;
             if conf > f16(0.02) {
                 refl_color = mix(refl_color, ssr.rgb, f32(conf) * 0.85);
@@ -442,11 +501,51 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
 
     refl_color *= f32(f16(1.0) - grazing * f16(0.18));
     let reflection_mix = f16(clamp(f32(fresnel * (f16(0.78) - grazing * f16(0.20))), 0.0, 0.80));
+
+    // --- Refraction: normal + flow distortion; subtle chromatic split at glancing angles ---
+    // cos_theta is f16 — promote for f32 math (WGSL disallows f16 * f32).
+    let cos_v = f32(cos_theta);
+    let dist_fade = clamp(1.0 - dist / 120.0, 0.0, 1.0);
+    let distort_strength = (0.012 + 0.026 * (1.0 - cos_v)) * dist_fade;
+    let distort = (vec2(normal.x, -normal.z) + flow * 0.55) * distort_strength;
+    let chroma = (1.0 - cos_v) * 0.0018 * dist_fade * (1.0 + shore_w * 0.35);
+    let refr_uv0 = clamp(uv + distort, vec2(0.0), vec2(1.0));
+    let refr_uv_r = clamp(uv + distort + vec2(chroma, -chroma * 0.35), vec2(0.0), vec2(1.0));
+    let refr_uv_b = clamp(uv + distort - vec2(chroma * 0.85, chroma * 0.2), vec2(0.0), vec2(1.0));
+    let sr = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_r, 0.0).r;
+    let sg = textureSampleLevel(ssr_color, ssr_sampler, refr_uv0, 0.0).g;
+    let sb = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_b, 0.0).b;
+    let refracted_scene = vec3(sr, sg, sb);
+
+    // Apply absorption to the refracted color, then add in-scattered tint.
+    let refracted = refracted_scene * trans;
+    let inscatter = water_color * (1.0 - trans) * (0.52 + 0.38 * f32(day));
+
+    // Thin-water sunlight transmission (view-dependent, strongest opposite Fresnel).
+    let ndl = max(dot(normal, sun_dir), 0.0);
+    let transmit = exp(-thickness * 0.38) * (1.0 - cos_v) * ndl * max(sun_dir.y, 0.0) * shadow;
+    let sun_tint = mix(vec3(0.35, 0.72, 0.48), vec3(0.95, 0.92, 0.75), f32(day));
+    let sss = sun_tint * transmit * (0.28 + shore_w * 0.35);
+
+    // Shallow caustic shimmer on lit water (not on mirror-like Fresnel).
+    let caust_light = vec3(0.45, 0.82, 1.0) * caust * shore_w * ndl * shadow * max(sun_dir.y, 0.0);
+    let caust_amt = (0.22 + 0.18 * f32(day)) * (1.0 - cos_v) * (1.0 - f32(fresnel) * 0.65);
+
+    water_color = refracted + inscatter + sss + caust_light * caust_amt;
     water_color = mix(water_color, refl_color, f32(reflection_mix));
 
+    // Soft sun glint on reflection vector (wide bloom, not the sharp GGX lobe).
     if sun_dir.y > 0.0 {
-        let roughness   = f32(f16(WATER_ROUGHNESS_MIN)
-                        * mix(f16(1.0), f16(0.82), f16(1.0) - day));
+        let sun_v = max(dot(refl_dir, sun_dir), 0.0);
+        let glint = pow(sun_v, 48.0) * f32(day) * shadow * (0.35 + shore_w * 0.2);
+        water_color += vec3(1.0, 0.97, 0.88) * glint * f32(reflection_mix);
+    }
+
+    if sun_dir.y > 0.0 {
+        // Rain makes the surface rougher/dimmer highlights (and breaks up SSR).
+        let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
+        let roughness_base = mix(WATER_ROUGHNESS_MIN, WATER_ROUGHNESS_MAX, rain * 0.85);
+        let roughness   = roughness_base * f32(mix(f16(1.0), f16(0.82), f16(1.0) - day));
         let spec        = ggx_spec_simple(normal, view_dir, sun_dir, roughness);
         let spec_color  = mix(vec3(1.0, 0.97, 0.88), vec3(1.0, 0.84, 0.58), f32(f16(1.0) - day));
         water_color    += spec_color * spec * f32(mix(f16(1.45), f16(1.8), day)) * shadow;
@@ -466,7 +565,22 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
                        f32(f16(0.85) * day + f16(0.15) * (f16(1.0) - day)));
     water_color  = mix(water_color, fog_col, f32(fog_t * fog_t));
 
-    let alpha = f16(WATER_OPACITY) + fresnel * f16(0.30);
+    // --- Foam: shore + crest + wind-aligned streaks + noise breakup ---
+    let shore = shore_w;
+    let crest = smoothstep(0.68, 0.90, 1.0 - normal.y);
+    let wind_along = dot(normalize(in.world_pos.xz + flow * 3.0), normalize(uniforms.wind_dir + vec2(0.01, 0.01)));
+    let streak = pow(max(wind_along, 0.0), 3.0) * crest * 0.45;
+    let n0 = hash21(in.world_pos.xz * 3.1 + flow + vec2(t * 0.15, -t * 0.11));
+    let n1 = hash21(in.world_pos.xz * 7.7 - vec2(t * 0.09, t * 0.13));
+    let foam_break = mix(0.78, 1.12, n0) * mix(0.85, 1.08, n1);
+    let foam_raw = clamp((shore * 0.92 + crest * 0.42 + streak) * foam_break, 0.0, 1.0);
+    let foam_col = mix(vec3(0.78, 0.88, 0.96), vec3(1.0, 1.0, 1.0), f32(day));
+    let foam_vis = foam_raw * shadow * (1.0 - f32(grazing) * 0.5);
+    water_color = mix(water_color, foam_col, foam_vis);
+
+    // Alpha increases with thickness (more water -> less see-through), plus Fresnel.
+    let thickness_alpha = 1.0 - exp(-thickness * 0.22);
+    let alpha = f16(clamp(WATER_OPACITY + thickness_alpha * 0.55 + f32(fresnel) * 0.22, 0.02, 0.98));
 
     return vec4(water_color, clamp(f32(alpha), 0.0, 1.0));
 }
