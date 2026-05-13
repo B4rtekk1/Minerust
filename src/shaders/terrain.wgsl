@@ -60,7 +60,6 @@ fn sample_cascade_pcf(
     cascade_idx:   i32,
     bias:          f32,
     rotation:      f32,
-    filter_radius: f32,
     is_last:       bool,
 ) -> f32 {
     let sp = uniforms.csm_view_proj[cascade_idx] * vec4<f32>(world_pos, 1.0);
@@ -68,27 +67,26 @@ fn sample_cascade_pcf(
     let uv = vec2<f32>(sc.x * 0.5 + 0.5, 1.0 - (sc.y * 0.5 + 0.5));
 
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
-        return select(0.0, 1.0, is_last);
+        return 1.0;
     }
 
     let em = 0.05;
-    let edge_fade = smoothstep(0.0, em, uv.x) * smoothstep(1.0, 1.0 - em, uv.x)
-                  * smoothstep(0.0, em, uv.y) * smoothstep(1.0, 1.0 - em, uv.y);
+    let edge_fade = smoothstep(0.0, em, uv.x) * (1.0 - smoothstep(1.0 - em, 1.0, uv.x))
+                  * smoothstep(0.0, em, uv.y) * (1.0 - smoothstep(1.0 - em, 1.0, uv.y));
 
     let pcf_samples = min(i32(shadow_config.pcf_samples), MAX_PCF_SAMPLES);
     var shadow = 0.0;
-    let shadow_dims = vec2<f32>(textureDimensions(shadow_map).xy);
+    let shadow_map_size = max(shadow_config.shadow_map_size, 1.0);
+    let cascade_filter_texels = array<f32, 4>(1.15, 1.45, 1.85, 2.35);
+    let filter_radius = cascade_filter_texels[cascade_idx] / shadow_map_size;
+    let depth_ref = clamp(sc.z - bias, 0.0, 1.0);
 
     for (var i = 0; i < pcf_samples; i++) {
         let suv = uv + get_poisson_sample(i, rotation) * filter_radius;
         if any(suv < vec2<f32>(0.0)) || any(suv > vec2<f32>(1.0)) {
-            shadow += select(0.0, 1.0, is_last);
+            shadow += 1.0;
         } else {
-            let texel = vec2<i32>(clamp(suv * shadow_dims, vec2<f32>(0.0), shadow_dims - vec2<f32>(1.0)));
-            let depth = textureLoad(shadow_map, texel, cascade_idx, 0);
-            if sc.z - bias <= depth {
-                shadow += 1.0;
-            }
+            shadow += textureSampleCompareLevel(shadow_map, shadow_sampler, suv, cascade_idx, depth_ref);
         }
     }
 
@@ -125,19 +123,19 @@ fn calculate_shadow(
     let cos_t = max(dot(normal, sun_dir), 0.0);
     let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
 
-    let bias = clamp(0.004 + 0.008 * sin_t / max(cos_t, 0.05), 0.004, 0.02);
-
     let rot = world_space_noise(world_pos) * 2.0 * PI;
-    let shadow_map_size = max(shadow_config.shadow_map_size, 1.0);
-    let radius = 3.0 / shadow_map_size;
 
     let cb = select_cascade_with_blend(view_depth);
     let ci = i32(cb.x);
 
-    let shadow_a = sample_cascade_pcf(world_pos, ci, bias, rot, radius, ci == 3);
+    let cascade_bias_scale = array<f32, 4>(1.0, 1.2, 1.45, 1.75);
+    let base_bias = clamp(0.00035 + 0.0012 * sin_t / max(cos_t, 0.10), 0.00035, 0.0035);
+
+    let shadow_a = sample_cascade_pcf(world_pos, ci, base_bias * cascade_bias_scale[ci], rot, ci == 3);
 
     if cb.y > 0.001 && ci < 3 {
-        let shadow_b = sample_cascade_pcf(world_pos, ci + 1, bias, rot, radius, (ci + 1) == 3);
+        let next_ci = ci + 1;
+        let shadow_b = sample_cascade_pcf(world_pos, next_ci, base_bias * cascade_bias_scale[next_ci], rot, next_ci == 3);
         return mix(shadow_a, shadow_b, cb.y);
     }
     return shadow_a;

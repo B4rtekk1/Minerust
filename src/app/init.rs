@@ -434,8 +434,8 @@ impl State {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
@@ -520,9 +520,9 @@ impl State {
         //   0 – Uniforms (vertex + fragment)
         //   1 – Texture atlas array (fragment)
         //   2 – Atlas sampler (fragment)
-        //   3 – Shadow map array (fragment, depth texture for comparison)
-        //   4 – Shadow comparison sampler (fragment)
-        //   5 – Shadow config buffer (fragment)
+        //   3 – Shadow map array (fragment/compute, depth texture for comparison)
+        //   4 – Shadow comparison sampler (fragment/compute)
+        //   5 – Shadow config buffer (fragment/compute)
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("uniform_bind_group_layout"),
@@ -567,7 +567,7 @@ impl State {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },

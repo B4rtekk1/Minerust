@@ -1,6 +1,6 @@
 use glam::{Mat4, Vec3, Vec4};
 
-use crate::constants::{CSM_CASCADE_COUNT, CSM_CASCADE_SPLITS};
+use crate::constants::{CSM_CASCADE_COUNT, CSM_CASCADE_SPLITS, CSM_SHADOW_MAP_SIZE};
 #[derive(Debug, Clone, Copy)]
 pub struct CascadeData {
     pub view_proj: Mat4,
@@ -57,38 +57,52 @@ impl CsmManager {
             }
             center /= 8.0;
 
-            let mut radius = 0.0_f32;
-            for corner in &frustum_corners {
-                let dist = (*corner - center).length();
-                radius = radius.max(dist);
-            }
-
-            let sun_distance = radius * 2.0;
-            let light_pos = center + sun_dir * sun_distance;
-
             let light_up = if sun_dir.y.abs() > 0.99 {
                 Vec3::Z
             } else {
                 Vec3::Y
             };
 
+            let slice_depth = (cascade_far - cascade_near).max(1.0);
+            let light_pos = center + sun_dir * (slice_depth + 256.0);
             let light_view = Mat4::look_at_rh(light_pos, center, light_up);
 
-            let light_proj = Mat4::orthographic_rh(
-                -radius,
-                radius,
-                -radius,
-                radius,
-                0.1,
-                sun_distance * 2.0 + radius,
-            );
+            let mut light_min = Vec3::splat(f32::INFINITY);
+            let mut light_max = Vec3::splat(f32::NEG_INFINITY);
+            for corner in &frustum_corners {
+                let p = light_view * corner.extend(1.0);
+                let p = p.truncate() / p.w;
+                light_min = light_min.min(p);
+                light_max = light_max.max(p);
+            }
+
+            // Fit the orthographic projection to the cascade's light-space AABB.
+            // This preserves considerably more texels than the old bounding-sphere
+            // fit while the snapping below keeps camera movement stable.
+            let shadow_size = CSM_SHADOW_MAP_SIZE.max(1) as f32;
+            let mut extent = light_max - light_min;
+            extent.x = extent.x.max(1.0);
+            extent.y = extent.y.max(1.0);
+
+            let texel_x = extent.x / shadow_size;
+            let texel_y = extent.y / shadow_size;
+            let pad_x = texel_x * 4.0;
+            let pad_y = texel_y * 4.0;
+
+            let left = snap_down(light_min.x - pad_x, texel_x);
+            let right = snap_up(light_max.x + pad_x, texel_x);
+            let bottom = snap_down(light_min.y - pad_y, texel_y);
+            let top = snap_up(light_max.y + pad_y, texel_y);
+
+            // Add caster room in front of the camera slice along the light ray
+            // so off-screen terrain can still cast into the visible cascade.
+            let depth_pad = (slice_depth * 1.5).clamp(64.0, 256.0);
+            let near_plane = (-light_max.z - depth_pad).max(0.1);
+            let far_plane = (-light_min.z + depth_pad).max(near_plane + 1.0);
+
+            let light_proj = Mat4::orthographic_rh(left, right, bottom, top, near_plane, far_plane);
 
             let shadow_matrix = light_proj * light_view;
-            let shadow_matrix = snap_to_texel_grid(
-                shadow_matrix,
-                center,
-                crate::constants::CSM_SHADOW_MAP_SIZE as f32,
-            );
 
             let opengl_to_wgpu = Mat4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 1.0,
@@ -144,33 +158,18 @@ fn calculate_frustum_corners(
     corners_world
 }
 
-/// Snaps the shadow matrix so that the projection of `world_center` lands on
-/// an exact texel boundary.  This eliminates sub-texel crawling of the shadow
-/// map when the camera moves, because the frustum is always anchored to the
-/// same texel grid (GPU Gems 3 – "Stable Cascaded Shadow Maps").
-fn snap_to_texel_grid(matrix: Mat4, world_center: Vec3, shadow_map_size: f32) -> Mat4 {
-    if shadow_map_size <= 1.0 {
-        return matrix;
-    }
-
-    // Project the cascade center into shadow clip space, then shift the
-    // matrix so the center lands on the nearest texel boundary. This keeps
-    // the shadow map stable as the camera moves.
-    let center_clip = matrix * Vec4::new(world_center.x, world_center.y, world_center.z, 1.0);
-    let inv_w = if center_clip.w.abs() > f32::EPSILON {
-        1.0 / center_clip.w
+fn snap_down(value: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        value
     } else {
-        1.0
-    };
-    let center_ndc_x = center_clip.x * inv_w;
-    let center_ndc_y = center_clip.y * inv_w;
+        (value / step).floor() * step
+    }
+}
 
-    let texel_ndc = 2.0 / shadow_map_size;
-    let snapped_ndc_x = (center_ndc_x / texel_ndc).round() * texel_ndc;
-    let snapped_ndc_y = (center_ndc_y / texel_ndc).round() * texel_ndc;
-
-    let delta_x = snapped_ndc_x - center_ndc_x;
-    let delta_y = snapped_ndc_y - center_ndc_y;
-
-    Mat4::from_translation(Vec3::new(delta_x, delta_y, 0.0)) * matrix
+fn snap_up(value: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        value
+    } else {
+        (value / step).ceil() * step
+    }
 }

@@ -62,6 +62,7 @@ pub struct ChunkGenerator {
     noise_pv: FastNoiseLite,
     #[allow(dead_code)]
     noise_decor: FastNoiseLite,
+    noise_ore: FastNoiseLite,
     noise_cave_warp_x: FastNoiseLite,
     noise_cave_warp_z: FastNoiseLite,
     noise_surface_entrance: FastNoiseLite,
@@ -72,14 +73,17 @@ impl ChunkGenerator {
     pub fn new(seed: u32) -> Self {
         ChunkGenerator {
             noise_continents: Self::create_fbm_noise(seed, 0.0018),
-            noise_terrain: Self::create_fbm_noise(seed.wrapping_add(1), 0.013),
-            noise_detail: Self::create_fbm_noise(seed.wrapping_add(2), 0.019),
-            noise_temperature: Self::create_noise(seed.wrapping_add(3), 0.015),
-            noise_moisture: Self::create_noise(seed.wrapping_add(4), 0.0012),
-            noise_river: Self::create_noise(seed.wrapping_add(5), 0.012),
-            noise_lake: Self::create_noise(seed.wrapping_add(6), 0.042),
-            noise_trees: Self::create_noise(seed.wrapping_add(7), 0.112),
-            noise_island: Self::create_noise(seed.wrapping_add(8), 0.055),
+            // Tuned for larger, calmer landmasses (more Minecraft-like):
+            // - lower mid/high frequencies => flatter plains and smoother biome edges
+            // - temperature/moisture frequencies kept similar => less striping
+            noise_terrain: Self::create_fbm_noise(seed.wrapping_add(1), 0.007),
+            noise_detail: Self::create_fbm_noise(seed.wrapping_add(2), 0.015),
+            noise_temperature: Self::create_noise(seed.wrapping_add(3), 0.006),
+            noise_moisture: Self::create_noise(seed.wrapping_add(4), 0.008),
+            noise_river: Self::create_noise(seed.wrapping_add(5), 0.055),
+            noise_lake: Self::create_noise(seed.wrapping_add(6), 0.022),
+            noise_trees: Self::create_noise(seed.wrapping_add(7), 0.12),
+            noise_island: Self::create_noise(seed.wrapping_add(8), 0.045),
             noise_cave1: Self::create_3d_noise(seed.wrapping_add(9), 0.025),
             noise_cave2: Self::create_3d_noise(seed.wrapping_add(10), 0.0192),
             noise_cave3: Self::create_3d_noise(seed.wrapping_add(11), 0.0128),
@@ -89,6 +93,7 @@ impl ChunkGenerator {
             noise_ridged: Self::create_ridged_noise(seed.wrapping_add(22), 0.006),
             noise_pv: Self::create_fbm_noise(seed.wrapping_add(23), 0.005),
             noise_decor: Self::create_noise(seed.wrapping_add(24), 0.13),
+            noise_ore: Self::create_3d_noise(seed.wrapping_add(25), 0.065),
             noise_cave_warp_x: Self::create_fbm_noise(seed.wrapping_add(30), 0.0218),
             noise_cave_warp_z: Self::create_fbm_noise(seed.wrapping_add(31), 0.014),
             noise_surface_entrance: Self::create_fbm_noise(seed.wrapping_add(40), 0.015),
@@ -256,8 +261,8 @@ impl ChunkGenerator {
                     }
 
                     if is_solid {
-                        let block =
-                            self.get_block_for_biome(biome, y, surface_height, world_x, world_z);
+                        let block = self.get_block_for_biome(biome, y, surface_height, world_x, world_z);
+                        let block = self.apply_stone_variants(world_x, y, world_z, block);
                         if block != BlockType::Air {
                             chunk.set_block(lx, y, lz, block);
                         }
@@ -1000,6 +1005,35 @@ impl ChunkGenerator {
                 }
             }
         }
+    }
+
+    fn apply_stone_variants(&self, world_x: i32, y: i32, world_z: i32, block: BlockType) -> BlockType {
+        if block != BlockType::Stone {
+            return block;
+        }
+        if y <= 6 || y >= WORLD_HEIGHT - 2 {
+            return block;
+        }
+
+        // Simple “veins” using existing block set:
+        // - Gravel pockets: common-ish mid-depth (adds variety to mining)
+        // - Clay pockets: rarer, a bit higher (keeps it special vs gravel)
+        let fx = world_x as f32;
+        let fy = y as f32;
+        let fz = world_z as f32;
+        let n = self.noise_ore.get_noise_3d(fx * 0.065, fy * 0.065, fz * 0.065);
+        let n2 = self
+            .noise_ore
+            .get_noise_3d(fx * 0.11 + 200.0, fy * 0.11 + 200.0, fz * 0.11 + 200.0);
+
+        if (18..=78).contains(&y) && n > 0.62 {
+            return BlockType::Gravel;
+        }
+        if (38..=66).contains(&y) && n2 > 0.70 {
+            return BlockType::Clay;
+        }
+
+        block
     }
 
     // ── Surface decorations ───────────────────────────────────────────────── //
