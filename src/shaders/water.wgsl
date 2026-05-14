@@ -6,6 +6,7 @@ const SSSR_MIN_STEPS:     i32 = 7;
 const SSSR_BINARY_STEPS:  i32 = 5;
 const SSSR_SAMPLE_COUNT:  i32 = 4;
 const SSSR_MAX_DISTANCE:  f32 = 80.0;
+const SSSR_MAX_DISTANCE_SQ: f32 = SSSR_MAX_DISTANCE * SSSR_MAX_DISTANCE;
 const SSSR_THICKNESS:     f32 = 0.06;
 const SSSR_EDGE_FADE:     f32 = 0.06;
 const SSSR_FADE_DISTANCE: f32 = 180.0;
@@ -13,6 +14,8 @@ const SSSR_CONE_ANGLE:    f32 = 0.040;
 
 const SHADOW_MAP_SIZE: f32 = 2048.0;
 const PCF_SAMPLES:     i32 = 8;
+const SHADOW_DISTANCE:    f32 = 96.0;
+const SHADOW_DISTANCE_SQ: f32 = SHADOW_DISTANCE * SHADOW_DISTANCE;
 
 const LOD_FAR: f32 = 300.0;
 
@@ -307,6 +310,7 @@ fn sssr_trace_ray(
     let dir  = normalize(refl_dir);
     var ray  = world_pos + dir * 0.3;
     var prev = ray;
+    var traveled = 0.3;
 
     var hit_uv   = vec2(0.0);
     var hit_conf = 0.0;
@@ -319,8 +323,9 @@ fn sssr_trace_ray(
         let step = 0.3 + fi * fi * 0.009;
         prev = ray;
         ray += dir * step;
+        traveled += step;
 
-        if length(ray - world_pos) > SSSR_MAX_DISTANCE { break; }
+        if traveled * traveled > SSSR_MAX_DISTANCE_SQ { break; }
 
         let clip = uniforms.view_proj * vec4(ray, 1.0);
         if clip.w <= 0.0 { break; }
@@ -349,13 +354,15 @@ fn sssr_trace_ray(
                 let fd  = abs(fn_.z - hit_depth);
                 if fd < SSSR_THICKNESS {
                     let hit_world = reconstruct_world(fu, hit_depth);
-                    let hit_view_dist = length(hit_world - uniforms.camera_pos);
+                    let hit_view_delta = hit_world - uniforms.camera_pos;
+                    let hit_view_dist_sq = dot(hit_view_delta, hit_view_delta);
+                    let min_hit_dist = max(water_view_dist - 0.35, 0.0);
 
                     // The opaque depth buffer contains foreground occluders too.
                     // If the SSR candidate is closer to the camera than this water
                     // fragment, it is usually an object standing between the camera
                     // and the water, not something the water surface should reflect.
-                    if hit_view_dist + 0.35 >= water_view_dist {
+                    if hit_view_dist_sq >= min_hit_dist * min_hit_dist {
                         hit_uv   = fu;
                         hit_conf = (1.0 - fd / SSSR_THICKNESS) * sssr_hit_stability(fu, hit_depth);
                         found    = true;
@@ -431,7 +438,8 @@ const POISSON8: array<vec2<f32>, 8> = array(
 fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
     if uniforms.shadows_enabled < 0.5 { return 1.0; }
     if sun_dir.y < 0.05 { return 0.0; }
-    if distance(world_pos.xz, uniforms.camera_pos.xz) > 96.0 { return 1.0; }
+    let shadow_delta = world_pos.xz - uniforms.camera_pos.xz;
+    if dot(shadow_delta, shadow_delta) > SHADOW_DISTANCE_SQ { return 1.0; }
 
     let shadow_pos = uniforms.csm_view_proj[0] * vec4(world_pos, 1.0);
     if shadow_pos.w <= 0.0 { return 1.0; }
@@ -468,7 +476,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let to_camera = uniforms.camera_pos - in.world_pos;
     let dist      = length(to_camera);
     let view_dir  = to_camera / dist;
-    let sun_dir   = normalize(uniforms.sun_position);
+    let sun_dir   = uniforms.sun_position;
     let day       = clamp(sun_dir.y, 0.0, 1.0);
     let t         = uniforms.time;
 
@@ -507,7 +515,10 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let shore_w = 1.0 - smoothstep(0.06, 0.95, thickness);
 
-    let flow = flow_vector(in.world_pos.xz, t);
+    var flow = vec2(0.0);
+    if shore_w > 0.001 {
+        flow = flow_vector(in.world_pos.xz, t);
+    }
 
     // Absorption coefficients (m^-1-ish). Red dies first; green/blue linger.
     let sigma_a = vec3<f32>(0.34, 0.080, 0.028);
@@ -568,7 +579,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // Use only the vertex wave normal for UV offsets. High-frequency normal/detail + flow
     // animates the sample every frame while the opaque texture is static → “double image”.
     let cos_v = cos_theta;
-    let n_refract = normalize(wave_n_raw);
+    let n_refract = wave_n_raw;
     let cos_v_refract = max(dot(view_dir, n_refract), 0.0);
 
     let dist_fade = clamp(1.0 - dist / 120.0, 0.0, 1.0);
@@ -624,16 +635,14 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
         water_color    += spec_color * spec * mix(0.055, 0.085, day) * shadow;
 
         if uniforms.moon_intensity > 0.01 && day < 0.2 {
-            let moon_dir  = normalize(uniforms.moon_position);
+            let moon_dir  = uniforms.moon_position;
             let spec_moon = min(ggx_spec_simple(normal, view_dir, moon_dir, 0.09), 1.0);
             water_color  += vec3(0.82, 0.88, 1.0) * spec_moon * uniforms.moon_intensity
                             * (1.0 - day) * 0.10;
         }
     }
 
-    let delta_xz = in.world_pos.xz - uniforms.camera_pos.xz;
-    let dist_xz  = sqrt(dot(delta_xz, delta_xz));
-    let fog_t    = clamp((dist_xz - FOG_NEAR) / (FOG_FAR - FOG_NEAR), 0.0, 1.0);
+    let fog_t    = clamp((dist - FOG_NEAR) / (FOG_FAR - FOG_NEAR), 0.0, 1.0);
     let fog_col  = mix(vec3(0.004, 0.010, 0.024), refl_color,
                        0.85 * day + 0.15 * (1.0 - day));
     water_color  = mix(water_color, fog_col, fog_t * fog_t);
