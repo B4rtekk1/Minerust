@@ -33,6 +33,7 @@ pub const MAX_MESH_BUILDS_PER_FRAME: usize = 8;
 pub const ASYNC_WORKER_COUNT: usize = 4;
 
 pub const PLAYER_HEIGHT: f32 = 1.8;
+pub const PLAYER_EYE_HEIGHT: f32 = 1.62;
 pub const PLAYER_CROUCH_HEIGHT: f32 = 1.7;
 pub const PLAYER_WIDTH: f32 = 0.35;
 pub const PLAYER_BASE_SPEED: f32 = 4.8;

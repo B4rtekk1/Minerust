@@ -210,7 +210,6 @@ pub fn update_network(
     if last_position_send.elapsed().as_millis() > 50 {
         *last_position_send = Instant::now();
 
-
         let pos_packet = Packet::Position {
             player_id: *my_player_id,
             x: camera_pos.x,
@@ -241,7 +240,11 @@ pub fn update_network(
         while let Ok(packet) = rx.try_recv() {
             match packet {
                 // ---- ConnectAck: server accepted or rejected our Connect ---- //
-                Packet::ConnectAck { success, player_id, seed } => {
+                Packet::ConnectAck {
+                    success,
+                    player_id,
+                    seed,
+                } => {
                     if success {
                         *my_player_id = player_id;
                         new_seed = Some(seed);

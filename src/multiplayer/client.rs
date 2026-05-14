@@ -176,7 +176,11 @@ impl GameClient {
 
                 let response = client.recv().await?;
                 match response {
-                    Packet::ConnectAck { success, player_id, seed } => {
+                    Packet::ConnectAck {
+                        success,
+                        player_id,
+                        seed,
+                    } => {
                         if success {
                             self.tcp_client = Some(client);
                             self.state = ConnectionState::Connected;

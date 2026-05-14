@@ -68,7 +68,7 @@ pub struct Uniforms {
     /// Interpreted as an integer enum in shaders:
     /// - `0.0` — no reflection
     /// - `1.0` — planar reflection
-    /// - `2.0` — screen-space reflection (SSR)
+    /// - `1.0` — stochastic screen-space reflection (SSSR)
     pub reflection_mode: f32,
 
     /// Normalized direction vector toward the moon `[x, y, z]` in world space.
@@ -99,8 +99,11 @@ pub struct Uniforms {
     /// Non-zero when runtime shadow rendering is enabled.
     pub shadows_enabled: f32,
 
-    /// Explicit padding so the uniform block size stays 16-byte aligned.
-    pub _pad2: [f32; 1],
+    /// Approximate fraction of open sky visible above the camera.
+    ///
+    /// `1.0` means the camera is outdoors, `0.0` means a solid ceiling blocks
+    /// the column above it. Terrain GI uses this to darken caves and tunnels.
+    pub sky_visibility: f32,
 }
 
 /// Small shadow-specific configuration uploaded separately from the main

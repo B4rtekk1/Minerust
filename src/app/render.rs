@@ -353,7 +353,7 @@ impl State {
                 _pad: 0.0,
                 rain_factor: 0.0,
                 shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
-                _pad2: [0.0; 1],
+                sky_visibility: self.sky_visibility,
             }]),
         );
         self.queue.write_buffer(

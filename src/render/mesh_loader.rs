@@ -1,6 +1,6 @@
 use crate::core::vertex::Vertex;
-use crate::world::generator::ChunkGenerator;
 use crate::world::World;
+use crate::world::generator::ChunkGenerator;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -88,7 +88,8 @@ impl MeshLoader {
                             continue;
                         };
 
-                        let meshes = World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
+                        let meshes =
+                            World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
 
                         if tx
                             .send(MeshResult {

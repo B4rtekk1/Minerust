@@ -5,12 +5,14 @@ use crate::core::block::BlockType;
 use crate::player::input::InputState;
 use crate::world::World;
 
+const JUMP_BUFFER_TIME: f32 = 0.14;
+
 /// First-person camera that doubles as the player's physical body.
 ///
 /// Owns the player's world-space position, look angles, and physics state.
 /// Movement, collision detection, and water interaction are all handled in
-/// [`Camera::update`]. The eye point is offset `+1.8` units above
-/// [`Self::position`] to simulate head height.
+/// [`Camera::update`]. The eye point is offset by [`PLAYER_EYE_HEIGHT`]
+/// above [`Self::position`].
 pub struct Camera {
     /// Foot-level world-space position of the player.
     ///
@@ -32,6 +34,9 @@ pub struct Camera {
     /// Switches the physics constants to underwater values (reduced gravity,
     /// lower speed, swim controls).
     pub in_water: bool,
+
+    /// Remaining time in which a recent jump press can trigger on landing.
+    pub jump_buffer_timer: f32,
 }
 
 impl Camera {
@@ -47,6 +52,7 @@ impl Camera {
             velocity: Vec3::ZERO,
             on_ground: false,
             in_water: false,
+            jump_buffer_timer: 0.0,
         }
     }
 
@@ -72,7 +78,11 @@ impl Camera {
     }
 
     pub fn eye_position(&self) -> Vec3 {
-        Vec3::new(self.position.x, self.position.y + 1.8, self.position.z)
+        Vec3::new(
+            self.position.x,
+            self.position.y + PLAYER_EYE_HEIGHT,
+            self.position.z,
+        )
     }
 
     pub fn view_matrix(&self) -> Mat4 {
@@ -118,7 +128,7 @@ impl Camera {
     /// 1. Detects water submersion via [`Camera::check_in_water`].
     /// 2. Select physics constants (speed, gravity, drag) based on water state and sprint input.
     /// 3. Accumulates a movement direction from `input` and scales it to `base_speed`.
-    /// 4. Applies gravity, jump impulse, and drag.
+    /// 4. Applies gravity, buffered jump impulse, and drag.
     /// 5. Resolves collisions on each axis independently using [`Camera::check_collision`].
     /// 6. Clamps Y to a minimum of `1.0` to prevent falling out of the world.
     ///
@@ -128,6 +138,14 @@ impl Camera {
     /// - `input` — current frame's digital input state.
     pub fn update(&mut self, world: &World, dt: f32, input: &InputState) {
         self.in_water = self.check_in_water(world);
+
+        if self.in_water {
+            self.jump_buffer_timer = 0.0;
+        } else if input.jump {
+            self.jump_buffer_timer = JUMP_BUFFER_TIME;
+        } else {
+            self.jump_buffer_timer = (self.jump_buffer_timer - dt).max(0.0);
+        }
 
         let (base_speed, gravity, max_fall_speed, jump_velocity, horizontal_drag, vertical_drag) =
             if self.in_water {
@@ -169,7 +187,7 @@ impl Camera {
         self.velocity.z = move_dir.z * horizontal_drag;
 
         if self.in_water {
-            if input.jump {
+            if input.jump_held {
                 self.velocity.y = jump_velocity;
             } else if input.sprint {
                 self.velocity.y = -jump_velocity;
@@ -179,9 +197,10 @@ impl Camera {
             }
             self.velocity.y = self.velocity.y.clamp(-max_fall_speed * 2.0, jump_velocity);
         } else {
-            if input.jump && self.on_ground {
+            if self.jump_buffer_timer > 0.0 && self.on_ground {
                 self.velocity.y = jump_velocity;
                 self.on_ground = false;
+                self.jump_buffer_timer = 0.0;
             }
             self.velocity.y -= gravity * dt;
             self.velocity.y = self.velocity.y.max(-max_fall_speed);
@@ -209,8 +228,16 @@ impl Camera {
         } else {
             if self.velocity.y < 0.0 {
                 self.on_ground = true;
+            } else if self.velocity.y > 0.0 {
+                self.position.y = self.ceiling_limited_y(world, new_pos.y);
             }
             self.velocity.y = 0.0;
+        }
+
+        if !self.in_water && self.on_ground && self.jump_buffer_timer > 0.0 {
+            self.velocity.y = jump_velocity;
+            self.on_ground = false;
+            self.jump_buffer_timer = 0.0;
         }
 
         self.position.y = self.position.y.max(1.0);
@@ -246,6 +273,25 @@ impl Camera {
             }
         }
         false
+    }
+
+    fn ceiling_limited_y(&self, world: &World, attempted_y: f32) -> f32 {
+        let player_width = PLAYER_WIDTH;
+        let min_x = (self.position.x - player_width).floor() as i32;
+        let max_x = (self.position.x + player_width).floor() as i32;
+        let min_z = (self.position.z - player_width).floor() as i32;
+        let max_z = (self.position.z + player_width).floor() as i32;
+        let head_y = (attempted_y + PLAYER_HEIGHT).floor() as i32;
+
+        for bx in min_x..=max_x {
+            for bz in min_z..=max_z {
+                if world.is_solid(bx, head_y, bz) {
+                    return (head_y as f32 - PLAYER_HEIGHT - 0.01).max(1.0);
+                }
+            }
+        }
+
+        self.position.y
     }
 
     /// Returns `true` if the player's current AABB intersects the block at `(bx, by, bz)`.

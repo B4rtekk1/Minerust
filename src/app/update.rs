@@ -154,7 +154,9 @@ impl State {
                         break;
                     }
                 }
-                if !chunks_loaded { break; }
+                if !chunks_loaded {
+                    break;
+                }
             }
 
             if chunks_loaded {
@@ -204,14 +206,22 @@ impl State {
                 eye_pos.y.floor() as i32,
                 eye_pos.z.floor() as i32,
             );
+            let sky_visibility = world.sky_visibility_at(
+                eye_pos.x.floor() as i32,
+                eye_pos.y.floor() as i32,
+                eye_pos.z.floor() as i32,
+            );
 
             WorldSnapshot {
                 missing_chunks,
                 raycast_result,
                 target_block,
                 eye_block,
+                sky_visibility,
             }
         }; // Read lock released here.
+
+        self.input.jump = false;
 
         self.highlighted_block = snapshot
             .raycast_result
@@ -337,6 +347,8 @@ impl State {
         } else {
             0.0
         };
+        let sky_blend = 1.0 - (-dt * 8.0).exp();
+        self.sky_visibility += (snapshot.sky_visibility - self.sky_visibility) * sky_blend;
 
         self.update_coords_ui();
 
@@ -499,13 +511,16 @@ impl State {
                 // face-culling hides all geometry. Move the local player to the surface
                 // of the nearest chunks at spawn if we are switching servers.
                 // We fallback to Y=255.0 to allow gravity to pull them down safely.
-                self.camera.position = glam::Vec3::new(0.0, minerust::constants::WORLD_HEIGHT as f32 - 1.0, 0.0);
+                self.camera.position =
+                    glam::Vec3::new(0.0, minerust::constants::WORLD_HEIGHT as f32 - 1.0, 0.0);
             }
             // Clear rendering buffers and loaders to match the empty world
             self.chunk_loader = minerust::ChunkLoader::new(seed);
             self.mesh_loader = minerust::MeshLoader::new(
                 self.world.clone(),
-                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(2),
             );
             self.indirect_manager.clear_gpu_data(&self.queue);
             self.water_indirect_manager.clear_gpu_data(&self.queue);

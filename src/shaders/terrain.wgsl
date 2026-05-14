@@ -7,6 +7,19 @@ struct Uniforms {
     time:                f32,
     sun_position:        vec3<f32>,
     is_underwater:       f32,
+    screen_size:         vec2<f32>,
+    water_level:         f32,
+    reflection_mode:     f32,
+    moon_position:       vec3<f32>,
+    _pad1_moon:          f32,
+    moon_intensity:      f32,
+    wind_dir_x:          f32,
+    wind_dir_z:          f32,
+    wind_speed:          f32,
+    _pad:                f32,
+    rain_factor:         f32,
+    shadows_enabled:     f32,
+    sky_visibility:      f32,
 };
 
 struct ShadowConfig {
@@ -60,34 +73,33 @@ fn sample_cascade_pcf(
     cascade_idx:   i32,
     bias:          f32,
     rotation:      f32,
-    is_last:       bool,
 ) -> f32 {
     let sp = uniforms.csm_view_proj[cascade_idx] * vec4<f32>(world_pos, 1.0);
+    if sp.w <= 0.0 { return 1.0; }
+
     let sc = sp.xyz / sp.w;
     let uv = vec2<f32>(sc.x * 0.5 + 0.5, 1.0 - (sc.y * 0.5 + 0.5));
-
-    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
-        return 1.0;
-    }
-
-    let em = 0.05;
-    let edge_fade = smoothstep(0.0, em, uv.x) * (1.0 - smoothstep(1.0 - em, 1.0, uv.x))
-                  * smoothstep(0.0, em, uv.y) * (1.0 - smoothstep(1.0 - em, 1.0, uv.y));
+    if sc.z < 0.0 || sc.z > 1.0 { return 1.0; }
 
     let pcf_samples = min(i32(shadow_config.pcf_samples), MAX_PCF_SAMPLES);
+    if pcf_samples <= 0 { return 1.0; }
+
     var shadow = 0.0;
     let shadow_map_size = max(shadow_config.shadow_map_size, 1.0);
     let cascade_filter_texels = array<f32, 4>(1.15, 1.45, 1.85, 2.35);
     let filter_radius = cascade_filter_texels[cascade_idx] / shadow_map_size;
+    let texel = 1.0 / shadow_map_size;
     let depth_ref = clamp(sc.z - bias, 0.0, 1.0);
+    let edge_dist = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    let edge_fade = smoothstep(0.0, filter_radius + texel, edge_dist);
 
     for (var i = 0; i < pcf_samples; i++) {
-        let suv = uv + get_poisson_sample(i, rotation) * filter_radius;
-        if any(suv < vec2<f32>(0.0)) || any(suv > vec2<f32>(1.0)) {
-            shadow += 1.0;
-        } else {
-            shadow += textureSampleCompareLevel(shadow_map, shadow_sampler, suv, cascade_idx, depth_ref);
-        }
+        let suv = clamp(
+            uv + get_poisson_sample(i, rotation) * filter_radius,
+            vec2<f32>(texel),
+            vec2<f32>(1.0 - texel),
+        );
+        shadow += textureSampleCompareLevel(shadow_map, shadow_sampler, suv, cascade_idx, depth_ref);
     }
 
     return mix(1.0, shadow / f32(pcf_samples), edge_fade);
@@ -112,6 +124,49 @@ fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
     return vec2<f32>(3.0, 0.0);
 }
 
+fn fast_global_illumination(
+    normal:          vec3<f32>,
+    sun_dir:         vec3<f32>,
+    day_factor:      f32,
+    twilight_factor: f32,
+) -> vec3<f32> {
+    let sky_visibility    = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    let ground_visibility = clamp(0.5 - normal.y * 0.5, 0.0, 1.0);
+    let side_visibility   = 1.0 - abs(normal.y);
+
+    let sky_day      = vec3<f32>(0.50, 0.62, 0.78);
+    let sky_twilight = vec3<f32>(0.96, 0.48, 0.24);
+    let sky_night    = vec3<f32>(0.018, 0.024, 0.052);
+    let sky_color = mix(
+        mix(sky_night, sky_day, day_factor),
+        sky_twilight,
+        twilight_factor * 0.45,
+    );
+
+    let ground_night = vec3<f32>(0.020, 0.018, 0.020);
+    let ground_day   = vec3<f32>(0.26, 0.24, 0.19);
+    let grass_bleed  = vec3<f32>(0.08, 0.13, 0.06) * day_factor;
+    let ground_color = mix(ground_night, ground_day, day_factor) + grass_bleed;
+
+    let sky_energy    = mix(0.035, 0.27, day_factor) + twilight_factor * 0.08;
+    let ground_energy = mix(0.010, 0.070, day_factor) + twilight_factor * 0.020;
+
+    let sky_light = sky_color * sky_energy * (0.35 + 0.65 * sky_visibility);
+    let ground_light = ground_color
+        * ground_energy
+        * (ground_visibility + side_visibility * 0.35);
+
+    let bounce_dir = normalize(vec3<f32>(-sun_dir.x, 0.32, -sun_dir.z));
+    let wrap_bounce = pow(clamp(dot(normal, bounce_dir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
+    let sun_bounce = vec3<f32>(1.0, 0.78, 0.48)
+        * wrap_bounce
+        * side_visibility
+        * day_factor
+        * 0.045;
+
+    return sky_light + ground_light + sun_bounce;
+}
+
 fn calculate_shadow(
     world_pos:  vec3<f32>,
     normal:     vec3<f32>,
@@ -131,11 +186,12 @@ fn calculate_shadow(
     let cascade_bias_scale = array<f32, 4>(1.0, 1.2, 1.45, 1.75);
     let base_bias = clamp(0.00035 + 0.0012 * sin_t / max(cos_t, 0.10), 0.00035, 0.0035);
 
-    let shadow_a = sample_cascade_pcf(world_pos, ci, base_bias * cascade_bias_scale[ci], rot, ci == 3);
+    let shadow_a = sample_cascade_pcf(world_pos, ci, base_bias * cascade_bias_scale[ci], rot);
 
     if cb.y > 0.001 && ci < 3 {
         let next_ci = ci + 1;
-        let shadow_b = sample_cascade_pcf(world_pos, next_ci, base_bias * cascade_bias_scale[next_ci], rot, next_ci == 3);
+        let shadow_b =
+            sample_cascade_pcf(world_pos, next_ci, base_bias * cascade_bias_scale[next_ci], rot);
         return mix(shadow_a, shadow_b, cb.y);
     }
     return shadow_a;
@@ -254,24 +310,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let day_factor      = clamp(sun_dir.y, 0.0, 1.0);
     let twilight_factor = smoothstep(-0.1, 0.15, sun_dir.y) * smoothstep(0.4, 0.0, sun_dir.y);
 
-    let ambient = max(
-        mix(0.005, 0.38, day_factor),
-        0.18 * twilight_factor,
-    );
-
     let normal = normalize(in.normal);
 
-    let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.55 * shadow * day_factor;
+    let indirect_light = fast_global_illumination(
+        normal,
+        sun_dir,
+        day_factor,
+        twilight_factor,
+    );
+
+    let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
+    let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * shadow * day_factor;
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
-    let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.08 * day_factor;
+    let fill_diff = max(dot(normal, fill_dir), 0.0)
+        * 0.045
+        * day_factor;
 
     var face_shade: f32;
     if      abs(normal.y) > 0.5 { face_shade = select(0.5, 1.0, normal.y > 0.0); }
     else if abs(normal.x) > 0.5 { face_shade = 0.7; }
     else                        { face_shade = 0.8; }
 
-    let total_light = (ambient + sun_diff + fill_diff) * face_shade;
-    var lit = tex.rgb * total_light;
+    let face_contrast = mix(0.82, 1.0, face_shade);
+    let total_light =
+        (indirect_light + sun_color * sun_diff + vec3<f32>(0.58, 0.68, 0.82) * fill_diff)
+        * face_contrast;
+    var lit = tex.rgb * total_light * in.color;
 
     let sunset_factor = 1.0 - abs(sun_dir.y);
     if sunset_factor > 0.3 && sun_dir.y > -0.2 {

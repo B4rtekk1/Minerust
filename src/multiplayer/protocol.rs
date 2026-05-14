@@ -162,7 +162,11 @@ impl Packet {
                 buf.extend_from_slice(&player_id.to_le_bytes());
                 write_string(&mut buf, username);
             }
-            Packet::ConnectAck { success, player_id, seed } => {
+            Packet::ConnectAck {
+                success,
+                player_id,
+                seed,
+            } => {
                 buf.push(if *success { 1 } else { 0 });
                 buf.extend_from_slice(&player_id.to_le_bytes());
                 buf.extend_from_slice(&seed.to_le_bytes());

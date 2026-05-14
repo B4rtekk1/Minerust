@@ -4,6 +4,7 @@ pub struct InputState {
     pub backward: bool,
     pub left: bool,
     pub right: bool,
+    pub jump_held: bool,
     pub jump: bool,
     pub sprint: bool,
     pub left_mouse: bool,

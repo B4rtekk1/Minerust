@@ -68,6 +68,7 @@ const MESH_CACHE_PAD: usize = 1;
 const MESH_CACHE_SIZE: usize = CHUNK_SIZE as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_HEIGHT: usize = SUBCHUNK_HEIGHT as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_LEN: usize = MESH_CACHE_SIZE * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE;
+const MESH_SKY_CACHE_LEN: usize = MESH_CACHE_SIZE * MESH_CACHE_SIZE;
 
 #[derive(Clone)]
 pub struct SubchunkMeshSnapshot {
@@ -76,6 +77,7 @@ pub struct SubchunkMeshSnapshot {
     pub subchunk_y: i32,
     pub has_blocks: bool,
     pub block_cache: [BlockType; MESH_CACHE_LEN],
+    pub sky_height_cache: [i16; MESH_SKY_CACHE_LEN],
 }
 
 impl World {
@@ -336,6 +338,34 @@ impl World {
         self.get_block(x, y, z).is_solid()
     }
 
+    /// Estimates how much sky light reaches a point from directly above.
+    ///
+    /// This is intentionally cheap and camera-centric: terrain lighting still
+    /// runs per fragment on the GPU, while this value tells the shader whether
+    /// the current area is broadly outdoors or under a solid ceiling.
+    pub fn sky_visibility_at(&self, x: i32, y: i32, z: i32) -> f32 {
+        const SAMPLE_OFFSETS: [(i32, i32); 5] = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)];
+
+        let start_y = (y + 1).clamp(0, WORLD_HEIGHT);
+        let mut visibility_sum = 0.0;
+
+        for (dx, dz) in SAMPLE_OFFSETS {
+            let mut column_visibility = 1.0;
+
+            for sample_y in start_y..WORLD_HEIGHT {
+                let block = self.get_block(x + dx, sample_y, z + dz);
+                if block.is_solid_opaque() {
+                    column_visibility = 0.0;
+                    break;
+                }
+            }
+
+            visibility_sum += column_visibility;
+        }
+
+        visibility_sum / SAMPLE_OFFSETS.len() as f32
+    }
+
     // ── Occlusion culling ─────────────────────────────────────────────────── //
 
     /// Returns `true` if sub-chunk `(cx, cz, sy)` is fully occluded and can
@@ -486,17 +516,14 @@ impl World {
     /// | 4 | −Z | Z | X | Y |
     /// | 5 | +Z | Z | X | Y |
     ///
-    /// ## Color and texture selection
+    /// ## Lighting and texture selection
     ///
-    /// Face color is chosen per-direction:
-    /// - Bottom face (dir 2): `block.bottom_color()`.
-    /// - Top face (dir 3): biome grass color for Grass blocks; `block.top_color()` otherwise.
-    /// - Side faces (dirs 0, 1, 4, 5): biome leaves color for Leaves; `block.color()` otherwise.
+    /// The packed vertex color stores a coarse local GI tint rather than
+    /// material albedo. It is derived from whether the exposed air cell can see
+    /// the sky and how open the nearby voxel neighborhood is. Texture color
+    /// still comes from the atlas.
     ///
-    /// Biome lookups are cached in `biome_map` (a 16×16 grid of `Option<Biome>`)
-    /// so each XZ column is queried at most once per sub-chunk mesh build.
-    ///
-    /// Colors are quantized to 6 bits per channel (`& 0xFC`) before storage
+    /// GI colors are quantized to 6 bits per channel (`& 0xFC`) before storage
     /// in `FaceAttrs` so that floating-point rounding noise doesn't prevent
     /// adjacent faces from being merged.
     ///
@@ -524,6 +551,7 @@ impl World {
         let base_z = chunk_z * CHUNK_SIZE;
 
         let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
+        let mut sky_height_cache = [-1i16; MESH_SKY_CACHE_LEN];
         let mut has_blocks = false;
 
         for px in 0..MESH_CACHE_SIZE as i32 {
@@ -566,12 +594,33 @@ impl World {
             }
         }
 
+        if has_blocks {
+            for px in 0..MESH_CACHE_SIZE as i32 {
+                for pz in 0..MESH_CACHE_SIZE as i32 {
+                    let wx = base_x + px - MESH_CACHE_PAD as i32;
+                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
+                    let mut highest_opaque = -1i16;
+
+                    for wy in (0..WORLD_HEIGHT).rev() {
+                        if self.get_block(wx, wy, wz).is_solid_opaque() {
+                            highest_opaque = wy as i16;
+                            break;
+                        }
+                    }
+
+                    sky_height_cache[(px as usize) * MESH_CACHE_SIZE + pz as usize] =
+                        highest_opaque;
+                }
+            }
+        }
+
         Some(SubchunkMeshSnapshot {
             chunk_x,
             chunk_z,
             subchunk_y,
             has_blocks,
             block_cache,
+            sky_height_cache,
         })
     }
 
@@ -590,7 +639,7 @@ impl World {
     }
 
     pub fn build_subchunk_mesh_from_snapshot(
-        generator: &ChunkGenerator,
+        _generator: &ChunkGenerator,
         snapshot: &SubchunkMeshSnapshot,
     ) -> ((Vec<Vertex>, Vec<u32>), (Vec<Vertex>, Vec<u32>)) {
         let mut vertices = Vec::with_capacity(4096);
@@ -630,14 +679,112 @@ impl World {
             get_block_fast(wx - base_x, wy - base_y, wz - base_z)
         };
 
-        // Biome cache: queried lazily, at most once per XZ column.
-        let mut biome_map: [[Option<Biome>; CHUNK_SIZE as usize]; CHUNK_SIZE as usize] =
-            [[None; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
+        let get_block_world_safe = |wx: i32, wy: i32, wz: i32| -> BlockType {
+            if !(0..WORLD_HEIGHT).contains(&wy) {
+                return BlockType::Air;
+            }
+
+            let px = wx - base_x + PAD as i32;
+            let py = wy - base_y + PAD as i32;
+            let pz = wz - base_z + PAD as i32;
+
+            if px < 0 || px >= S as i32 || py < 0 || py >= SH as i32 || pz < 0 || pz >= S as i32 {
+                return BlockType::Air;
+            }
+
+            block_cache[(px as usize) * SH * S + (py as usize) * S + pz as usize]
+        };
+
+        let sky_open_column = |wx: i32, wy: i32, wz: i32| -> f32 {
+            let px = wx - base_x + PAD as i32;
+            let pz = wz - base_z + PAD as i32;
+
+            if px < 0 || px >= S as i32 || pz < 0 || pz >= S as i32 {
+                return 1.0;
+            }
+
+            let highest_opaque = snapshot.sky_height_cache[(px as usize) * S + pz as usize];
+            if highest_opaque < 0 || wy >= highest_opaque as i32 {
+                1.0
+            } else {
+                0.0
+            }
+        };
+
+        let sample_sky_aperture = |wx: i32, wy: i32, wz: i32| -> f32 {
+            const SKY_OFFSETS: [(i32, i32, f32); 5] = [
+                (0, 0, 0.52),
+                (1, 0, 0.12),
+                (-1, 0, 0.12),
+                (0, 1, 0.12),
+                (0, -1, 0.12),
+            ];
+
+            let mut sky = 0.0;
+            let mut weight = 0.0;
+
+            for (dx, dz, w) in SKY_OFFSETS {
+                sky += sky_open_column(wx + dx, wy, wz + dz) * w;
+                weight += w;
+            }
+
+            sky / weight
+        };
+
+        let sample_local_openness = |wx: i32, wy: i32, wz: i32| -> f32 {
+            const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
+                (-1, 0, 0),
+                (1, 0, 0),
+                (0, -1, 0),
+                (0, 1, 0),
+                (0, 0, -1),
+                (0, 0, 1),
+            ];
+
+            let mut open = 0.0;
+            for (dx, dy, dz) in NEIGHBOR_OFFSETS {
+                if get_block_world_safe(wx + dx, wy + dy, wz + dz).is_transparent() {
+                    open += 1.0;
+                }
+            }
+
+            open / NEIGHBOR_OFFSETS.len() as f32
+        };
+
+        let face_gi_tint = |face_dir: i32, wx: i32, wy: i32, wz: i32| -> [f32; 3] {
+            let (sx, sy, sz) = match face_dir {
+                0 => (wx - 1, wy, wz),
+                1 => (wx + 1, wy, wz),
+                2 => (wx, wy - 1, wz),
+                3 => (wx, wy + 1, wz),
+                4 => (wx, wy, wz - 1),
+                5 => (wx, wy, wz + 1),
+                _ => unreachable!(),
+            };
+
+            let sky = sample_sky_aperture(sx, sy, sz);
+            let openness = sample_local_openness(sx, sy, sz);
+            let facing_sky = match face_dir {
+                3 => 0.95,
+                0 | 1 | 4 | 5 => 0.68,
+                2 => 0.24,
+                _ => 0.0,
+            };
+            let bounce = sky * openness;
+            let energy =
+                (0.13 + sky * facing_sky * 0.86 + bounce * 0.20 + openness * 0.05).clamp(0.10, 1.0);
+
+            [
+                energy * (0.88 + sky * 0.08 + bounce * 0.04),
+                energy * (0.91 + sky * 0.06 + bounce * 0.03),
+                energy * (0.98 + sky * 0.02),
+            ]
+        };
 
         // ── FaceAttrs: per-cell data stored in the greedy mask ────────────── //
-        // Two faces can be merged only when all fields are equal, so colors
-        // are pre-quantized (see `quantize_color`) to suppress floating-point
-        // rounding noise that would otherwise prevent merging.
+        // Two faces can be merged only when all fields are equal, so local GI
+        // tints are pre-quantized (see `quantize_color`) to suppress
+        // floating-point rounding noise that would otherwise prevent merging.
         #[derive(Clone, Copy, PartialEq)]
         struct FaceAttrs {
             block: BlockType,
@@ -698,7 +845,12 @@ impl World {
                         let x = world_x as f32;
                         let y_f = y as f32;
                         let z = world_z as f32;
-                        let color = block.color();
+                        let light_neg_x = face_gi_tint(0, world_x, y, world_z);
+                        let light_pos_x = face_gi_tint(1, world_x, y, world_z);
+                        let light_neg_y = face_gi_tint(2, world_x, y, world_z);
+                        let light_pos_y = face_gi_tint(3, world_x, y, world_z);
+                        let light_neg_z = face_gi_tint(4, world_x, y, world_z);
+                        let light_pos_z = face_gi_tint(5, world_x, y, world_z);
                         let tex_top = block.tex_top();
                         let tex_side = block.tex_side();
                         let r = block.roughness();
@@ -723,7 +875,7 @@ impl World {
                                 [x + 1.0, y_f, z],
                                 [x + 1.0, y_f, z + 1.0],
                                 [0.0, -1.0, 0.0],
-                                color,
+                                light_neg_y,
                                 tex_top,
                                 r,
                                 m,
@@ -739,7 +891,7 @@ impl World {
                             [x + 1.0, y_f + 0.5, z + 0.5],
                             [x + 1.0, y_f + 0.5, z],
                             [0.0, 1.0, 0.0],
-                            color,
+                            light_pos_y,
                             tex_top,
                             r,
                             m,
@@ -754,7 +906,7 @@ impl World {
                                 [x + 1.0, y_f + 1.0, z + 1.0],
                                 [x + 1.0, y_f + 1.0, z + 0.5],
                                 [0.0, 1.0, 0.0],
-                                color,
+                                light_pos_y,
                                 tex_top,
                                 r,
                                 m,
@@ -770,7 +922,7 @@ impl World {
                                 [x, y_f + 0.5, z],
                                 [x + 1.0, y_f + 0.5, z],
                                 [0.0, 0.0, -1.0],
-                                color,
+                                light_neg_z,
                                 tex_side,
                                 r,
                                 m,
@@ -786,7 +938,7 @@ impl World {
                             [x, y_f + 1.0, z + 0.5],
                             [x + 1.0, y_f + 1.0, z + 0.5],
                             [0.0, 0.0, -1.0],
-                            color,
+                            light_neg_z,
                             tex_side,
                             r,
                             m,
@@ -801,7 +953,7 @@ impl World {
                                 [x + 1.0, y_f + 1.0, z + 1.0],
                                 [x, y_f + 1.0, z + 1.0],
                                 [0.0, 0.0, 1.0],
-                                color,
+                                light_pos_z,
                                 tex_side,
                                 r,
                                 m,
@@ -817,7 +969,7 @@ impl World {
                                 [x, y_f + 0.5, z + 1.0],
                                 [x, y_f + 0.5, z],
                                 [-1.0, 0.0, 0.0],
-                                color,
+                                light_neg_x,
                                 tex_side,
                                 r,
                                 m,
@@ -830,7 +982,7 @@ impl World {
                                 [x, y_f + 1.0, z + 1.0],
                                 [x, y_f + 1.0, z + 0.5],
                                 [-1.0, 0.0, 0.0],
-                                color,
+                                light_neg_x,
                                 tex_side,
                                 r,
                                 m,
@@ -846,7 +998,7 @@ impl World {
                                 [x + 1.0, y_f + 0.5, z],
                                 [x + 1.0, y_f + 0.5, z + 1.0],
                                 [1.0, 0.0, 0.0],
-                                color,
+                                light_pos_x,
                                 tex_side,
                                 r,
                                 m,
@@ -859,7 +1011,7 @@ impl World {
                                 [x + 1.0, y_f + 1.0, z + 0.5],
                                 [x + 1.0, y_f + 1.0, z + 1.0],
                                 [1.0, 0.0, 0.0],
-                                color,
+                                light_pos_x,
                                 tex_side,
                                 r,
                                 m,
@@ -954,42 +1106,7 @@ impl World {
                             continue;
                         }
 
-                        // Biome lookup: only needed for Grass and Leaves.
-                        let needs_biome = block == BlockType::Grass || block == BlockType::Leaves;
-                        let biome = if needs_biome {
-                            let lx_idx = lx as usize;
-                            let lz_idx = lz as usize;
-                            if biome_map[lx_idx][lz_idx].is_none() {
-                                biome_map[lx_idx][lz_idx] =
-                                    Some(generator.get_biome(world_x, world_z));
-                            }
-                            biome_map[lx_idx][lz_idx]
-                        } else {
-                            None
-                        };
-
-                        // Select the face color based on direction and block type.
-                        let color = match face_dir {
-                            2 => block.bottom_color(), // bottom face
-                            3 => {
-                                // Top face: grass uses biome colour.
-                                if block == BlockType::Grass {
-                                    biome.map(|b| b.grass_color()).unwrap_or([0.4, 0.8, 0.2])
-                                } else {
-                                    block.top_color()
-                                }
-                            }
-                            _ => {
-                                // Side face: leaves use biome color.
-                                if block == BlockType::Grass {
-                                    block.color()
-                                } else if block == BlockType::Leaves {
-                                    biome.map(|b| b.leaves_color()).unwrap_or([0.2, 0.6, 0.2])
-                                } else {
-                                    block.color()
-                                }
-                            }
-                        };
+                        let gi_tint = face_gi_tint(face_dir, world_x, y, world_z);
 
                         // Select the atlas texture index by face direction.
                         let tex_index = match face_dir {
@@ -1001,7 +1118,7 @@ impl World {
                         let idx = (d1 * dim2_size + d2) as usize;
                         mask[idx] = FaceAttrs {
                             block,
-                            color: quantize_color(color),
+                            color: quantize_color(gi_tint),
                             tex_index: tex_index as u8,
                             is_active: true,
                         };

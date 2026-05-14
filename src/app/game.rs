@@ -92,7 +92,7 @@ struct Args {
 /// | F5 | Save world to disk. |
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
-/// | R | Cycle water reflection mode (Off → SSR). |
+/// | R | Cycle water reflection mode (Off -> SSSR). |
 /// | H | Toggle shadows on/off. |
 ///
 /// # Key bindings (menu)
@@ -247,6 +247,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 KeyEvent {
                                     physical_key: PhysicalKey::Code(key),
                                     state: key_state,
+                                    repeat,
                                     text,
                                     ..
                                 },
@@ -321,7 +322,12 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::KeyS => state.input.backward = pressed,
                             KeyCode::KeyA => state.input.left = pressed,
                             KeyCode::KeyD => state.input.right = pressed,
-                            KeyCode::Space => state.input.jump = pressed,
+                            KeyCode::Space => {
+                                state.input.jump_held = pressed;
+                                if pressed && !repeat {
+                                    state.input.jump = true;
+                                }
+                            }
                             KeyCode::ShiftLeft => state.input.sprint = pressed,
 
                             KeyCode::Escape if pressed => {
@@ -347,13 +353,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             KeyCode::KeyR if pressed => {
-                                // Cycle: 0 = Off, 1 = SSR.  Wraps with modulo
+                                // Cycle: 0 = Off, 1 = SSSR. Wraps with modulo
                                 // so adding more modes in the future only
                                 // requires extending the match arm below.
                                 state.reflection_mode = (state.reflection_mode + 1) % 2;
                                 let mode_name = match state.reflection_mode {
                                     0 => "Off",
-                                    1 => "SSR",
+                                    1 => "SSSR",
                                     _ => "Unknown",
                                 };
                                 log(LogLevel::Info, &format!("Reflection mode: {}", mode_name));

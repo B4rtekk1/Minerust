@@ -57,7 +57,10 @@ pub async fn run_dedicated_server(addr: &str) {
             let _ = std::io::Write::flush(&mut std::io::stdout());
 
             let server_seed: u32 = rand::random();
-            log(LogLevel::Info, &format!("Server world seed: {}", server_seed));
+            log(
+                LogLevel::Info,
+                &format!("Server world seed: {}", server_seed),
+            );
 
             // Runs on the calling task forever.  Each accepted connection is
             // handed off to a new Tokio task so `accept` is free to resume

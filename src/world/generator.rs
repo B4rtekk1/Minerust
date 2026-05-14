@@ -261,7 +261,8 @@ impl ChunkGenerator {
                     }
 
                     if is_solid {
-                        let block = self.get_block_for_biome(biome, y, surface_height, world_x, world_z);
+                        let block =
+                            self.get_block_for_biome(biome, y, surface_height, world_x, world_z);
                         let block = self.apply_stone_variants(world_x, y, world_z, block);
                         if block != BlockType::Air {
                             chunk.set_block(lx, y, lz, block);
@@ -906,6 +907,7 @@ impl ChunkGenerator {
 
         let depth_from_surface = surface_height - y;
         let dirt_depth = 3 + (self.position_hash(world_x, world_z) % 3) as i32;
+        let underwater_surface = y == surface_height - 1 && y < SEA_LEVEL;
 
         match biome {
             Biome::Ocean | Biome::River | Biome::Lake => {
@@ -923,7 +925,9 @@ impl ChunkGenerator {
                 } else if depth_from_surface > 0 {
                     BlockType::Sand
                 } else if y == surface_height - 1 {
-                    if biome == Biome::Island && y > SEA_LEVEL + 2 {
+                    if underwater_surface {
+                        BlockType::Sand
+                    } else if biome == Biome::Island && y > SEA_LEVEL + 2 {
                         BlockType::Grass
                     } else {
                         BlockType::Sand
@@ -973,7 +977,11 @@ impl ChunkGenerator {
                 } else if depth_from_surface > 1 {
                     BlockType::Dirt
                 } else if y == surface_height - 1 {
-                    BlockType::Grass
+                    if underwater_surface {
+                        BlockType::Gravel
+                    } else {
+                        BlockType::Grass
+                    }
                 } else {
                     BlockType::Air
                 }
@@ -984,7 +992,7 @@ impl ChunkGenerator {
                 } else if depth_from_surface > 1 {
                     BlockType::Dirt
                 } else if y == surface_height - 1 {
-                    if y <= SEA_LEVEL + 1 {
+                    if underwater_surface || y <= SEA_LEVEL + 1 {
                         BlockType::Clay
                     } else {
                         BlockType::Grass
@@ -999,7 +1007,11 @@ impl ChunkGenerator {
                 } else if depth_from_surface > 1 {
                     BlockType::Dirt
                 } else if y == surface_height - 1 {
-                    BlockType::Grass
+                    if underwater_surface {
+                        BlockType::Sand
+                    } else {
+                        BlockType::Grass
+                    }
                 } else {
                     BlockType::Air
                 }
@@ -1007,7 +1019,13 @@ impl ChunkGenerator {
         }
     }
 
-    fn apply_stone_variants(&self, world_x: i32, y: i32, world_z: i32, block: BlockType) -> BlockType {
+    fn apply_stone_variants(
+        &self,
+        world_x: i32,
+        y: i32,
+        world_z: i32,
+        block: BlockType,
+    ) -> BlockType {
         if block != BlockType::Stone {
             return block;
         }
@@ -1021,10 +1039,12 @@ impl ChunkGenerator {
         let fx = world_x as f32;
         let fy = y as f32;
         let fz = world_z as f32;
-        let n = self.noise_ore.get_noise_3d(fx * 0.065, fy * 0.065, fz * 0.065);
-        let n2 = self
+        let n = self
             .noise_ore
-            .get_noise_3d(fx * 0.11 + 200.0, fy * 0.11 + 200.0, fz * 0.11 + 200.0);
+            .get_noise_3d(fx * 0.065, fy * 0.065, fz * 0.065);
+        let n2 =
+            self.noise_ore
+                .get_noise_3d(fx * 0.11 + 200.0, fy * 0.11 + 200.0, fz * 0.11 + 200.0);
 
         if (18..=78).contains(&y) && n > 0.62 {
             return BlockType::Gravel;

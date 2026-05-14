@@ -289,7 +289,7 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Computes and stores the per-cascade light-space view-projection matrices.
     pub csm: CsmManager,
-    /// Active water reflection mode (`0 = off`, `1 = SSR`).
+    /// Active water reflection mode (`0 = off`, `1 = SSSR`).
     pub reflection_mode: u32,
     /// Toggles runtime shadow rendering without rebuilding pipelines.
     pub shadows_enabled: bool,
@@ -388,6 +388,8 @@ pub struct State {
     /// `1.0` when the camera eye is inside a water block; `0.0` otherwise.
     /// Passed to the composite shader to apply the underwater color tint.
     pub is_underwater: f32,
+    /// Smoothed open-sky visibility at the camera position.
+    pub sky_visibility: f32,
 
     // -------------------------------------------------------------------------
     // Multiplayer
@@ -436,6 +438,8 @@ pub struct WorldSnapshot {
     pub target_block: Option<minerust::BlockType>,
     /// Block type at the camera eye position (used for the underwater effect).
     pub eye_block: minerust::BlockType,
+    /// Approximate open-sky visibility above the camera eye.
+    pub sky_visibility: f32,
 }
 
 /// Batches all world mutations that must occur under the write lock in one frame.
