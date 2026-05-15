@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use glyphon::{FontSystem, SwashCache, TextAtlas, TextRenderer, Viewport};
 use wgpu;
-use winit::window::Window;
+use winit::{keyboard::ModifiersState, window::Window};
 
 use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
@@ -228,6 +228,8 @@ pub struct State {
     pub mouse_captured: bool,
     /// Last known cursor position in logical pixels (used for menu interaction).
     pub cursor_position: Option<(f32, f32)>,
+    /// Current keyboard modifier state, updated from winit modifier events.
+    pub modifiers: ModifiersState,
 
     // -------------------------------------------------------------------------
     // Frame timing and performance stats

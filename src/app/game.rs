@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use std::ffi::c_void;
 use std::time::Instant;
 
 use clap::Parser;
@@ -51,6 +53,70 @@ struct Args {
     port: u16,
 }
 
+#[cfg(target_os = "windows")]
+fn read_clipboard_text() -> Option<String> {
+    const CF_UNICODETEXT: u32 = 13;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        #[link_name = "OpenClipboard"]
+        fn open_clipboard(hwnd_new_owner: *mut c_void) -> i32;
+        #[link_name = "CloseClipboard"]
+        fn close_clipboard() -> i32;
+        #[link_name = "GetClipboardData"]
+        fn get_clipboard_data(format: u32) -> *mut c_void;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GlobalLock"]
+        fn global_lock(mem: *mut c_void) -> *mut c_void;
+        #[link_name = "GlobalUnlock"]
+        fn global_unlock(mem: *mut c_void) -> i32;
+    }
+
+    struct ClipboardGuard;
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                close_clipboard();
+            }
+        }
+    }
+
+    unsafe {
+        if open_clipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let _clipboard_guard = ClipboardGuard;
+
+        let handle = get_clipboard_data(CF_UNICODETEXT);
+        if handle.is_null() {
+            return None;
+        }
+
+        let ptr = global_lock(handle) as *const u16;
+        if ptr.is_null() {
+            return None;
+        }
+
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+        global_unlock(handle);
+        Some(text)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_clipboard_text() -> Option<String> {
+    None
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,6 +152,7 @@ struct Args {
 /// | W / A / S / D | Move forward / left / backward / right. |
 /// | Space | Jump. |
 /// | Left Shift | Sprint. |
+/// | Left Ctrl | Crouch. |
 /// | 1–9 | Select hotbar slot. |
 /// | Escape (mouse captured) | Release cursor without leaving the game. |
 /// | Escape (mouse free) | Open the main menu. |
@@ -103,6 +170,7 @@ struct Args {
 /// | Enter | Attempt to connect to the server. |
 /// | Escape | Dismiss the menu and resume play. |
 /// | Backspace | Delete the last character in the active field. |
+/// | Ctrl+V | Paste clipboard text into the active field. |
 /// | F11 | Toggle borderless fullscreen. |
 /// | Any printable character | Appended to the active text field. |
 ///
@@ -241,6 +309,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
 
                 // ── Keyboard input ────────────────────────────────────────── //
                 Event::WindowEvent {
+                    event: WindowEvent::ModifiersChanged(modifiers),
+                    ..
+                } => {
+                    state.modifiers = modifiers.state();
+                }
+
+                Event::WindowEvent {
                     event:
                         WindowEvent::KeyboardInput {
                             event:
@@ -257,13 +332,18 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                 } => {
                     state.last_input_time = Instant::now();
                     let pressed = key_state == ElementState::Pressed;
+                    let menu_control_v = state.game_state == GameState::Menu
+                        && pressed
+                        && key == KeyCode::KeyV
+                        && state.modifiers.control_key();
+                    let menu_paste_shortcut = menu_control_v && !repeat;
 
                     // ---- Menu text-field input --------------------------------
                     // `text` carries the OS-processed character (respecting the
                     // current keyboard layout and dead-key composition) rather
                     // than the raw key code, so it handles accented characters
                     // and IME input transparently.
-                    if state.game_state == GameState::Menu && pressed {
+                    if state.game_state == GameState::Menu && pressed && !menu_control_v {
                         if let Some(ref txt) = text {
                             for ch in txt.chars() {
                                 state.menu_state.handle_char(ch);
@@ -275,6 +355,11 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         // ---- Menu navigation hotkeys -------------------------
                         if pressed {
                             match key {
+                                KeyCode::KeyV if menu_paste_shortcut => {
+                                    if let Some(text) = read_clipboard_text() {
+                                        state.menu_state.handle_paste(&text);
+                                    }
+                                }
                                 KeyCode::Tab => {
                                     // Cycle focus: ServerAddress → Username → ServerAddress.
                                     state.menu_state.next_field();
@@ -329,6 +414,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             KeyCode::ShiftLeft => state.input.sprint = pressed,
+                            KeyCode::ControlLeft => state.input.sneak = pressed,
 
                             KeyCode::Escape if pressed => {
                                 // Escape always returns to the menu from gameplay.

@@ -2051,6 +2051,7 @@ impl State {
             hotbar_num_indices: 0,
             hotbar_dirty: true,
             cursor_position: None,
+            modifiers: Default::default(),
         }
     }
 

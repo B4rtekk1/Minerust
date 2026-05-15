@@ -6,13 +6,14 @@ use crate::player::input::InputState;
 use crate::world::World;
 
 const JUMP_BUFFER_TIME: f32 = 0.14;
+const CROUCH_EDGE_EPSILON: f32 = 0.001;
 
 /// First-person camera that doubles as the player's physical body.
 ///
 /// Owns the player's world-space position, look angles, and physics state.
 /// Movement, collision detection, and water interaction are all handled in
-/// [`Camera::update`]. The eye point is offset by [`PLAYER_EYE_HEIGHT`]
-/// above [`Self::position`].
+/// [`Camera::update`]. The eye point is offset above [`Self::position`]
+/// based on the current stance.
 pub struct Camera {
     /// Foot-level world-space position of the player.
     ///
@@ -37,6 +38,10 @@ pub struct Camera {
 
     /// Remaining time in which a recent jump press can trigger on landing.
     pub jump_buffer_timer: f32,
+
+    /// `true` while the player is crouching or cannot stand up because a block
+    /// occupies the standing-height space.
+    pub is_crouching: bool,
 }
 
 impl Camera {
@@ -53,6 +58,7 @@ impl Camera {
             on_ground: false,
             in_water: false,
             jump_buffer_timer: 0.0,
+            is_crouching: false,
         }
     }
 
@@ -80,9 +86,26 @@ impl Camera {
     pub fn eye_position(&self) -> Vec3 {
         Vec3::new(
             self.position.x,
-            self.position.y + PLAYER_EYE_HEIGHT,
+            self.position.y + self.eye_height(),
             self.position.z,
         )
+    }
+
+    /// Returns the current physical body height for collision checks.
+    pub fn body_height(&self) -> f32 {
+        if self.is_crouching {
+            PLAYER_CROUCH_HEIGHT
+        } else {
+            PLAYER_HEIGHT
+        }
+    }
+
+    fn eye_height(&self) -> f32 {
+        if self.is_crouching {
+            PLAYER_EYE_HEIGHT - (PLAYER_HEIGHT - PLAYER_CROUCH_HEIGHT)
+        } else {
+            PLAYER_EYE_HEIGHT
+        }
     }
 
     pub fn view_matrix(&self) -> Mat4 {
@@ -139,6 +162,16 @@ impl Camera {
     pub fn update(&mut self, world: &World, dt: f32, input: &InputState) {
         self.in_water = self.check_in_water(world);
 
+        let stand_blocked = self.is_crouching
+            && self.check_collision_with_height(
+                world,
+                self.position.x,
+                self.position.y,
+                self.position.z,
+                PLAYER_HEIGHT,
+            );
+        self.is_crouching = input.sneak || stand_blocked;
+
         if self.in_water {
             self.jump_buffer_timer = 0.0;
         } else if input.jump {
@@ -149,14 +182,18 @@ impl Camera {
 
         let (base_speed, gravity, max_fall_speed, jump_velocity, horizontal_drag, vertical_drag) =
             if self.in_water {
-                let speed = if input.sprint {
+                let speed = if self.is_crouching {
+                    PLAYER_BASE_SPEED * 0.331 * PLAYER_CROUCH_SPEED_MULTIPLIER
+                } else if input.sprint {
                     PLAYER_SPRINT_SPEED * 0.331
                 } else {
                     PLAYER_BASE_SPEED * 0.331
                 };
                 (speed, 6.0, 3.0, 4.0, 0.9, 0.95)
             } else {
-                let speed = if input.sprint {
+                let speed = if self.is_crouching {
+                    PLAYER_BASE_SPEED * PLAYER_CROUCH_SPEED_MULTIPLIER
+                } else if input.sprint {
                     PLAYER_SPRINT_SPEED
                 } else {
                     PLAYER_BASE_SPEED
@@ -208,14 +245,36 @@ impl Camera {
 
         let new_pos = self.position + self.velocity * dt;
 
+        let edge_guard_active = self.is_crouching && self.on_ground && !self.in_water;
+
         if !self.check_collision(world, new_pos.x, self.position.y, self.position.z) {
-            self.position.x = new_pos.x;
+            let next_x = if edge_guard_active {
+                self.clamp_x_to_crouch_edge(world, self.position.x, new_pos.x, self.position.y)
+            } else {
+                new_pos.x
+            };
+
+            if !self.check_collision(world, next_x, self.position.y, self.position.z) {
+                self.position.x = next_x;
+            } else {
+                self.velocity.x = 0.0;
+            }
         } else {
             self.velocity.x = 0.0;
         }
 
         if !self.check_collision(world, self.position.x, self.position.y, new_pos.z) {
-            self.position.z = new_pos.z;
+            let next_z = if edge_guard_active {
+                self.clamp_z_to_crouch_edge(world, self.position.z, new_pos.z, self.position.y)
+            } else {
+                new_pos.z
+            };
+
+            if !self.check_collision(world, self.position.x, self.position.y, next_z) {
+                self.position.z = next_z;
+            } else {
+                self.velocity.z = 0.0;
+            }
         } else {
             self.velocity.z = 0.0;
         }
@@ -246,13 +305,23 @@ impl Camera {
     /// Returns `true` if the player AABB centered at `(x, y, z)` overlaps any solid block.
     ///
     /// Iterates over all blocks within the bounding box defined by
-    /// [`PLAYER_WIDTH`] and [`PLAYER_HEIGHT`] and delegates intersection
+    /// [`PLAYER_WIDTH`] and the current stance height, then delegates intersection
     /// testing to [`check_intersection`].
     ///
     /// Used by [`Camera::update`] for per-axis collision resolution.
     pub fn check_collision(&self, world: &World, x: f32, y: f32, z: f32) -> bool {
+        self.check_collision_with_height(world, x, y, z, self.body_height())
+    }
+
+    fn check_collision_with_height(
+        &self,
+        world: &World,
+        x: f32,
+        y: f32,
+        z: f32,
+        player_height: f32,
+    ) -> bool {
         let player_width = PLAYER_WIDTH;
-        let player_height = PLAYER_HEIGHT;
 
         let min_x = (x - player_width).floor() as i32;
         let max_x = (x + player_width).floor() as i32;
@@ -265,7 +334,13 @@ impl Camera {
             for by in min_y..=max_y {
                 for bz in min_z..=max_z {
                     if world.is_solid(bx, by, bz) {
-                        if check_intersection(Vec3::new(x, y, z), bx, by, bz) {
+                        if check_intersection_with_height(
+                            Vec3::new(x, y, z),
+                            player_height,
+                            bx,
+                            by,
+                            bz,
+                        ) {
                             return true;
                         }
                     }
@@ -275,18 +350,95 @@ impl Camera {
         false
     }
 
+    fn has_crouch_floor_support(&self, world: &World, x: f32, y: f32, z: f32) -> bool {
+        let foot_y = (y - 0.05).floor() as i32;
+        let min_x = (x - PLAYER_WIDTH).floor() as i32;
+        let max_x = (x + PLAYER_WIDTH).floor() as i32;
+        let min_z = (z - PLAYER_WIDTH).floor() as i32;
+        let max_z = (z + PLAYER_WIDTH).floor() as i32;
+
+        for bx in min_x..=max_x {
+            for bz in min_z..=max_z {
+                if world.is_solid(bx, foot_y, bz) && player_footprint_intersects_block(x, z, bx, bz)
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn clamp_to_last_supported_crouch_position(
+        &self,
+        world: &World,
+        current: f32,
+        attempted: f32,
+        y: f32,
+        make_position: impl Fn(f32) -> (f32, f32),
+    ) -> f32 {
+        let (attempted_x, attempted_z) = make_position(attempted);
+        if self.has_crouch_floor_support(world, attempted_x, y, attempted_z) {
+            return attempted;
+        }
+
+        let (current_x, current_z) = make_position(current);
+        if !self.has_crouch_floor_support(world, current_x, y, current_z) {
+            return current;
+        }
+
+        let mut supported = current;
+        let mut unsupported = attempted;
+        for _ in 0..16 {
+            let mid = (supported + unsupported) * 0.5;
+            let (mid_x, mid_z) = make_position(mid);
+            if self.has_crouch_floor_support(world, mid_x, y, mid_z) {
+                supported = mid;
+            } else {
+                unsupported = mid;
+            }
+        }
+
+        supported
+    }
+
+    fn clamp_x_to_crouch_edge(
+        &self,
+        world: &World,
+        current_x: f32,
+        attempted_x: f32,
+        y: f32,
+    ) -> f32 {
+        self.clamp_to_last_supported_crouch_position(world, current_x, attempted_x, y, |x| {
+            (x, self.position.z)
+        })
+    }
+
+    fn clamp_z_to_crouch_edge(
+        &self,
+        world: &World,
+        current_z: f32,
+        attempted_z: f32,
+        y: f32,
+    ) -> f32 {
+        self.clamp_to_last_supported_crouch_position(world, current_z, attempted_z, y, |z| {
+            (self.position.x, z)
+        })
+    }
+
     fn ceiling_limited_y(&self, world: &World, attempted_y: f32) -> f32 {
         let player_width = PLAYER_WIDTH;
+        let player_height = self.body_height();
         let min_x = (self.position.x - player_width).floor() as i32;
         let max_x = (self.position.x + player_width).floor() as i32;
         let min_z = (self.position.z - player_width).floor() as i32;
         let max_z = (self.position.z + player_width).floor() as i32;
-        let head_y = (attempted_y + PLAYER_HEIGHT).floor() as i32;
+        let head_y = (attempted_y + player_height).floor() as i32;
 
         for bx in min_x..=max_x {
             for bz in min_z..=max_z {
                 if world.is_solid(bx, head_y, bz) {
-                    return (head_y as f32 - PLAYER_HEIGHT - 0.01).max(1.0);
+                    return (head_y as f32 - player_height - 0.01).max(1.0);
                 }
             }
         }
@@ -298,7 +450,7 @@ impl Camera {
     ///
     /// Convenience wrapper around [`check_intersection`] using [`Self::position`].
     pub fn intersects_block(&self, bx: i32, by: i32, bz: i32) -> bool {
-        check_intersection(self.position, bx, by, bz)
+        check_intersection_with_height(self.position, self.body_height(), bx, by, bz)
     }
 
     /// Casts a ray from the eye position along the look direction and returns
@@ -341,12 +493,38 @@ impl Camera {
 
 /// Returns `true` if the player AABB rooted at `pos` overlaps the unit block at `(bx, by, bz)`.
 ///
-/// The player AABB extends [`PLAYER_WIDTH`] units in ±X and ±Z from `pos`,
-/// and [`PLAYER_HEIGHT`] units upward from `pos.y`. Uses a standard
+/// The player AABB extends [`PLAYER_WIDTH`] units in +/-X and +/-Z from `pos`,
+/// and standing [`PLAYER_HEIGHT`] units upward from `pos.y`. Uses a standard
 /// axis-aligned box vs. box intersection test.
 pub fn check_intersection(pos: Vec3, bx: i32, by: i32, bz: i32) -> bool {
+    check_intersection_with_height(pos, PLAYER_HEIGHT, bx, by, bz)
+}
+
+fn player_footprint_intersects_block(x: f32, z: f32, bx: i32, bz: i32) -> bool {
+    let block_min_x = bx as f32;
+    let block_max_x = (bx + 1) as f32;
+    let block_min_z = bz as f32;
+    let block_max_z = (bz + 1) as f32;
+
+    let player_min_x = x - PLAYER_WIDTH;
+    let player_max_x = x + PLAYER_WIDTH;
+    let player_min_z = z - PLAYER_WIDTH;
+    let player_max_z = z + PLAYER_WIDTH;
+
+    player_max_x > block_min_x + CROUCH_EDGE_EPSILON
+        && player_min_x < block_max_x - CROUCH_EDGE_EPSILON
+        && player_max_z > block_min_z + CROUCH_EDGE_EPSILON
+        && player_min_z < block_max_z - CROUCH_EDGE_EPSILON
+}
+
+fn check_intersection_with_height(
+    pos: Vec3,
+    player_height: f32,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> bool {
     let player_width = PLAYER_WIDTH;
-    let player_height = PLAYER_HEIGHT;
 
     let block_min_x = bx as f32;
     let block_max_x = (bx + 1) as f32;
@@ -368,4 +546,34 @@ pub fn check_intersection(pos: Vec3, bx: i32, by: i32, bz: i32) -> bool {
         && player_min_y < block_max_y
         && player_max_z > block_min_z
         && player_min_z < block_max_z
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crouch_floor_support_tracks_player_footprint_edge() {
+        let z = 0.5;
+
+        assert!(player_footprint_intersects_block(
+            1.0 + PLAYER_WIDTH - CROUCH_EDGE_EPSILON * 2.0,
+            z,
+            0,
+            0
+        ));
+        assert!(!player_footprint_intersects_block(
+            1.0 + PLAYER_WIDTH,
+            z,
+            0,
+            0
+        ));
+        assert!(player_footprint_intersects_block(
+            -PLAYER_WIDTH + CROUCH_EDGE_EPSILON * 2.0,
+            z,
+            0,
+            0
+        ));
+        assert!(!player_footprint_intersects_block(-PLAYER_WIDTH, z, 0, 0));
+    }
 }

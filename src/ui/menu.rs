@@ -108,6 +108,14 @@ impl MenuState {
         }
     }
 
+    /// Appends pasted text to the focused field using the same filtering and
+    /// length limits as normal typed input.
+    pub fn handle_paste(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.handle_char(ch);
+        }
+    }
+
     /// Removes the last character from the currently focused field.
     ///
     /// No-op when [`MenuField::None`] is selected or the field is already empty.

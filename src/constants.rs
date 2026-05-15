@@ -38,6 +38,7 @@ pub const PLAYER_CROUCH_HEIGHT: f32 = 1.7;
 pub const PLAYER_WIDTH: f32 = 0.35;
 pub const PLAYER_BASE_SPEED: f32 = 4.8;
 pub const PLAYER_SPRINT_SPEED: f32 = 16.0;
+pub const PLAYER_CROUCH_SPEED_MULTIPLIER: f32 = 0.35;
 pub const PLAYER_JUMP_HEIGHT: f32 = 1.0;
 
 pub const CSM_CASCADE_COUNT: usize = 4;
