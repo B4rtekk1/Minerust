@@ -172,9 +172,11 @@ impl Camera {
             );
         self.is_crouching = input.sneak || stand_blocked;
 
+        let wants_jump = input.jump || input.jump_held;
+
         if self.in_water {
             self.jump_buffer_timer = 0.0;
-        } else if input.jump {
+        } else if wants_jump {
             self.jump_buffer_timer = JUMP_BUFFER_TIME;
         } else {
             self.jump_buffer_timer = (self.jump_buffer_timer - dt).max(0.0);

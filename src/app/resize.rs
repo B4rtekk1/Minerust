@@ -1,4 +1,5 @@
 use glyphon::Resolution;
+use minerust::PostProcessUniforms;
 
 use super::state::State;
 
@@ -17,9 +18,9 @@ impl State {
     /// | Resource | Reason |
     /// |---|---|
     /// | Surface configuration | Swap-chain must match the new pixel dimensions. |
-    /// | Depth texture (MSAA) | Multisampled depth must match the color target size. |
-    /// | MSAA color texture | Render target size changed. |
-    /// | SSR color texture + view | SSR reads scene pixels 1:1; must stay in sync. |
+    /// | Depth texture (MSAA) | Multisampled depth must match the internal render size. |
+    /// | MSAA color texture | Internal render target size changed. |
+    /// | SSR color texture + view | SSR reads internal scene pixels 1:1; must stay in sync. |
     /// | SSR depth texture + view | Same reason – used for refraction depth lookups. |
     /// | SSR sampler | Recreated alongside its textures for clarity. |
     /// | `water_bind_group` | References the new SSR views. |
@@ -46,20 +47,29 @@ impl State {
             // ── Swap-chain reconfiguration ────────────────────────────────── //
             self.config.width = new_size.width;
             self.config.height = new_size.height;
+            self.render_size =
+                Self::render_size_for(new_size.width, new_size.height, self.fsr_mode);
+            let render_width = self.render_size[0];
+            let render_height = self.render_size[1];
             // Reconfiguring the surface implicitly invalidates the old
             // swap-chain textures; any `SurfaceTexture` acquired before this
             // call must already have been presented or dropped.
             self.surface.configure(&self.device, &self.config);
 
             // ── MSAA color and depth targets ─────────────────────────────── //
-            // Both must exactly match the new surface dimensions; mismatched
+            // Both must exactly match the internal render dimensions; mismatched
             // sizes cause validation errors when beginning render passes.
             let msaa_sample_count: u32 = 4;
-            self.depth_texture =
-                Self::create_depth_texture(&self.device, &self.config, msaa_sample_count);
+            self.depth_texture = Self::create_depth_texture(
+                &self.device,
+                render_width,
+                render_height,
+                msaa_sample_count,
+            );
             self.msaa_texture_view = Self::create_msaa_texture(
                 &self.device,
-                &self.config,
+                render_width,
+                render_height,
                 self.surface_format,
                 msaa_sample_count,
             );
@@ -73,8 +83,8 @@ impl State {
             self.ssr_color_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("SSR Color Texture"),
                 size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: render_width,
+                    height: render_height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -93,8 +103,8 @@ impl State {
             self.ssr_depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("SSR Depth Texture"),
                 size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: render_width,
+                    height: render_height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -112,8 +122,8 @@ impl State {
             self.shadow_mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Shadow Mask Texture"),
                 size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: render_width,
+                    height: render_height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -128,6 +138,25 @@ impl State {
             self.shadow_mask_view = self
                 .shadow_mask_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.shadow_mask_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&vec![1.0f32; (render_width * render_height) as usize]),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * render_width),
+                    rows_per_image: Some(render_height),
+                },
+                wgpu::Extent3d {
+                    width: render_width,
+                    height: render_height,
+                    depth_or_array_layers: 1,
+                },
+            );
 
             // Nearest-neighbor sampler for SSR lookups; bilinear filtering
             // would blur the reflected image and produce incorrect depth reads.
@@ -192,6 +221,16 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 9,
                         resource: wgpu::BindingResource::Sampler(&self.flow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.environment_cubemap_view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: wgpu::BindingResource::Sampler(&self.environment_sampler),
                     },
                 ],
                 label: Some("water_bind_group"),
@@ -284,8 +323,8 @@ impl State {
             self.scene_color_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Scene Color Texture"),
                 size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: render_width,
+                    height: render_height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -313,6 +352,17 @@ impl State {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             });
+            self.queue.write_buffer(
+                &self.post_process_buffer,
+                0,
+                bytemuck::cast_slice(&[PostProcessUniforms {
+                    render_size: [render_width as f32, render_height as f32],
+                    output_size: [self.config.width as f32, self.config.height as f32],
+                    sharpness: self.fsr_mode.sharpness(),
+                    fsr_enabled: if self.fsr_mode.is_enabled() { 1.0 } else { 0.0 },
+                    _pad: [0.0; 2],
+                }]),
+            );
             let composite_bind_group_layout = self.composite_pipeline.get_bind_group_layout(0);
             self.composite_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Composite Bind Group"),
@@ -331,6 +381,10 @@ impl State {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&composite_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.post_process_buffer.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -340,10 +394,10 @@ impl State {
             // which means the number of bind groups would also need to change.
             // Rather than trying to patch the existing resources, we simply
             // recreate all Hi-Z objects whenever the surface dimensions change.
-            let new_hiz_size = [new_size.width, new_size.height];
+            let new_hiz_size = self.render_size;
             if new_hiz_size != self.hiz_size {
                 self.hiz_size = new_hiz_size;
-                let hiz_max_dim = new_size.width.max(new_size.height);
+                let hiz_max_dim = render_width.max(render_height);
                 let hiz_mips_count = (hiz_max_dim as f32).log2().floor() as u32 + 1;
 
                 let hiz_texture = self.device.create_texture(&wgpu::TextureDescriptor {

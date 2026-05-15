@@ -159,8 +159,9 @@ fn read_clipboard_text() -> Option<String> {
 /// | F5 | Save world to disk. |
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
-/// | R | Cycle water reflection mode (Off -> SSSR). |
+/// | R | Cycle water reflection mode (Off -> SSR). |
 /// | H | Toggle shadows on/off. |
+/// | F | Cycle FSR quality (Off -> Ultra Quality -> Quality -> Balanced -> Performance). |
 ///
 /// # Key bindings (menu)
 ///
@@ -439,13 +440,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             KeyCode::KeyR if pressed => {
-                                // Cycle: 0 = Off, 1 = SSSR. Wraps with modulo
+                                // Cycle: 0 = Off, 1 = SSR. Wraps with modulo
                                 // so adding more modes in the future only
                                 // requires extending the match arm below.
                                 state.reflection_mode = (state.reflection_mode + 1) % 2;
                                 let mode_name = match state.reflection_mode {
                                     0 => "Off",
-                                    1 => "SSSR",
+                                    1 => "SSR",
                                     _ => "Unknown",
                                 };
                                 log(LogLevel::Info, &format!("Reflection mode: {}", mode_name));
@@ -455,6 +456,23 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 state.shadows_enabled = !state.shadows_enabled;
                                 let state_name = if state.shadows_enabled { "On" } else { "Off" };
                                 log(LogLevel::Info, &format!("Shadows: {}", state_name));
+                            }
+
+                            KeyCode::KeyF if pressed => {
+                                state.fsr_mode = state.fsr_mode.next();
+                                let size = state.window.inner_size();
+                                state.resize(size);
+                                log(
+                                    LogLevel::Info,
+                                    &format!(
+                                        "FSR: {} ({}x{} -> {}x{})",
+                                        state.fsr_mode.label(),
+                                        state.render_size[0],
+                                        state.render_size[1],
+                                        state.config.width,
+                                        state.config.height
+                                    ),
+                                );
                             }
 
                             // ---- F5: Save world to disk ---------------------

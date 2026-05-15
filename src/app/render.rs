@@ -3,8 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL,
-    ShadowConfig, Uniforms, Vertex, World, build_block_outline, build_player_model,
+    BlockType, CHUNK_SIZE, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, PostProcessUniforms, RENDER_DISTANCE,
+    SEA_LEVEL, ShadowConfig, Uniforms, Vertex, World, build_block_outline, build_player_model,
     extract_frustum_planes,
 };
 
@@ -160,8 +160,8 @@ impl State {
     /// 8. **Hi-Z generation** (compute) – downsamples the depth mip chain.
     /// 9. **Transparent pass** – water surfaces, alpha-blended on top of the
     ///    opaque result.  Resolves MSAA into `scene_color_view`.
-    /// 10. **Composite pass** – post-processing blit from `scene_color_view`
-    ///     to the swap-chain surface (underwater fog, vignette, etc.).
+    /// 10. **Composite / FSR pass** – post-processing blit or upscaling from
+    ///     `scene_color_view` to the swap-chain surface.
     /// 11. **UI pass** – crosshair, coordinate debug overlay, hotbar.
     /// 12. **Progress bar pass** – block-breaking progress indicator (only
     ///     when the player is actively mining).
@@ -263,6 +263,11 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
+        let render_width = self.render_size[0];
+        let render_height = self.render_size[1];
+        let render_size_f = [render_width as f32, render_height as f32];
+        let output_size_f = [self.config.width as f32, self.config.height as f32];
+
         // ── Camera & projection matrices ──────────────────────────────────── //
         let aspect = self.config.width as f32 / self.config.height as f32;
         // Extend the far plane beyond RENDER_DISTANCE so chunks at the horizon
@@ -342,7 +347,7 @@ impl State {
                 time,
                 sun_position: [sun_x, sun_y, sun_z],
                 is_underwater,
-                screen_size: [self.config.width as f32, self.config.height as f32],
+                screen_size: render_size_f,
                 water_level: SEA_LEVEL as f32 - 1.0,
                 reflection_mode: self.reflection_mode as f32,
                 moon_position,
@@ -354,6 +359,17 @@ impl State {
                 rain_factor: 0.0,
                 shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
                 sky_visibility: self.sky_visibility,
+            }]),
+        );
+        self.queue.write_buffer(
+            &self.post_process_buffer,
+            0,
+            bytemuck::cast_slice(&[PostProcessUniforms {
+                render_size: render_size_f,
+                output_size: output_size_f,
+                sharpness: self.fsr_mode.sharpness(),
+                fsr_enabled: if self.fsr_mode.is_enabled() { 1.0 } else { 0.0 },
+                _pad: [0.0; 2],
             }]),
         );
         self.queue.write_buffer(
@@ -556,7 +572,7 @@ impl State {
             &frustum_planes_array,
             self.camera.position.into(),
             hiz_size_f,
-            [self.config.width as f32, self.config.height as f32],
+            render_size_f,
         );
         self.water_indirect_manager.dispatch_culling(
             &mut encoder,
@@ -565,7 +581,7 @@ impl State {
             &frustum_planes_array,
             self.camera.position.into(),
             hiz_size_f,
-            [self.config.width as f32, self.config.height as f32],
+            render_size_f,
         );
 
         // ── Terrain depth prepass ─────────────────────────────────────────── //
@@ -623,8 +639,8 @@ impl State {
             depth_resolve_pass.set_pipeline(&self.depth_resolve_pipeline);
             depth_resolve_pass.set_bind_group(0, &self.depth_resolve_bind_group, &[]);
             depth_resolve_pass.dispatch_workgroups(
-                (self.config.width + 15) / 16,
-                (self.config.height + 15) / 16,
+                (render_width + 15) / 16,
+                (render_height + 15) / 16,
                 1,
             );
         }
@@ -640,8 +656,8 @@ impl State {
             shadow_mask_pass.set_bind_group(1, &self.shadow_mask_input_bind_group, &[]);
             shadow_mask_pass.set_bind_group(2, &self.shadow_mask_output_bind_group, &[]);
             shadow_mask_pass.dispatch_workgroups(
-                (self.config.width + 7) / 8,
-                (self.config.height + 7) / 8,
+                (render_width + 7) / 8,
+                (render_height + 7) / 8,
                 1,
             );
         }
@@ -666,19 +682,13 @@ impl State {
         // Writes to the 4× MSAA color target which is resolved simultaneously
         // into `ssr_color_view` (used by the water pass for reflections).
         {
-            let opaque_resolve_target = if self.game_state == GameState::Menu {
-                &view
-            } else {
-                &self.ssr_color_view
-            };
-
             let mut opaque_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Opaque Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
                     // Resolve MSAA into the SSR color target so the water
                     // shader can sample the opaque scene for reflections.
-                    resolve_target: Some(opaque_resolve_target),
+                    resolve_target: Some(&self.ssr_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         // Clear to the sky color computed above.
@@ -783,18 +793,12 @@ impl State {
         // Loads (does not clear) the existing MSAA color and depth buffers so
         // water is composited on top of the opaque scene.  Resolves into
         // `scene_color_view` for the composite pass.
-        let resolve_target = if self.game_state == GameState::Menu {
-            &view
-        } else {
-            &self.scene_color_view
-        };
-
         {
             let mut transparent_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Transparent Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
-                    resolve_target: Some(resolve_target), // -> scene_color_view
+                    resolve_target: Some(&self.scene_color_view), // -> scene_color_view
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // keep opaque scene color
@@ -903,8 +907,8 @@ impl State {
         // Reads from `scene_color_view` (the fully composited opaque + water
         // scene) and writes the post-processed result directly to the
         // swap-chain surface.  The composite shader handles underwater fog
-        // color grading, vignette, and similar full-screen effects.
-        if self.game_state != GameState::Menu {
+        // color grading, vignette, and FSR upscaling.
+        {
             let mut composite_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Composite Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

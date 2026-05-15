@@ -43,6 +43,7 @@ struct ShadowConfig {
 
 const PI:               f32 = 3.14159265359;
 const MAX_PCF_SAMPLES:  i32 = 16;
+const ALPHA_CUTOFF:     f32 = 0.5;
 
 fn world_space_noise(world_pos: vec3<f32>) -> f32 {
     let p = vec2<u32>(bitcast<u32>(world_pos.x) ^ 0x9e3779b9u,
@@ -299,7 +300,7 @@ fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
-    if tex.a < 0.5 { discard; }
+    if tex.a < ALPHA_CUTOFF { discard; }
 
     let shadow_tex_size = vec2<f32>(textureDimensions(shadow_mask));
     let screen_uv = in.clip_position.xy / shadow_tex_size;
@@ -357,4 +358,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4<f32>(final_color, 1.0);
+}
+
+@fragment
+fn fs_depth_alpha(in: VertexOutput) {
+    let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
+    if tex.a < ALPHA_CUTOFF { discard; }
 }

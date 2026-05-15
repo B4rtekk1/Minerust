@@ -13,6 +13,71 @@ use minerust::chunk_loader::ChunkLoader;
 use minerust::render_core::csm::CsmManager;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
+/// Runtime FidelityFX Super Resolution 1.x quality mode.
+///
+/// The render scale follows the standard FSR 1 quality ratios. UI and text are
+/// still rendered at native swap-chain resolution after the upscaled scene pass.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FsrMode {
+    Off,
+    UltraQuality,
+    Quality,
+    Balanced,
+    Performance,
+}
+
+impl FsrMode {
+    pub fn render_scale(self) -> f32 {
+        match self {
+            Self::Off => 1.0,
+            Self::UltraQuality => 1.0 / 1.3,
+            Self::Quality => 1.0 / 1.5,
+            Self::Balanced => 1.0 / 1.7,
+            Self::Performance => 0.5,
+        }
+    }
+
+    pub fn sharpness(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::UltraQuality => 0.16,
+            Self::Quality => 0.20,
+            Self::Balanced => 0.24,
+            Self::Performance => 0.28,
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::UltraQuality,
+            Self::UltraQuality => Self::Quality,
+            Self::Quality => Self::Balanced,
+            Self::Balanced => Self::Performance,
+            Self::Performance => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::UltraQuality => "Ultra Quality",
+            Self::Quality => "Quality",
+            Self::Balanced => "Balanced",
+            Self::Performance => "Performance",
+        }
+    }
+}
+
+impl Default for FsrMode {
+    fn default() -> Self {
+        Self::UltraQuality
+    }
+}
+
 /// Central application state owned by the main thread.
 ///
 /// `State` is the single source of truth for all GPU resources, world data,
@@ -57,6 +122,10 @@ pub struct State {
     pub config: wgpu::SurfaceConfiguration,
     /// Pixel format of the swap-chain surface (cached to avoid repeated lookups).
     pub surface_format: wgpu::TextureFormat,
+    /// Internal scene render resolution. May be lower than `config` when FSR is enabled.
+    pub render_size: [u32; 2],
+    /// Active FSR quality mode for the final composite pass.
+    pub fsr_mode: FsrMode,
 
     // -------------------------------------------------------------------------
     // Render pipelines
@@ -123,6 +192,8 @@ pub struct State {
     pub water_bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group for the composite pass (scene color + SSR resources).
     pub composite_bind_group: wgpu::BindGroup,
+    /// Uniform buffer with render/output sizes and FSR sharpening settings.
+    pub post_process_buffer: wgpu::Buffer,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
     /// Bind group exposing the resolved depth texture to the shadow-mask compute.
@@ -189,6 +260,13 @@ pub struct State {
     pub flow_map_view: wgpu::TextureView,
     /// Sampler used when reading the flow-map texture in the water shader.
     pub flow_sampler: wgpu::Sampler,
+    /// Small generated cubemap used when an SSR ray misses the screen-space scene.
+    #[allow(dead_code)]
+    pub environment_cubemap_texture: wgpu::Texture,
+    /// Cubemap view sampled by the water reflection shader.
+    pub environment_cubemap_view: wgpu::TextureView,
+    /// Sampler used when reading the environment cubemap.
+    pub environment_sampler: wgpu::Sampler,
 
     // -------------------------------------------------------------------------
     // Hi-Z (hierarchical depth) occlusion culling
@@ -291,7 +369,7 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Computes and stores the per-cascade light-space view-projection matrices.
     pub csm: CsmManager,
-    /// Active water reflection mode (`0 = off`, `1 = SSSR`).
+    /// Active water reflection mode (`0 = off`, `1 = SSR`).
     pub reflection_mode: u32,
     /// Toggles runtime shadow rendering without rebuilding pipelines.
     pub shadows_enabled: bool,
@@ -458,4 +536,14 @@ pub struct WorldWriteOps {
     /// Block coordinates whose owning subchunk (and its neighbors) should be
     /// marked dirty for re-meshing.
     pub mark_dirty: Vec<(i32, i32, i32)>,
+}
+
+impl State {
+    pub fn render_size_for(surface_width: u32, surface_height: u32, fsr_mode: FsrMode) -> [u32; 2] {
+        let scale = fsr_mode.render_scale();
+        [
+            ((surface_width as f32 * scale).round() as u32).max(1),
+            ((surface_height as f32 * scale).round() as u32).max(1),
+        ]
+    }
 }

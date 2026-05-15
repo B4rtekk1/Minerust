@@ -67,8 +67,7 @@ pub struct Uniforms {
     ///
     /// Interpreted as an integer enum in shaders:
     /// - `0.0` — no reflection
-    /// - `1.0` — planar reflection
-    /// - `1.0` — stochastic screen-space reflection (SSSR)
+    /// - `1.0` — screen-space reflection (SSR)
     pub reflection_mode: f32,
 
     /// Normalized direction vector toward the moon `[x, y, z]` in world space.
@@ -120,4 +119,24 @@ pub struct ShadowConfig {
     pub pcf_samples: u32,
     /// Explicit padding so the buffer remains 16 bytes wide.
     pub _pad: [u32; 2],
+}
+
+/// Uniform block consumed by the final post-process / FSR composite pass.
+///
+/// `render_size` is the internal scene resolution. `output_size` is the
+/// swap-chain resolution. When FSR is enabled these differ, and the composite
+/// shader upscales `scene_color_texture` to the native output size.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PostProcessUniforms {
+    /// Internal scene render target size in pixels.
+    pub render_size: [f32; 2],
+    /// Swap-chain output size in pixels.
+    pub output_size: [f32; 2],
+    /// RCAS-style sharpening strength applied after upscaling.
+    pub sharpness: f32,
+    /// Non-zero when the FSR path should run instead of a native blit.
+    pub fsr_enabled: f32,
+    /// Explicit padding to keep the uniform block 16-byte aligned.
+    pub _pad: [f32; 2],
 }
