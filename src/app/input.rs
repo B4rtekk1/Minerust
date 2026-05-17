@@ -6,6 +6,8 @@ use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
 
+const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.4;
+
 impl State {
     /// Translates a raw mouse-click position into a menu action.
     ///
@@ -49,21 +51,9 @@ impl State {
     ///    continuous per-frame logic (e.g., left-click mining) can poll it
     ///    without re-processing events.
     ///
-    /// 2. **Only when the mouse is captured** (i.e., the player is in-game
-    ///    with the cursor locked): handle the right-click block-placement
-    ///    action, including all placement guards.
-    ///
-    /// # Block placement guards (right-click)
-    /// Placement is skipped when any of the following is true:
-    /// - The raycast does not hit a surface within reach (5 blocks).
-    /// - The target placement position overlaps the player's own AABB —
-    ///   prevents the player from trapping themselves inside a block.
-    /// - The target position overlaps a remote player's AABB — prevents
-    ///   griefing by walling another player in.
-    ///
-    /// When all guards pass, the block currently selected in the hotbar is
-    /// written to the world and the affected chunk is mark`ed dirty so its
-    /// mesh is rebuilt on the next frame.
+    /// 2. Reset right-click drag placement when RMB is pressed or released.
+    ///    Actual block placement is polled from [`State::update`] so holding
+    ///    RMB can place a continuous straight line.
     ///
     /// # Parameters
     /// - `button`  – Which mouse button changed state.
@@ -72,61 +62,87 @@ impl State {
         // Always update raw input state so per-frame polling sees current buttons.
         match button {
             MouseButton::Left => self.input.left_mouse = pressed,
-            MouseButton::Right => self.input.right_mouse = pressed,
+            MouseButton::Right => {
+                self.input.right_mouse = pressed;
+                self.placement.reset();
+            }
             _ => {}
         }
+    }
 
-        // In-game logic below this point requires a captured (locked) cursor.
-        // While the menu is visible the cursor is free and clicks are handled
-        // by `handle_menu_click` instead.
-        if !self.mouse_captured {
+    /// Returns a block placement to apply this frame when RMB is held.
+    pub fn update_held_block_placement(
+        &mut self,
+        raycast: Option<(i32, i32, i32, i32, i32, i32)>,
+        dt: f32,
+    ) -> Option<(i32, i32, i32, minerust::BlockType)> {
+        if !self.mouse_captured || !self.input.right_mouse {
+            self.placement.reset();
+            return None;
+        }
+
+        self.placement.cooldown = (self.placement.cooldown - dt).max(0.0);
+        if self.placement.cooldown > 0.0 {
+            return None;
+        }
+
+        let (_, _, _, px, py, pz) = raycast?;
+        let place_pos = (px, py, pz);
+
+        if self.camera.intersects_block(px, py, pz) {
+            return None;
+        }
+
+        for player in self.remote_players.values() {
+            let player_pos = glam::Vec3::new(player.x, player.y, player.z);
+            if check_intersection(player_pos, px, py, pz) {
+                return None;
+            }
+        }
+
+        if !self.accept_line_placement(place_pos) {
+            return None;
+        }
+
+        self.record_line_placement(place_pos);
+        self.placement.cooldown = BLOCK_PLACE_REPEAT_INTERVAL;
+
+        Some((px, py, pz, HOTBAR_SLOTS[self.hotbar_slot]))
+    }
+
+    fn accept_line_placement(&self, pos: (i32, i32, i32)) -> bool {
+        let Some(last) = self.placement.last else {
+            return true;
+        };
+        if pos == last {
+            return false;
+        }
+
+        let Some(axis) = adjacent_axis(last, pos) else {
+            return false;
+        };
+
+        if let Some(required_axis) = self.placement.axis {
+            axis == required_axis && same_line(self.placement.anchor.unwrap_or(last), pos, axis)
+        } else {
+            true
+        }
+    }
+
+    fn record_line_placement(&mut self, pos: (i32, i32, i32)) {
+        if self.placement.anchor.is_none() {
+            self.placement.anchor = Some(pos);
+            self.placement.last = Some(pos);
             return;
         }
 
-        if button == MouseButton::Right && pressed {
-            // Cast a ray from the camera up to 5 blocks to find the block face
-            // the player is looking at.  The tuple contains
-            // (hit_x, hit_y, hit_z, place_x, place_y, place_z) where the
-            // first triple is the block that was hit and the second is the
-            // adjacent air block where the new block should be placed.
-            let target = self.camera.raycast(&*self.world.read(), 5.0);
-            if let Some((_, _, _, px, py, pz)) = target {
-                // Guard 1: don't place a block inside the local player's AABB.
-                if self.camera.intersects_block(px, py, pz) {
-                    return;
-                }
-
-                // Guard 2: don't place a block inside any remote player's AABB.
-                // This iterates all known remote players and checks their
-                // server-authoritative positions.
-                for player in self.remote_players.values() {
-                    let player_pos = glam::Vec3::new(player.x, player.y, player.z);
-                    if check_intersection(player_pos, px, py, pz) {
-                        return;
-                    }
-                }
-
-                // All guards passed — place the block selected in the hotbar.
-                let block_to_place = HOTBAR_SLOTS[self.hotbar_slot];
-                self.world
-                    .write()
-                    .set_block_player(px, py, pz, block_to_place);
-
-                // Send the block change to the server so other players see it.
-                if let Some(tx) = &self.network_tx {
-                    let _ = tx.send(crate::multiplayer::protocol::Packet::BlockChange {
-                        x: px,
-                        y: py,
-                        z: pz,
-                        block_type: block_to_place as u8,
-                    });
-                }
-
-                // Invalidate the mesh of every sub-chunk that touches this
-                // block position so the geometry is rebuilt before next render.
-                self.mark_chunk_dirty(px, py, pz);
+        if self.placement.axis.is_none() {
+            if let Some(last) = self.placement.last {
+                self.placement.axis = adjacent_axis(last, pos);
             }
         }
+
+        self.placement.last = Some(pos);
     }
 
     /// Initiates an asynchronous connection to the multiplayer server.
@@ -154,5 +170,31 @@ impl State {
             &mut self.network_rx,
             &mut self.network_tx,
         );
+    }
+}
+
+fn adjacent_axis(a: (i32, i32, i32), b: (i32, i32, i32)) -> Option<usize> {
+    let delta = [b.0 - a.0, b.1 - a.1, b.2 - a.2];
+    let mut axis = None;
+
+    for (idx, value) in delta.into_iter().enumerate() {
+        if value == 0 {
+            continue;
+        }
+        if value.abs() != 1 || axis.is_some() {
+            return None;
+        }
+        axis = Some(idx);
+    }
+
+    axis
+}
+
+fn same_line(anchor: (i32, i32, i32), pos: (i32, i32, i32), axis: usize) -> bool {
+    match axis {
+        0 => anchor.1 == pos.1 && anchor.2 == pos.2,
+        1 => anchor.0 == pos.0 && anchor.2 == pos.2,
+        2 => anchor.0 == pos.0 && anchor.1 == pos.1,
+        _ => false,
     }
 }

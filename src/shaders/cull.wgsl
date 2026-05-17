@@ -39,11 +39,15 @@ var hiz_texture: texture_2d<f32>;
 @group(0) @binding(5)
 var hiz_sampler: sampler;
 
+const FRUSTUM_CULL_MARGIN: f32 = 2.0;
+
 fn aabb_vs_plane(aabb_min: vec3<f32>, aabb_max: vec3<f32>, plane: vec4<f32>) -> bool {
+    let expanded_min = aabb_min - vec3<f32>(FRUSTUM_CULL_MARGIN);
+    let expanded_max = aabb_max + vec3<f32>(FRUSTUM_CULL_MARGIN);
     let p = vec3<f32>(
-        select(aabb_min.x, aabb_max.x, plane.x > 0.0),
-        select(aabb_min.y, aabb_max.y, plane.y > 0.0),
-        select(aabb_min.z, aabb_max.z, plane.z > 0.0),
+        select(expanded_min.x, expanded_max.x, plane.x > 0.0),
+        select(expanded_min.y, expanded_max.y, plane.y > 0.0),
+        select(expanded_min.z, expanded_max.z, plane.z > 0.0),
     );
     return dot(plane.xyz, p) + plane.w >= 0.0;
 }

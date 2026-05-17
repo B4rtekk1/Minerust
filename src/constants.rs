@@ -43,7 +43,8 @@ pub const PLAYER_JUMP_HEIGHT: f32 = 1.0;
 
 pub const CSM_CASCADE_COUNT: usize = 4;
 pub const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [16.0, 48.0, 128.0, 300.0];
-pub const CSM_SHADOW_MAP_SIZE: u32 = 2048;
+pub const CSM_SHADOW_MAP_SIZE: u32 = 4096;
+pub const CSM_PCF_SAMPLES: u32 = 32;
 
 pub const DEFAULT_FOV: f32 = 70.0 * std::f32::consts::PI / 180.0;
 

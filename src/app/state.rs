@@ -13,6 +13,21 @@ use minerust::chunk_loader::ChunkLoader;
 use minerust::render_core::csm::CsmManager;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
+/// Tracks block placement while RMB is held so repeat placement stays in one line.
+#[derive(Default)]
+pub struct BlockPlacementState {
+    pub anchor: Option<(i32, i32, i32)>,
+    pub last: Option<(i32, i32, i32)>,
+    pub axis: Option<usize>,
+    pub cooldown: f32,
+}
+
+impl BlockPlacementState {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Central application state owned by the main thread.
 ///
 /// `State` is the single source of truth for all GPU resources, world data,
@@ -108,6 +123,8 @@ pub struct State {
     /// Small shadow settings buffer shared with the terrain shader.
     #[allow(dead_code)]
     pub shadow_config_buffer: wgpu::Buffer,
+    /// Previous-frame shadow reprojection data used by the temporal shadow pass.
+    pub temporal_shadow_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
     /// Empty placeholder bind group for terrain pipeline group(1).
@@ -129,6 +146,8 @@ pub struct State {
     pub shadow_mask_input_bind_group: wgpu::BindGroup,
     /// Bind group exposing the shadow-mask storage texture for compute writes.
     pub shadow_mask_output_bind_group: wgpu::BindGroup,
+    /// Bind group exposing previous-frame shadow history to the compute pass.
+    pub temporal_shadow_bind_group: wgpu::BindGroup,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
@@ -145,6 +164,12 @@ pub struct State {
     /// View of the screen-space shadow mask texture.
     #[allow(dead_code)]
     pub shadow_mask_view: wgpu::TextureView,
+    /// Previous-frame screen-space shadow mask used for temporal reprojection.
+    #[allow(dead_code)]
+    pub shadow_history_texture: wgpu::Texture,
+    /// View of the previous-frame screen-space shadow mask.
+    #[allow(dead_code)]
+    pub shadow_history_view: wgpu::TextureView,
     /// One `wgpu::TextureView` per shadow cascade for per-cascade rendering.
     pub shadow_cascade_views: Vec<wgpu::TextureView>,
     /// GPU buffer containing the packed `CascadeData` array for all cascades.
@@ -222,6 +247,8 @@ pub struct State {
     pub input: InputState,
     /// Block-breaking progress tracker for the currently targeted block.
     pub digging: DiggingState,
+    /// Repeat-placement tracker used while the right mouse button is held.
+    pub placement: BlockPlacementState,
     /// The OS window; shared with the event loop and network thread.
     pub window: Arc<Window>,
     /// Whether the cursor is captured (hidden and locked to the window center).
@@ -291,6 +318,14 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Computes and stores the per-cascade light-space view-projection matrices.
     pub csm: CsmManager,
+    /// Previous frame's camera view-projection matrix for shadow reprojection.
+    pub prev_view_proj: [[f32; 4]; 4],
+    /// Previous frame's camera position for temporal history weighting.
+    pub prev_camera_pos: [f32; 3],
+    /// Previous frame's sun direction for temporal history weighting.
+    pub prev_sun_position: [f32; 3],
+    /// Whether `shadow_history_texture` contains valid previous-frame data.
+    pub shadow_history_valid: bool,
     /// Active water reflection mode (`0 = off`, `1 = SSSR`).
     pub reflection_mode: u32,
     /// Toggles runtime shadow rendering without rebuilding pipelines.
@@ -455,6 +490,8 @@ pub struct WorldWriteOps {
     pub completed_chunks: Vec<(i32, i32, minerust::Chunk)>,
     /// Block coordinates to replace with `Air` this frame (player broke a block).
     pub block_break: Option<(i32, i32, i32)>,
+    /// Block coordinates and types to place this frame.
+    pub block_places: Vec<(i32, i32, i32, minerust::BlockType)>,
     /// Block coordinates whose owning subchunk (and its neighbors) should be
     /// marked dirty for re-meshing.
     pub mark_dirty: Vec<(i32, i32, i32)>,

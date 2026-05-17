@@ -190,7 +190,7 @@ impl State {
                 let raycast = self.camera.raycast(&*world, 5.0);
                 if let Some((bx, by, bz, _, _, _)) = raycast {
                     let block = world.get_block(bx, by, bz);
-                    (Some((bx, by, bz, 0, 0, 0)), Some(block))
+                    (raycast, Some(block))
                 } else {
                     (None, None)
                 }
@@ -206,11 +206,14 @@ impl State {
                 eye_pos.y.floor() as i32,
                 eye_pos.z.floor() as i32,
             );
-            let sky_visibility = world.sky_visibility_at(
+            let mut sky_visibility = world.sky_visibility_at(
                 eye_pos.x.floor() as i32,
                 eye_pos.y.floor() as i32,
                 eye_pos.z.floor() as i32,
             );
+            if eye_block.is_solid_opaque() {
+                sky_visibility = 0.0;
+            }
 
             WorldSnapshot {
                 missing_chunks,
@@ -249,6 +252,7 @@ impl State {
                 .map(|r| (r.cx, r.cz, r.chunk))
                 .collect(),
             block_break: None,
+            block_places: Vec::new(),
             mark_dirty: Vec::new(),
         };
 
@@ -288,11 +292,19 @@ impl State {
             self.digging.progress = 0.0;
         }
 
+        if let Some((px, py, pz, block_to_place)) =
+            self.update_held_block_placement(snapshot.raycast_result, dt)
+        {
+            write_ops.block_places.push((px, py, pz, block_to_place));
+            write_ops.mark_dirty.push((px, py, pz));
+        }
+
         // --- 7. World write ---
         // Batch all mutations into a single write-lock window to minimize
         // contention with background generation and mesh threads.
         if !write_ops.completed_chunks.is_empty()
             || write_ops.block_break.is_some()
+            || !write_ops.block_places.is_empty()
             || !write_ops.mark_dirty.is_empty()
         {
             let mut world = self.world.write();
@@ -311,6 +323,18 @@ impl State {
                         y: by,
                         z: bz,
                         block_type: BlockType::Air as u8,
+                    });
+                }
+            }
+
+            for (px, py, pz, block_to_place) in write_ops.block_places {
+                world.set_block_player(px, py, pz, block_to_place);
+                if let Some(tx) = &self.network_tx {
+                    let _ = tx.send(crate::multiplayer::protocol::Packet::BlockChange {
+                        x: px,
+                        y: py,
+                        z: pz,
+                        block_type: block_to_place as u8,
                     });
                 }
             }

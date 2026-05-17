@@ -122,12 +122,31 @@ impl State {
                 format: wgpu::TextureFormat::R32Float,
                 usage: wgpu::TextureUsages::STORAGE_BINDING
                     | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             self.shadow_mask_view = self
                 .shadow_mask_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
+            self.shadow_history_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Temporal Shadow History Texture"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.shadow_history_view = self
+                .shadow_history_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            self.shadow_history_valid = false;
 
             // Nearest-neighbor sampler for SSR lookups; bilinear filtering
             // would blur the reflected image and produce incorrect depth reads.
@@ -262,6 +281,21 @@ impl State {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
+                        },
+                    ],
+                });
+            self.temporal_shadow_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("temporal_shadow_bind_group"),
+                    layout: &self.shadow_mask_pipeline.get_bind_group_layout(3),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_history_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.temporal_shadow_buffer.as_entire_binding(),
                         },
                     ],
                 });

@@ -12,8 +12,8 @@ const SSSR_EDGE_FADE:     f32 = 0.06;
 const SSSR_FADE_DISTANCE: f32 = 180.0;
 const SSSR_CONE_ANGLE:    f32 = 0.040;
 
-const SHADOW_MAP_SIZE: f32 = 2048.0;
-const PCF_SAMPLES:     i32 = 8;
+const SHADOW_MAP_SIZE: f32 = 4096.0;
+const PCF_SAMPLES:     i32 = 16;
 const SHADOW_DISTANCE:    f32 = 96.0;
 const SHADOW_DISTANCE_SQ: f32 = SHADOW_DISTANCE * SHADOW_DISTANCE;
 
@@ -424,7 +424,7 @@ fn sssr_trace(
     return vec4(0.0);
 }
 
-const POISSON8: array<vec2<f32>, 8> = array(
+const POISSON16: array<vec2<f32>, 16> = array(
     vec2(-0.94201624, -0.39906216),
     vec2( 0.94558609, -0.76890725),
     vec2(-0.09418410, -0.92938870),
@@ -433,6 +433,14 @@ const POISSON8: array<vec2<f32>, 8> = array(
     vec2( 0.97484398,  0.75648379),
     vec2( 0.44323325, -0.97511554),
     vec2(-0.65476012, -0.05147385),
+    vec2(-0.91588581,  0.45771432),
+    vec2(-0.38277543,  0.27676845),
+    vec2( 0.53742981, -0.47373420),
+    vec2( 0.18395645,  0.89721549),
+    vec2(-0.09715394, -0.00673456),
+    vec2( 0.53472400,  0.73356543),
+    vec2(-0.45611231, -0.40212851),
+    vec2(-0.57321081,  0.65476012),
 );
 
 fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
@@ -459,7 +467,7 @@ fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
     let c     = cos(rot);
     var acc   = 0.0;
     for (var i: i32 = 0; i < PCF_SAMPLES; i++) {
-        let p = POISSON8[i];
+        let p = POISSON16[i];
         let offset = vec2(
             p.x * c - p.y * s,
             p.x * s + p.y * c,

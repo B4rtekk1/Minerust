@@ -11,7 +11,15 @@ struct Uniforms {
     _water_level:       f32,
     _reflection_mode:   f32,
     moon_position:      vec3<f32>,
-    cloud_coverage:     f32,   // was _pad1 — zakres 0..1, domyślnie 0.5
+    _pad1_moon:         f32,
+    moon_intensity:     f32,
+    wind_dir_x:         f32,
+    wind_dir_z:         f32,
+    wind_speed:         f32,
+    _pad:               f32,
+    rain_factor:        f32,
+    shadows_enabled:    f32,
+    sky_visibility:     f32,
 };
 
 @group(0) @binding(0)
@@ -220,8 +228,9 @@ fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
     let n       = fbm(p + drift * 0.18);
     let n2      = fbm(p * 1.8 - drift * 0.8);
 
-    // Pokrycie modulowane przez uniforms.cloud_coverage (0..1)
-    let cov_thresh = mix(0.72, 0.50, clamp(uniforms.cloud_coverage, 0.0, 1.0));
+    // Stale pokrycie chmur; sky_visibility jest używane niżej do maskowania
+    // nieba w zamkniętych przestrzeniach, bez zmiany samego wzoru chmur.
+    let cov_thresh = 0.72;
     let coverage = smoothstep(cov_thresh, cov_thresh + 0.28, n * 0.70 + n2 * 0.30);
     let wisps    = smoothstep(0.52, 0.78, fbm(p * 2.9 + drift * 1.3));
     let layer    = coverage * band * band;
@@ -265,7 +274,7 @@ fn star_field(view_dir: vec3<f32>, time: f32, night_factor: f32) -> vec3<f32> {
     if h < 0.978 { return vec3<f32>(0.0); }
 
     let twinkle    = 0.75 + 0.25 * sin(time * mix(1.5, 4.0, hash11(h * 73.0)) + h * TAU);
-    let horizon    = clamp(view_dir.y * 2.2 + 0.22, 0.0, 1.0);
+    let horizon    = smoothstep(0.02, 0.16, view_dir.y);
     let brightness = smoothstep(0.978, 0.9995, h) * twinkle * horizon * night_factor;
 
     let warm_star = vec3<f32>(1.00, 0.90, 0.74);
@@ -280,6 +289,9 @@ fn star_field(view_dir: vec3<f32>, time: f32, night_factor: f32) -> vec3<f32> {
 // ---------------------------------------------------------------------------
 fn shooting_stars(view_dir: vec3<f32>, time: f32, night_factor: f32) -> vec3<f32> {
     if night_factor < 0.01 { return vec3<f32>(0.0); }
+
+    let horizon = smoothstep(0.02, 0.14, view_dir.y);
+    if horizon < 0.001 { return vec3<f32>(0.0); }
 
     var result = vec3<f32>(0.0);
 
@@ -312,7 +324,7 @@ fn shooting_stars(view_dir: vec3<f32>, time: f32, night_factor: f32) -> vec3<f32
             streak     += pow(max(cos_seg, 0.0), 800.0) * (1.0 - sf * 0.85);
         }
 
-        result += vec3<f32>(0.95, 0.92, 0.85) * streak * fade * night_factor * 2.5;
+        result += vec3<f32>(0.95, 0.92, 0.85) * streak * fade * night_factor * horizon * 2.5;
     }
 
     return result;
@@ -457,16 +469,20 @@ fn fs_sky(in: VertexOutput) -> @location(0) vec4<f32> {
     ap.dusk     = 1.0 - smoothstep(0.02, 0.34, abs(ap.sun_h));
     ap.night    = clamp(-ap.sun_h * 4.0 - 0.05, 0.0, 1.0);
 
+    let open_sky = clamp(uniforms.sky_visibility, 0.0, 1.0)
+        * select(0.0, 1.0, uniforms.camera_pos.y >= 0.0);
+    let night_sky = ap.night * open_sky;
+
     var sky = atmospheric_gradient(view_dir, ap);
     sky    += atmospheric_scatter(view_dir, ap);
     sky    += horizon_haze(view_dir, ap);
-    sky    += sun_glow(view_dir, ap);
-    sky    += cloud_layer(view_dir, ap, uniforms.time);
-    sky    += star_field(view_dir, uniforms.time, ap.night);
-    sky    += shooting_stars(view_dir, uniforms.time, ap.night);
-    sky    += aurora(view_dir, uniforms.time, ap.night);
-    sky    += moon_disk(view_dir, ap);
-    sky    += rainbow(view_dir, ap);
+    sky    += sun_glow(view_dir, ap) * open_sky;
+    sky    += cloud_layer(view_dir, ap, uniforms.time) * open_sky;
+    sky    += star_field(view_dir, uniforms.time, night_sky);
+    sky    += shooting_stars(view_dir, uniforms.time, night_sky);
+    sky    += aurora(view_dir, uniforms.time, night_sky);
+    sky    += moon_disk(view_dir, ap) * open_sky;
+    sky    += rainbow(view_dir, ap) * open_sky;
 
     if ap.dusk > 0.01 {
         let warm_band = pow(max(0.0, 1.0 - abs(view_dir.y)), 2.6) * ap.dusk;

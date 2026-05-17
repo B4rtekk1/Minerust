@@ -15,8 +15,9 @@ use crate::logger::{LogLevel, log};
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    CSM_SHADOW_MAP_SIZE, Camera, DiggingState, IndirectManager, InputState, OutlineVertex,
-    RENDER_DISTANCE, SEA_LEVEL, ShadowConfig, Uniforms, Vertex, World, build_crosshair,
+    CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZE, Camera, DiggingState, IndirectManager, InputState,
+    OutlineVertex, RENDER_DISTANCE, SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms,
+    Vertex, World, build_crosshair,
 };
 
 use super::state::State;
@@ -207,7 +208,7 @@ impl State {
             height: size.height,
             // `Immediate` disables vsync so the frame rate is uncapped.
             // Switch to `Fifo` (vsync) to reduce GPU power consumption.
-            present_mode: wgpu::PresentMode::Immediate,
+            present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: surface_caps
                 .alpha_modes
                 .iter()
@@ -371,10 +372,10 @@ impl State {
         // Shadow map (Cascaded Shadow Maps – CSM)
         // ------------------------------------------------------------------ //
 
-        // A 2 K × 2 K Depth32Float texture array with 4 layers, one per
-        // cascade.  Increasing `shadow_map_size` improves shadow sharpness at
-        // the cost of VRAM and shadow-pass render time.
-        let shadow_map_size = 2048;
+        // A Depth32Float texture array with 4 layers, one per cascade.
+        // Increasing `shadow_map_size` improves shadow sharpness at the cost
+        // of VRAM and shadow-pass render time.
+        let shadow_map_size = CSM_SHADOW_MAP_SIZE;
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Shadow Map"),
             size: wgpu::Extent3d {
@@ -456,11 +457,28 @@ impl State {
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let shadow_mask_view =
             shadow_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_history_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Temporal Shadow History Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let shadow_history_view =
+            shadow_history_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         {
             let mut clear_encoder =
@@ -469,17 +487,18 @@ impl State {
                 });
             // Initialise to "fully lit" (1.0) so sampling is valid before
             // the first compute dispatch.
+            let shadow_mask_init_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Shadow Mask Init Buffer"),
+                    contents: bytemuck::cast_slice(&vec![
+                        1.0f32;
+                        (config.width * config.height) as usize
+                    ]),
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                });
             clear_encoder.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
-                    buffer: &device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Shadow Mask Init Buffer"),
-                        contents: bytemuck::cast_slice(&vec![
-                            1.0f32;
-                            (config.width * config.height)
-                                as usize
-                        ]),
-                        usage: wgpu::BufferUsages::COPY_SRC,
-                    }),
+                    buffer: &shadow_mask_init_buffer,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(4 * config.width),
@@ -498,6 +517,27 @@ impl State {
                     depth_or_array_layers: 1,
                 },
             );
+            clear_encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &shadow_mask_init_buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * config.width),
+                        rows_per_image: Some(config.height),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &shadow_history_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: config.width,
+                    height: config.height,
+                    depth_or_array_layers: 1,
+                },
+            );
             queue.submit(Some(clear_encoder.finish()));
         }
 
@@ -505,8 +545,19 @@ impl State {
             label: Some("Shadow Config Buffer"),
             contents: bytemuck::cast_slice(&[ShadowConfig {
                 shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
-                pcf_samples: 16,
+                pcf_samples: CSM_PCF_SAMPLES,
                 _pad: [0; 2],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let temporal_shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Temporal Shadow Buffer"),
+            contents: bytemuck::cast_slice(&[TemporalShadowUniforms {
+                prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                prev_camera_pos: [0.0, 0.0, 0.0],
+                history_weight: 0.0,
+                prev_sun_position: [0.0, 1.0, 0.0],
+                history_valid: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -663,6 +714,32 @@ impl State {
                     count: None,
                 }],
             });
+        let temporal_shadow_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("temporal_shadow_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         // Bind groups that depend on `ssr_depth_view` are created later, after
         // the SSR textures are allocated.
@@ -730,6 +807,20 @@ impl State {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(&shadow_mask_view),
             }],
+        });
+        let temporal_shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("temporal_shadow_bind_group"),
+            layout: &temporal_shadow_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_history_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: temporal_shadow_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         // Nearest-neighbor sampler for SSR lookups; bilinear filtering would
@@ -1036,6 +1127,7 @@ impl State {
                     &uniform_bind_group_layout,            // group: 0
                     &terrain_gbuffer_bind_group_layout,    // group: 1 (ssr_depth)
                     &shadow_mask_output_bind_group_layout, // group: 2 (shadow mask output)
+                    &temporal_shadow_bind_group_layout,    // group: 3 (previous shadow history)
                 ],
                 immediate_size: 0,
             });
@@ -1927,6 +2019,7 @@ impl State {
             num_crosshair_indices,
             uniform_buffer,
             shadow_config_buffer,
+            temporal_shadow_buffer,
             uniform_bind_group,
             terrain_gbuffer_bind_group: terrain_gbuffer_bind_group.clone(),
             terrain_shadow_output_bind_group: terrain_shadow_output_bind_group.clone(),
@@ -1938,18 +2031,22 @@ impl State {
             shadow_texture_view,
             shadow_mask_texture,
             shadow_mask_view,
+            shadow_history_texture,
+            shadow_history_view,
             shadow_cascade_views,
             shadow_cascade_buffer,
             shadow_sampler,
             shadow_mask_bind_group,
             shadow_mask_input_bind_group: terrain_gbuffer_bind_group,
             shadow_mask_output_bind_group,
+            temporal_shadow_bind_group,
             world,
             mesh_loader,
             camera,
             highlighted_block: None,
             input: InputState::default(),
             digging: DiggingState::default(),
+            placement: super::state::BlockPlacementState::default(),
             window,
             frame_count: 0,
             last_fps_update: Instant::now(),
@@ -2045,6 +2142,10 @@ impl State {
             depth_resolve_bind_group,
             supports_indirect_count,
             csm: minerust::render_core::csm::CsmManager::new(),
+            prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            prev_camera_pos: [0.0, 0.0, 0.0],
+            prev_sun_position: [0.0, 1.0, 0.0],
+            shadow_history_valid: false,
             hotbar_slot: 0,
             hotbar_vertex_buffer: None,
             hotbar_index_buffer: None,

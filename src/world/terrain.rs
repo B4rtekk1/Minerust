@@ -344,6 +344,13 @@ impl World {
     /// runs per fragment on the GPU, while this value tells the shader whether
     /// the current area is broadly outdoors or under a solid ceiling.
     pub fn sky_visibility_at(&self, x: i32, y: i32, z: i32) -> f32 {
+        if y < 0 {
+            return 0.0;
+        }
+        if y >= WORLD_HEIGHT {
+            return 1.0;
+        }
+
         const SAMPLE_OFFSETS: [(i32, i32); 5] = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)];
 
         let start_y = (y + 1).clamp(0, WORLD_HEIGHT);

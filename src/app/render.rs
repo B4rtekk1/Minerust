@@ -3,9 +3,9 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL,
-    ShadowConfig, Uniforms, Vertex, World, build_block_outline, build_player_model,
-    extract_frustum_planes,
+    BlockType, CHUNK_SIZE, CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, RENDER_DISTANCE,
+    SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, World, build_block_outline,
+    build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -361,8 +361,34 @@ impl State {
             0,
             bytemuck::cast_slice(&[ShadowConfig {
                 shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
-                pcf_samples: if self.shadows_enabled { 16 } else { 0 },
+                pcf_samples: if self.shadows_enabled {
+                    CSM_PCF_SAMPLES
+                } else {
+                    0
+                },
                 _pad: [0; 2],
+            }]),
+        );
+        let temporal_history_valid =
+            self.shadow_history_valid && self.shadows_enabled && self.game_state != GameState::Menu;
+        let camera_motion = Vec3::from_array(self.prev_camera_pos).distance(eye_pos);
+        let sun_motion = Vec3::from_array(self.prev_sun_position).distance(sun_dir);
+        let camera_history_factor = (1.0 - camera_motion * 0.12).clamp(0.35, 1.0);
+        let sun_history_factor = (1.0 - sun_motion * 64.0).clamp(0.50, 1.0);
+        let history_weight = if temporal_history_valid {
+            0.86 * camera_history_factor * sun_history_factor
+        } else {
+            0.0
+        };
+        self.queue.write_buffer(
+            &self.temporal_shadow_buffer,
+            0,
+            bytemuck::cast_slice(&[TemporalShadowUniforms {
+                prev_view_proj: self.prev_view_proj,
+                prev_camera_pos: self.prev_camera_pos,
+                history_weight,
+                prev_sun_position: self.prev_sun_position,
+                history_valid: if temporal_history_valid { 1.0 } else { 0.0 },
             }]),
         );
 
@@ -610,6 +636,16 @@ impl State {
                     self.indirect_manager.active_count(),
                 );
             }
+            if self.player_model_num_indices > 0 {
+                if let (Some(vb), Some(ib)) = (
+                    &self.player_model_vertex_buffer,
+                    &self.player_model_index_buffer,
+                ) {
+                    depth_prepass.set_vertex_buffer(0, vb.slice(..));
+                    depth_prepass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    depth_prepass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
+                }
+            }
         }
 
         // ── Depth resolve compute pass ───────────────────────────────────── //
@@ -639,11 +675,42 @@ impl State {
             shadow_mask_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             shadow_mask_pass.set_bind_group(1, &self.shadow_mask_input_bind_group, &[]);
             shadow_mask_pass.set_bind_group(2, &self.shadow_mask_output_bind_group, &[]);
+            shadow_mask_pass.set_bind_group(3, &self.temporal_shadow_bind_group, &[]);
             shadow_mask_pass.dispatch_workgroups(
                 (self.config.width + 7) / 8,
                 (self.config.height + 7) / 8,
                 1,
             );
+        }
+        if self.game_state != GameState::Menu {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.shadow_mask_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.shadow_history_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.prev_view_proj = view_proj_array;
+            self.prev_camera_pos = eye_pos.to_array();
+            self.prev_sun_position = [sun_x, sun_y, sun_z];
+            self.shadow_history_valid = self.shadows_enabled;
+        } else {
+            self.prev_view_proj = view_proj_array;
+            self.prev_camera_pos = eye_pos.to_array();
+            self.prev_sun_position = [sun_x, sun_y, sun_z];
+            self.shadow_history_valid = false;
         }
 
         // ── Hi-Z mip chain generation (compute) ───────────────────────────── //

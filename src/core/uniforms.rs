@@ -121,3 +121,23 @@ pub struct ShadowConfig {
     /// Explicit padding so the buffer remains 16 bytes wide.
     pub _pad: [u32; 2],
 }
+
+/// Per-frame temporal shadow reprojection state.
+///
+/// The shadow-mask compute pass uses this to project the current pixel's
+/// reconstructed world position into the previous frame and blend the current
+/// CSM result with the previous screen-space shadow mask.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct TemporalShadowUniforms {
+    /// Previous frame's camera view-projection matrix.
+    pub prev_view_proj: [[f32; 4]; 4],
+    /// Previous frame's camera position.
+    pub prev_camera_pos: [f32; 3],
+    /// Blend weight for valid history samples.
+    pub history_weight: f32,
+    /// Previous frame's sun direction.
+    pub prev_sun_position: [f32; 3],
+    /// Non-zero when the previous shadow history texture contains valid data.
+    pub history_valid: f32,
+}
