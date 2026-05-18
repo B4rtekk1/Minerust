@@ -63,13 +63,11 @@ pub struct Uniforms {
     /// Used by water shaders and above/below-surface transitions.
     pub water_level: f32,
 
-    /// Selects the active water reflection technique.
+    /// Explicit padding for the water uniform slot after `water_level`.
     ///
-    /// Interpreted as an integer enum in shaders:
-    /// - `0.0` — no reflection
-    /// - `1.0` — planar reflection
-    /// - `1.0` — stochastic screen-space reflection (SSSR)
-    pub reflection_mode: f32,
+    /// Kept to preserve the GPU uniform layout without exposing a runtime
+    /// reflection mode.
+    pub _pad_water: f32,
 
     /// Normalized direction vector toward the moon `[x, y, z]` in world space.
     ///
@@ -104,6 +102,26 @@ pub struct Uniforms {
     /// `1.0` means the camera is outdoors, `0.0` means a solid ceiling blocks
     /// the column above it. Terrain GI uses this to darken caves and tunnels.
     pub sky_visibility: f32,
+
+    /// Normalized atlas rectangles for each CSM cascade: `[x, y, w, h]`.
+    ///
+    /// The shadow shader first computes local cascade UVs, then maps them into
+    /// these atlas rectangles before sampling the shared depth texture.
+    pub csm_shadow_rects: [[f32; 4]; 4],
+
+    /// Effective shadow-map resolution for each cascade in texels.
+    ///
+    /// Used by PCF filtering so farther cascades can render into smaller atlas
+    /// regions without changing their world-space filter size unexpectedly.
+    pub csm_shadow_sizes: [f32; 4],
+
+    /// Stabilized sun direction used only by CSM sampling and shadow bias.
+    ///
+    /// The visible sun can move every frame; shadows use this slower-updated
+    /// direction so filtered shadow edges do not shimmer from tiny light changes.
+    pub shadow_sun_position: [f32; 3],
+    /// Explicit padding for the trailing `shadow_sun_position` vec3.
+    pub _pad_shadow_sun: f32,
 }
 
 /// Small shadow-specific configuration uploaded separately from the main

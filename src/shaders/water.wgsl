@@ -1,19 +1,7 @@
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
 
-const SSSR_MAX_STEPS:     i32 = 18;
-const SSSR_MIN_STEPS:     i32 = 7;
-const SSSR_BINARY_STEPS:  i32 = 5;
-const SSSR_SAMPLE_COUNT:  i32 = 4;
-const SSSR_MAX_DISTANCE:  f32 = 80.0;
-const SSSR_MAX_DISTANCE_SQ: f32 = SSSR_MAX_DISTANCE * SSSR_MAX_DISTANCE;
-const SSSR_THICKNESS:     f32 = 0.06;
-const SSSR_EDGE_FADE:     f32 = 0.06;
-const SSSR_FADE_DISTANCE: f32 = 180.0;
-const SSSR_CONE_ANGLE:    f32 = 0.040;
-
-const SHADOW_MAP_SIZE: f32 = 4096.0;
-const PCF_SAMPLES:     i32 = 16;
+const PCF_SAMPLES:     i32 = 8;
 const SHADOW_DISTANCE:    f32 = 96.0;
 const SHADOW_DISTANCE_SQ: f32 = SHADOW_DISTANCE * SHADOW_DISTANCE;
 
@@ -25,7 +13,6 @@ const WATER_COLOR_DEEP:    vec3<f32> = vec3<f32>(0.010, 0.072, 0.165);
 const WATER_OPACITY:       f32 = 0.26;
 const FRESNEL_R0:          f32 = 0.020;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
-const WATER_ROUGHNESS_MIN: f32 = 0.03;
 const WATER_ROUGHNESS_MAX: f32 = 0.14;
 
 const FOG_NEAR: f32 = 0.0;
@@ -46,24 +33,29 @@ struct Uniforms {
     is_underwater:       f32,
     screen_size:         vec2<f32>,
     water_level:         f32,
-    reflection_mode:     f32,
+    _pad_water:          f32,
     moon_position:       vec3<f32>,
+    _pad1_moon:          f32,
     moon_intensity:      f32,
-    wind_dir:            vec2<f32>,
+    wind_dir_x:          f32,
+    wind_dir_z:          f32,
     wind_speed:          f32,
     _pad:                f32,
     rain_factor:         f32,
     shadows_enabled:     f32,
+    sky_visibility:      f32,
+    csm_shadow_rects:    array<vec4<f32>, 4>,
+    csm_shadow_sizes:    vec4<f32>,
+    shadow_sun_position: vec3<f32>,
+    _pad_shadow_sun:     f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms:  Uniforms;
-@group(0) @binding(3) var shadow_map:         texture_depth_2d_array;
+@group(0) @binding(3) var shadow_map:         texture_depth_2d;
 @group(0) @binding(4) var shadow_sampler:     sampler_comparison;
-@group(0) @binding(5) var ssr_color:          texture_2d<f32>;
-@group(0) @binding(6) var ssr_depth:          texture_2d<f32>;
-@group(0) @binding(7) var ssr_sampler:        sampler;
-@group(0) @binding(8) var flow_map:           texture_2d<f32>;
-@group(0) @binding(9) var flow_sampler:       sampler;
+@group(0) @binding(5) var resolved_depth:     texture_2d<f32>;
+@group(0) @binding(6) var flow_map:           texture_2d<f32>;
+@group(0) @binding(7) var flow_sampler:       sampler;
 
 
 struct VertexInput {
@@ -104,6 +96,15 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(q.x * q.y);
 }
 
+fn sun_poisson_phase(sun_dir: vec3<f32>) -> f32 {
+    let dir = normalize(sun_dir);
+    return atan2(dir.z, max(dir.y, 0.001));
+}
+
+fn uniform_wind_dir() -> vec2<f32> {
+    return vec2(uniforms.wind_dir_x, uniforms.wind_dir_z);
+}
+
 fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
     let dist    = length(pos.xz - uniforms.camera_pos.xz);
     let lod     = clamp(1.0 - dist / LOD_FAR, 0.05, 1.0);
@@ -114,7 +115,7 @@ fn calculate_gerstner(pos: vec3<f32>, time: f32) -> GerstnerResult {
 
     if lod < 0.01 { return result; }
 
-    let wind_n = normalize(uniforms.wind_dir);
+    let wind_n = normalize(uniform_wind_dir());
     let p      = pos.xz;
     let wsp    = uniforms.wind_speed;
 
@@ -262,7 +263,7 @@ fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity:
 fn sample_depth(uv: vec2<f32>) -> f32 {
     let sz = vec2<i32>(uniforms.screen_size);
     let px = clamp(vec2<i32>(uv * uniforms.screen_size), vec2<i32>(0), sz - vec2<i32>(1));
-    return textureLoad(ssr_depth, px, 0).r;
+    return textureLoad(resolved_depth, px, 0).r;
 }
 
 fn reconstruct_world(uv: vec2<f32>, d: f32) -> vec3<f32> {
@@ -277,151 +278,10 @@ fn beer_lambert(transmittance_coeff: vec3<f32>, distance: f32) -> vec3<f32> {
 }
 
 fn flow_vector(world_xz: vec2<f32>, time: f32) -> vec2<f32> {
-    let wind = normalize(uniforms.wind_dir + vec2(0.001, 0.001));
+    let wind = normalize(uniform_wind_dir() + vec2(0.001, 0.001));
     let uv = world_xz * 0.018 + wind * time * 0.035 + vec2(time * 0.01, -time * 0.008);
     let s = textureSampleLevel(flow_map, flow_sampler, uv, 0.0).rg;
     return (s - vec2(0.5)) * 2.0;
-}
-
-fn sssr_hit_stability(uv: vec2<f32>, center_depth: f32) -> f32 {
-    let texel = 1.0 / uniforms.screen_size;
-
-    let depth_x0 = sample_depth(clamp(uv - vec2(texel.x, 0.0), vec2(0.0), vec2(1.0)));
-    let depth_x1 = sample_depth(clamp(uv + vec2(texel.x, 0.0), vec2(0.0), vec2(1.0)));
-    let depth_y0 = sample_depth(clamp(uv - vec2(0.0, texel.y), vec2(0.0), vec2(1.0)));
-    let depth_y1 = sample_depth(clamp(uv + vec2(0.0, texel.y), vec2(0.0), vec2(1.0)));
-
-    let max_delta = max(
-        max(abs(center_depth - depth_x0), abs(center_depth - depth_x1)),
-        max(abs(center_depth - depth_y0), abs(center_depth - depth_y1)),
-    );
-
-    // Thin cutout geometry like leaves produces sharp depth discontinuities.
-    // Fade SSSR there to avoid reflections appearing detached from the water.
-    return 1.0 - smoothstep(0.0015, 0.012, max_delta);
-}
-
-fn sssr_trace_ray(
-    world_pos: vec3<f32>,
-    refl_dir: vec3<f32>,
-    water_view_dist: f32,
-    max_steps: i32,
-) -> vec4<f32> {
-    let dir  = normalize(refl_dir);
-    var ray  = world_pos + dir * 0.3;
-    var prev = ray;
-    var traveled = 0.3;
-
-    var hit_uv   = vec2(0.0);
-    var hit_conf = 0.0;
-    var found    = false;
-
-    for (var i: i32 = 0; i < SSSR_MAX_STEPS; i++) {
-        if i >= max_steps { break; }
-
-        let fi   = f32(i);
-        let step = 0.3 + fi * fi * 0.009;
-        prev = ray;
-        ray += dir * step;
-        traveled += step;
-
-        if traveled * traveled > SSSR_MAX_DISTANCE_SQ { break; }
-
-        let clip = uniforms.view_proj * vec4(ray, 1.0);
-        if clip.w <= 0.0 { break; }
-        let ndc = clip.xyz / clip.w;
-        if any(abs(ndc.xy) > vec2(1.0)) { break; }
-
-        let uv   = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-        let sd   = sample_depth(uv);
-        let diff = ndc.z - sd;
-
-        if diff > 0.0 && diff < SSSR_THICKNESS {
-            var lo = prev; var hi = ray;
-            for (var b: i32 = 0; b < SSSR_BINARY_STEPS; b++) {
-                let mid = (lo + hi) * 0.5;
-                let mc  = uniforms.view_proj * vec4(mid, 1.0);
-                if mc.w <= 0.0 { break; }
-                let mn  = mc.xyz / mc.w;
-                let mu  = vec2(mn.x * 0.5 + 0.5, 0.5 - mn.y * 0.5);
-                if mn.z > sample_depth(mu) { hi = mid; } else { lo = mid; }
-            }
-            let fc = uniforms.view_proj * vec4(hi, 1.0);
-            if fc.w > 0.0 {
-                let fn_ = fc.xyz / fc.w;
-                let fu  = vec2(fn_.x * 0.5 + 0.5, 0.5 - fn_.y * 0.5);
-                let hit_depth = sample_depth(fu);
-                let fd  = abs(fn_.z - hit_depth);
-                if fd < SSSR_THICKNESS {
-                    let hit_world = reconstruct_world(fu, hit_depth);
-                    let hit_view_delta = hit_world - uniforms.camera_pos;
-                    let hit_view_dist_sq = dot(hit_view_delta, hit_view_delta);
-                    let min_hit_dist = max(water_view_dist - 0.35, 0.0);
-
-                    // The opaque depth buffer contains foreground occluders too.
-                    // If the SSR candidate is closer to the camera than this water
-                    // fragment, it is usually an object standing between the camera
-                    // and the water, not something the water surface should reflect.
-                    if hit_view_dist_sq >= min_hit_dist * min_hit_dist {
-                        hit_uv   = fu;
-                        hit_conf = (1.0 - fd / SSSR_THICKNESS) * sssr_hit_stability(fu, hit_depth);
-                        found    = true;
-                    }
-                }
-            }
-            break;
-        }
-    }
-
-    if found && hit_conf > 0.05 {
-        let edge = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
-        let ef   = smoothstep(0.0, SSSR_EDGE_FADE, edge);
-        let fc   = smoothstep(0.05, 0.9, hit_conf) * ef;
-        if fc > 0.02 {
-            return vec4(textureSampleLevel(ssr_color, ssr_sampler, hit_uv, 0.0).rgb, fc);
-        }
-    }
-    return vec4(0.0);
-}
-
-fn sssr_trace(
-    world_pos: vec3<f32>,
-    refl_dir: vec3<f32>,
-    water_view_dist: f32,
-    max_steps: i32,
-    roughness: f32,
-    seed: vec2<f32>,
-) -> vec4<f32> {
-    let base_dir = normalize(refl_dir);
-    let up_hint = select(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), abs(base_dir.y) > 0.92);
-    let tangent = normalize(cross(up_hint, base_dir));
-    let bitangent = cross(base_dir, tangent);
-    let cone = SSSR_CONE_ANGLE * mix(0.45, 1.65, clamp(roughness / WATER_ROUGHNESS_MAX, 0.0, 1.0));
-
-    var color_acc = vec3(0.0);
-    var weight_acc = 0.0;
-    var confidence = 0.0;
-
-    for (var s: i32 = 0; s < SSSR_SAMPLE_COUNT; s++) {
-        let sf = f32(s);
-        let rnd0 = hash21(seed + vec2(sf * 17.13, sf * 3.71) + uniforms.time * 0.037);
-        let rnd1 = hash21(seed + vec2(sf * 5.31, sf * 23.17) - uniforms.time * 0.029);
-        let angle = (sf + rnd0) * (TAU / f32(SSSR_SAMPLE_COUNT));
-        let radius = sqrt((sf + rnd1) / f32(SSSR_SAMPLE_COUNT)) * cone;
-        let jitter = (tangent * cos(angle) + bitangent * sin(angle)) * radius;
-        let sample_dir = normalize(base_dir + jitter);
-        let hit = sssr_trace_ray(world_pos, sample_dir, water_view_dist, max_steps);
-        let weight = hit.w * mix(1.0, 0.72, sf / f32(SSSR_SAMPLE_COUNT));
-        color_acc += hit.rgb * weight;
-        weight_acc += weight;
-        confidence = max(confidence, hit.w);
-    }
-
-    if weight_acc > 0.0001 {
-        let coverage = smoothstep(0.035, 0.34, weight_acc);
-        return vec4(color_acc / weight_acc, clamp(confidence * mix(0.55, 1.0, coverage), 0.0, 1.0));
-    }
-    return vec4(0.0);
 }
 
 const POISSON16: array<vec2<f32>, 16> = array(
@@ -458,22 +318,25 @@ fn calculate_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
     if sc.z < 0.0 || sc.z > 1.0 { return 1.0; }
 
     let bias  = 0.003;
-    let texel = 1.0 / SHADOW_MAP_SIZE;
+    let shadow_map_size = max(uniforms.csm_shadow_sizes[0], 1.0);
+    let texel = 1.0 / shadow_map_size;
     let filter_radius = texel * 2.0;
     let edge_dist = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
     let edge_fade = smoothstep(0.0, filter_radius + texel, edge_dist);
-    let rot   = hash21(world_pos.xz) * TAU;
+    let rot   = hash21(world_pos.xz) * TAU + sun_poisson_phase(uniforms.shadow_sun_position);
     let s     = sin(rot);
     let c     = cos(rot);
     var acc   = 0.0;
     for (var i: i32 = 0; i < PCF_SAMPLES; i++) {
+        let rect = uniforms.csm_shadow_rects[0];
         let p = POISSON16[i];
         let offset = vec2(
             p.x * c - p.y * s,
             p.x * s + p.y * c,
         ) * filter_radius;
         let suv = clamp(uv + offset, vec2(texel), vec2(1.0 - texel));
-        acc += textureSampleCompare(shadow_map, shadow_sampler, suv, 0, clamp(sc.z - bias, 0.0, 1.0));
+        let atlas_uv = rect.xy + suv * rect.zw;
+        acc += textureSampleCompare(shadow_map, shadow_sampler, atlas_uv, clamp(sc.z - bias, 0.0, 1.0));
     }
     return mix(1.0, acc / f32(PCF_SAMPLES), edge_fade);
 }
@@ -485,6 +348,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist      = length(to_camera);
     let view_dir  = to_camera / dist;
     let sun_dir   = uniforms.sun_position;
+    let shadow_sun_dir = normalize(uniforms.shadow_sun_position);
     let day       = clamp(sun_dir.y, 0.0, 1.0);
     let t         = uniforms.time;
 
@@ -541,79 +405,47 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let wave_pulse = clamp(in.world_pos.y * 1.4 + 0.5, 0.0, 1.0);
     water_color   *= mix(0.92, 1.16, wave_pulse);
 
-    let shadow  = calculate_shadow(in.world_pos, sun_dir);
+    let shadow  = calculate_shadow(in.world_pos, shadow_sun_dir);
     let night_factor = 1.0 - day;
     let night_dark = vec3(0.0, 0.0, 0.01);
     let night_mix = clamp(night_factor * 1.5, 0.0, 1.0);
     water_color = mix(water_color, night_dark, night_mix);
 
-    // Use a smoother normal for reflections. The detailed normal is still used
-    // for refraction/specular, but using it for grazing reflections turns sky
-    // fallback into large white patches.
+    // Use a smoother normal for sky reflections. The detailed normal is still
+    // used for specular lighting, but using it for grazing reflections turns
+    // the sky fallback into large white patches.
     let refl_normal = normalize(mix(normal, wave_n_raw, grazing * 0.65));
     var refl_dir   = reflect(-view_dir, refl_normal);
     refl_dir.y     = max(refl_dir.y, 0.001);
 
     var refl_color = sky_reflection_color(refl_dir, sun_dir, uniforms.moon_intensity);
-    // Sky is only a fallback here. Keep it water-tinted so failed SSR rays do
-    // not become white mirror islands at low camera angles.
     refl_color = mix(refl_color, WATER_COLOR_DEEP, 0.22 + grazing * 0.18);
     refl_color *= 0.98 - grazing * 0.16;
     let reflection_mix = clamp(0.055 + fresnel * (0.88 - grazing * 0.10), 0.0, 0.72);
-    var ssr_confidence = 0.0;
 
-    // Rust currently toggles reflection_mode between 0 and 1. Treat 1 as SSSR;
-    // there is no separate planar reflection path in this shader.
-    if uniforms.reflection_mode >= 1.0 {
-        // Fade SSSR with distance and with "effective roughness" (rainy/rough water breaks SSSR).
-        let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
-        let roughness_base = mix(WATER_ROUGHNESS_MIN, WATER_ROUGHNESS_MAX, rain * 0.85);
-        let rough_fade = 1.0 - smoothstep(0.06, 0.16, roughness_base);
-        let ssr_importance = clamp((0.52 + reflection_mix * 1.85 + grazing * 0.36) * (1.0 - shore_w * 0.16), 0.0, 1.0);
-        let ssr_fade = clamp((1.0 - dist / SSSR_FADE_DISTANCE) * rough_fade * ssr_importance, 0.0, 1.0);
-        if ssr_fade > 0.01 {
-            let step_lerp = clamp(ssr_importance * (1.0 - dist / SSSR_FADE_DISTANCE), 0.0, 1.0);
-            let ssr_steps = i32(mix(f32(SSSR_MIN_STEPS), f32(SSSR_MAX_STEPS), step_lerp));
-            let ssr  = sssr_trace(in.world_pos, refl_dir, dist, ssr_steps, roughness_base, in.world_pos.xz + uv * 37.0);
-            let conf = smoothstep(0.05, 0.9, ssr.w) * ssr_fade;
-            if conf > 0.02 {
-                ssr_confidence = max(ssr_confidence, conf);
-                refl_color = mix(refl_color, ssr.rgb, min(conf * 1.12, 1.0));
-            }
-        }
-    }
-
-    // --- Refraction (screen-space) ---
-    // Use only the vertex wave normal for UV offsets. High-frequency normal/detail + flow
-    // animates the sample every frame while the opaque texture is static → “double image”.
+    // --- Surface transmission hint ---
+    // Keep a small wave/flow brightness variation so water remains animated
+    // without sampling the resolved scene color.
     let cos_v = cos_theta;
     let n_refract = wave_n_raw;
     let cos_v_refract = max(dot(view_dir, n_refract), 0.0);
 
     let dist_fade = clamp(1.0 - dist / 120.0, 0.0, 1.0);
-    // Thicker water column → less screen-space wobble (seabed should not “swim”).
     let thick_stab = smoothstep(0.25, 3.5, thickness);
     let distort_strength =
         (0.006 + 0.016 * (1.0 - cos_v_refract)) * dist_fade * (1.0 - 0.68 * thick_stab);
-    // Flow map only near shore; never full strength or the refracted layer slides over geometry.
     let flow_refract = flow * (0.08 * shore_w * shore_w);
-    let distort = (vec2(n_refract.x, -n_refract.z) + flow_refract) * distort_strength;
-    let chroma =
-        (1.0 - cos_v_refract) * 0.00065 * dist_fade * (1.0 - 0.70 * thick_stab) * (1.0 + shore_w * 0.15);
-    let refr_uv0 = clamp(uv + distort, vec2(0.0), vec2(1.0));
-    // Far from camera, chromatic split is subpixel: fall back to a single tap.
-    var refracted_scene = textureSampleLevel(ssr_color, ssr_sampler, refr_uv0, 0.0).rgb;
-    if chroma > 0.00025 {
-        let refr_uv_r = clamp(uv + distort + vec2(chroma, -chroma * 0.35), vec2(0.0), vec2(1.0));
-        let refr_uv_b = clamp(uv + distort - vec2(chroma * 0.85, chroma * 0.2), vec2(0.0), vec2(1.0));
-        let sr = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_r, 0.0).r;
-        let sg = refracted_scene.g;
-        let sb = textureSampleLevel(ssr_color, ssr_sampler, refr_uv_b, 0.0).b;
-        refracted_scene = vec3(sr, sg, sb);
-    }
+    let surface_variation = clamp(
+        0.92 + dot(vec2(n_refract.x, -n_refract.z) + flow_refract, vec2(0.65, -0.35))
+            * distort_strength
+            * 18.0
+            + shore_w * 0.08,
+        0.78,
+        1.12,
+    );
 
-    // Apply absorption to the refracted color, then add in-scattered tint.
-    let refracted = refracted_scene * trans;
+    // Apply absorption to the transmitted water tint, then add in-scattered tint.
+    let refracted = water_color * trans * surface_variation;
     let inscatter = water_color * (1.0 - trans) * (0.62 + 0.42 * day);
 
     // Thin-water sunlight transmission (view-dependent, strongest opposite Fresnel).
@@ -623,7 +455,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let sss = sun_tint * transmit * (0.28 + shore_w * 0.35);
 
     water_color = refracted + inscatter + sss;
-    let effective_reflection_mix = clamp(reflection_mix * mix(0.46, 1.12, ssr_confidence), 0.0, 0.78);
+    let effective_reflection_mix = clamp(reflection_mix, 0.0, 0.72);
     water_color = mix(water_color, refl_color, effective_reflection_mix);
 
     // Soft sun glint on reflection vector. Keep it low; strong highlights read as white patches.
@@ -634,7 +466,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     if sun_dir.y > 0.0 {
-        // Rain makes the surface rougher/dimmer highlights (and breaks up SSR).
+        // Rain makes the surface rougher and dims highlights.
         let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
         let roughness_base = mix(0.075, WATER_ROUGHNESS_MAX, rain * 0.85);
         let roughness   = roughness_base * mix(1.0, 0.90, 1.0 - day);
@@ -657,7 +489,8 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Alpha increases with thickness (more water -> less see-through), plus Fresnel.
     let thickness_alpha = 1.0 - exp(-thickness * 0.13);
-    let alpha = clamp(WATER_OPACITY + thickness_alpha * 0.42 + fresnel * 0.22, 0.02, 0.92);
+    let reflection_alpha = fresnel * 0.08;
+    let alpha = clamp(WATER_OPACITY + thickness_alpha * 0.42 + fresnel * 0.22 + reflection_alpha, 0.02, 0.96);
 
     return vec4(water_color, clamp(alpha, 0.0, 1.0));
 }

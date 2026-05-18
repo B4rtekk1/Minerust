@@ -19,10 +19,9 @@ impl State {
     /// | Surface configuration | Swap-chain must match the new pixel dimensions. |
     /// | Depth texture (MSAA) | Multisampled depth must match the color target size. |
     /// | MSAA color texture | Render target size changed. |
-    /// | SSR color texture + view | SSR reads scene pixels 1:1; must stay in sync. |
-    /// | SSR depth texture + view | Same reason – used for refraction depth lookups. |
-    /// | SSR sampler | Recreated alongside its textures for clarity. |
-    /// | `water_bind_group` | References the new SSR views. |
+    /// | Resolved depth texture + view | Screen-sized depth used by shadows and water. |
+    /// | Nearest sampler | Recreated alongside screen-sized masks for clarity. |
+    /// | `water_bind_group` | References the new resolved-depth view. |
     /// | `depth_resolve_bind_group` | References the new multisampled depth view. |
     /// | `glyphon` viewport | Text renderer needs the physical resolution for HiDPI. |
     /// | Scene color texture + view | MSAA resolve target for the composite pass. |
@@ -64,34 +63,9 @@ impl State {
                 msaa_sample_count,
             );
 
-            // ── SSR (Screen-Space Reflections) targets ────────────────────── //
-            // Both the color and depth SSR textures must be single-sampled
-            // (the water shader reads them with a non-comparison sampler) and
-            // must match the new surface dimensions for correct texel mapping.
-
-            // SSR color: receives the resolved opaque scene for reflection sampling.
-            self.ssr_color_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("SSR Color Texture"),
-                size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1, // single-sampled – water shader cannot use MSAA textures
-                dimension: wgpu::TextureDimension::D2,
-                format: self.surface_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            self.ssr_color_view = self
-                .ssr_color_texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-
-            // SSR depth: single-sampled resolved depth for refraction ray marching.
-            self.ssr_depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("SSR Depth Texture"),
+            // ── Resolved depth target ────────────────────────────────────── //
+            self.resolved_depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Resolved Depth Texture"),
                 size: wgpu::Extent3d {
                     width: self.config.width,
                     height: self.config.height,
@@ -104,16 +78,18 @@ impl State {
                 usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            self.ssr_depth_view = self
-                .ssr_depth_texture
+            self.resolved_depth_view = self
+                .resolved_depth_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            // ── Shadow mask texture (screen-space, R32Float) ─────────────── //
+            // ── Shadow mask texture (downscaled screen-space, R32Float) ──── //
+            let (shadow_mask_width, shadow_mask_height) =
+                minerust::get_shadow_mask_size(self.config.width, self.config.height);
             self.shadow_mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Shadow Mask Texture"),
                 size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: shadow_mask_width,
+                    height: shadow_mask_height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -132,8 +108,8 @@ impl State {
             self.shadow_history_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Temporal Shadow History Texture"),
                 size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: shadow_mask_width,
+                    height: shadow_mask_height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -148,10 +124,9 @@ impl State {
                 .create_view(&wgpu::TextureViewDescriptor::default());
             self.shadow_history_valid = false;
 
-            // Nearest-neighbor sampler for SSR lookups; bilinear filtering
-            // would blur the reflected image and produce incorrect depth reads.
-            self.ssr_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("SSR Sampler"),
+            // Nearest-neighbor sampler for screen-sized masks.
+            self.nearest_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Nearest Sampler"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
                 address_mode_v: wgpu::AddressMode::ClampToEdge,
                 address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -162,11 +137,10 @@ impl State {
             });
 
             // ── Water bind group ──────────────────────────────────────────── //
-            // The water shader's bind group contains direct references to the
-            // SSR texture views, so it must be recreated whenever those views
-            // change.  All other bindings (uniforms, atlas, shadow map) are
-            // resolution-independent and are simply re-bound from their
-            // existing handles.
+            // The water shader's bind group contains a direct reference to the
+            // resolved-depth view, so it must be recreated whenever that view
+            // changes.  All other bindings (uniforms, atlas, shadow map) are
+            // resolution-independent and are simply re-bound from their handles.
             self.water_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 layout: &self.water_bind_group_layout,
                 entries: &[
@@ -192,24 +166,14 @@ impl State {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        // ← new SSR color view from the recreated texture
-                        resource: wgpu::BindingResource::TextureView(&self.ssr_color_view),
+                        resource: wgpu::BindingResource::TextureView(&self.resolved_depth_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        // ← new SSR depth view from the recreated texture
-                        resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
                         resource: wgpu::BindingResource::TextureView(&self.flow_map_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 9,
+                        binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.flow_sampler),
                     },
                 ],
@@ -237,7 +201,7 @@ impl State {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
+                            resource: wgpu::BindingResource::TextureView(&self.resolved_depth_view),
                         },
                     ],
                 });
@@ -249,7 +213,7 @@ impl State {
                     layout: &self.shadow_mask_pipeline.get_bind_group_layout(1),
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
+                        resource: wgpu::BindingResource::TextureView(&self.resolved_depth_view),
                     }],
                 });
             self.terrain_shadow_output_bind_group =
@@ -280,7 +244,7 @@ impl State {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
+                            resource: wgpu::BindingResource::Sampler(&self.nearest_sampler),
                         },
                     ],
                 });
@@ -336,9 +300,8 @@ impl State {
 
             // ── Composite bind group ──────────────────────────────────────── //
             // Must reference the new `scene_color_view`.  The sampler is
-            // bilinear (unlike the nearest-neighbor SSR sampler) because the
-            // composite shader may apply a slight blur or scale during post-
-            // processing.
+            // bilinear because the composite shader may apply a slight blur or
+            // scale during post-processing.
             let composite_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("Composite Sampler"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,

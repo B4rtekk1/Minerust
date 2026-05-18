@@ -9,7 +9,7 @@ struct Uniforms {
     is_underwater: f32,
     screen_size: vec2<f32>,
     water_level: f32,
-    reflection_mode: f32,
+    _pad_water: f32,
     moon_position: vec3<f32>,
     _pad1_moon: f32,
 };
@@ -52,4 +52,3 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(scene_texture, composite_sampler, in.uv);
 }
-

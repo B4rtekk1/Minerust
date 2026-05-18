@@ -9,7 +9,7 @@ struct Uniforms {
     is_underwater:       f32,
     screen_size:         vec2<f32>,
     water_level:         f32,
-    reflection_mode:     f32,
+    _pad_water:          f32,
     moon_position:       vec3<f32>,
     _pad1_moon:          f32,
     moon_intensity:      f32,
@@ -20,6 +20,10 @@ struct Uniforms {
     rain_factor:         f32,
     shadows_enabled:     f32,
     sky_visibility:      f32,
+    csm_shadow_rects:    array<vec4<f32>, 4>,
+    csm_shadow_sizes:    vec4<f32>,
+    shadow_sun_position: vec3<f32>,
+    _pad_shadow_sun:     f32,
 };
 
 struct ShadowConfig {
@@ -38,11 +42,11 @@ struct TemporalShadowUniforms {
 @group(0) @binding(0) var<uniform> uniforms:       Uniforms;
 @group(0) @binding(1) var texture_atlas:           texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler:         sampler;
-@group(0) @binding(3) var shadow_map:              texture_depth_2d_array;
+@group(0) @binding(3) var shadow_map:              texture_depth_2d;
 @group(0) @binding(4) var shadow_sampler:          sampler_comparison;
 @group(0) @binding(5) var<uniform> shadow_config: ShadowConfig;
 
-@group(1) @binding(0) var ssr_depth: texture_2d<f32>;
+@group(1) @binding(0) var resolved_depth: texture_2d<f32>;
 
 @group(2) @binding(0) var output_shadow: texture_storage_2d<r32float, write>;
 
@@ -51,15 +55,20 @@ struct TemporalShadowUniforms {
 @group(3) @binding(2) var<uniform> temporal_shadow: TemporalShadowUniforms;
 
 const MAX_PCF_SAMPLES:  i32 = 32;
-const TEMPORAL_SHADOW_CLAMP: f32 = 0.35;
+const TEMPORAL_SHADOW_CLAMP: f32 = 0.15;
 const TAU: f32 = 6.28318530718;
 
 fn shadow_hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
-fn poisson_rotation(world_pos: vec3<f32>) -> f32 {
-    return shadow_hash21(world_pos.xz) * TAU;
+fn sun_poisson_phase(sun_dir: vec3<f32>) -> f32 {
+    let dir = normalize(sun_dir);
+    return atan2(dir.z, max(dir.y, 0.001));
+}
+
+fn poisson_rotation(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
+    return shadow_hash21(world_pos.xz) * TAU + sun_poisson_phase(sun_dir);
 }
 
 fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
@@ -104,7 +113,7 @@ fn sample_cascade_pcf(
     if pcf_samples <= 0 { return 1.0; }
 
     var shadow = 0.0;
-    let shadow_map_size = max(shadow_config.shadow_map_size, 1.0);
+    let shadow_map_size = max(uniforms.csm_shadow_sizes[cascade_idx], 1.0);
     let cascade_filter_texels = array<f32, 4>(1.55, 2.00, 2.60, 3.30);
     let filter_radius = cascade_filter_texels[cascade_idx] / shadow_map_size;
     let texel = 1.0 / shadow_map_size;
@@ -113,12 +122,14 @@ fn sample_cascade_pcf(
     let edge_fade = smoothstep(0.0, filter_radius + texel, edge_dist);
 
     for (var i = 0; i < pcf_samples; i++) {
+        let rect = uniforms.csm_shadow_rects[cascade_idx];
         let suv = clamp(
             uv + get_poisson_sample(i, rotation) * filter_radius,
             vec2<f32>(texel),
             vec2<f32>(1.0 - texel),
         );
-        shadow += textureSampleCompareLevel(shadow_map, shadow_sampler, suv, cascade_idx, depth_ref);
+        let atlas_uv = rect.xy + suv * rect.zw;
+        shadow += textureSampleCompareLevel(shadow_map, shadow_sampler, atlas_uv, depth_ref);
     }
 
     return mix(1.0, shadow / f32(pcf_samples), edge_fade);
@@ -197,7 +208,7 @@ fn calculate_shadow(
     let cos_t = max(dot(normal, sun_dir), 0.0);
     let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
 
-    let rot = poisson_rotation(world_pos);
+    let rot = poisson_rotation(world_pos, sun_dir);
 
     let cb = select_cascade_with_blend(view_depth);
     let ci = i32(cb.x);
@@ -281,15 +292,14 @@ fn temporal_shadow_accumulation(world_pos: vec3<f32>, current_shadow: f32) -> f3
 }
 
 fn sample_screen_shadow(screen_pos: vec4<f32>) -> f32 {
-    let dims = vec2<f32>(textureDimensions(shadow_mask));
-    let uv = screen_pos.xy / max(dims, vec2<f32>(1.0));
+    let uv = screen_pos.xy / max(uniforms.screen_size, vec2<f32>(1.0));
     return clamp(sample_shadow_mask_bilinear(uv), 0.0, 1.0);
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let tex_size = textureDimensions(ssr_depth);
-    if (gid.x >= tex_size.x || gid.y >= tex_size.y) {
+    let output_size = textureDimensions(output_shadow);
+    if (gid.x >= output_size.x || gid.y >= output_size.y) {
         return;
     }
 
@@ -298,13 +308,18 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let depth = textureLoad(ssr_depth, gid.xy, 0).r;
+    let depth_size = textureDimensions(resolved_depth);
+    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(output_size);
+    let depth_px = min(
+        vec2<u32>(floor(uv * vec2<f32>(depth_size))),
+        depth_size - vec2<u32>(1u),
+    );
+    let depth = textureLoad(resolved_depth, depth_px, 0).r;
     if depth >= 0.999999 {
         textureStore(output_shadow, gid.xy, vec4<f32>(1.0, 0.0, 0.0, 0.0));
         return;
     }
 
-    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(tex_size);
     let ndc = vec4<f32>(
         uv.x * 2.0 - 1.0,
         (1.0 - uv.y) * 2.0 - 1.0,
@@ -316,7 +331,7 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let view_depth = length(world_pos - uniforms.camera_pos);
 
-    let sun_dir = normalize(uniforms.sun_position);
+    let sun_dir = normalize(uniforms.shadow_sun_position);
 
     var shadow_factor = 1.0;
     if (sun_dir.y > 0.0) {

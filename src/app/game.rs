@@ -159,7 +159,6 @@ fn read_clipboard_text() -> Option<String> {
 /// | F5 | Save world to disk. |
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
-/// | R | Cycle water reflection mode (Off -> SSSR). |
 /// | H | Toggle shadows on/off. |
 ///
 /// # Key bindings (menu)
@@ -436,19 +435,6 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                         winit::window::Fullscreen::Borderless(None),
                                     ));
                                 }
-                            }
-
-                            KeyCode::KeyR if pressed => {
-                                // Cycle: 0 = Off, 1 = SSSR. Wraps with modulo
-                                // so adding more modes in the future only
-                                // requires extending the match arm below.
-                                state.reflection_mode = (state.reflection_mode + 1) % 2;
-                                let mode_name = match state.reflection_mode {
-                                    0 => "Off",
-                                    1 => "SSSR",
-                                    _ => "Unknown",
-                                };
-                                log(LogLevel::Info, &format!("Reflection mode: {}", mode_name));
                             }
 
                             KeyCode::KeyH if pressed => {

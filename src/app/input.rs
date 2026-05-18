@@ -6,7 +6,7 @@ use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
 
-const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.4;
+const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.25;
 
 impl State {
     /// Translates a raw mouse-click position into a menu action.

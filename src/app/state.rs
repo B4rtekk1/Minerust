@@ -43,7 +43,7 @@ impl BlockPlacementState {
 ///   (`render_pipeline`, `water_pipeline`, `sun_pipeline`, etc.).
 /// - **Static geometry buffers** – sun quad, crosshair.
 /// - **Uniforms & bind groups** – shared uniform buffer and per-pass bind groups.
-/// - **Render targets** – depth, MSAA, shadow cascade array, SSR, scene color,
+/// - **Render targets** – depth, MSAA, shadow cascade array, scene color,
 ///   Hi-Z pyramid.
 /// - **World & camera** – the shared `World` behind an `RwLock`, camera, and
 ///   input state.
@@ -57,7 +57,7 @@ impl BlockPlacementState {
 /// - **Indirect rendering** – `IndirectManager` for terrain and water, Hi-Z
 ///   pipeline and bind groups.
 /// - **CSM shadows** – `CsmManager` and cascade-related buffers/views.
-/// - **Post-processing** – composite pipeline and SSR resources.
+/// - **Post-processing** – composite pipeline resources.
 pub struct State {
     // -------------------------------------------------------------------------
     // wgpu core
@@ -93,7 +93,7 @@ pub struct State {
     /// Full-screen composite pipeline that resolves MSAA and applies post-FX.
     pub composite_pipeline: wgpu::RenderPipeline,
     /// Compute pipeline that resolves the MSAA depth buffer into Hi-Z seed
-    /// level 0 and the single-sampled SSR depth texture.
+    /// level 0 and a single-sampled depth texture.
     pub depth_resolve_pipeline: wgpu::ComputePipeline,
     /// Depth-only prepass pipeline for terrain. Fills the depth buffer before
     /// shadow-mask and Hi-Z compute passes.
@@ -133,12 +133,12 @@ pub struct State {
     pub terrain_shadow_output_bind_group: wgpu::BindGroup,
     /// Bind group that exposes the shadow cascade array to the main render pass.
     pub shadow_bind_group: wgpu::BindGroup,
-    /// Bind group for the water pass (SSR color/depth textures + sampler).
+    /// Bind group for the water pass.
     pub water_bind_group: wgpu::BindGroup,
     /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
     /// when the window resizes.
     pub water_bind_group_layout: wgpu::BindGroupLayout,
-    /// Bind group for the composite pass (scene color + SSR resources).
+    /// Bind group for the composite pass.
     pub composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
@@ -156,7 +156,7 @@ pub struct State {
     pub depth_texture: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
-    /// Full shadow cascade array texture view (all cascades as one 2-D array).
+    /// Full shadow atlas texture view containing all cascades in separate rectangles.
     pub shadow_texture_view: wgpu::TextureView,
     /// Screen-space shadow mask sampled by `terrain.wgsl`.
     #[allow(dead_code)]
@@ -184,16 +184,12 @@ pub struct State {
     pub scene_color_texture: wgpu::Texture,
     /// View of `scene_color_texture`.
     pub scene_color_view: wgpu::TextureView,
-    /// Color texture used as the SSR source (previous-frame or resolved).
-    pub ssr_color_texture: wgpu::Texture,
-    /// View of `ssr_color_texture`.
-    pub ssr_color_view: wgpu::TextureView,
-    /// Single-sampled depth buffer used by the SSR pass for ray-marching.
-    pub ssr_depth_texture: wgpu::Texture,
-    /// View of `ssr_depth_texture` as an `R32Float` texture.
-    pub ssr_depth_view: wgpu::TextureView,
-    /// Sampler used when reading SSR textures in the water and composite passes.
-    pub ssr_sampler: wgpu::Sampler,
+    /// Single-sampled depth buffer resolved from the MSAA depth target.
+    pub resolved_depth_texture: wgpu::Texture,
+    /// View of `resolved_depth_texture` as an `R32Float` texture.
+    pub resolved_depth_view: wgpu::TextureView,
+    /// Nearest-neighbor sampler used for screen-sized masks.
+    pub nearest_sampler: wgpu::Sampler,
     /// The 16-layer `Texture2DArray` holding all block textures.
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
     #[allow(dead_code)]
@@ -318,6 +314,13 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Computes and stores the per-cascade light-space view-projection matrices.
     pub csm: CsmManager,
+    /// Stabilized sun direction used for CSM updates.
+    ///
+    /// The visible sun can move every frame, but shadow cascades update this
+    /// direction at a lower rate/angle threshold to reduce crawling.
+    pub shadow_sun_dir: glam::Vec3,
+    /// Last frame time at which `shadow_sun_dir` was refreshed.
+    pub last_shadow_sun_update: Instant,
     /// Previous frame's camera view-projection matrix for shadow reprojection.
     pub prev_view_proj: [[f32; 4]; 4],
     /// Previous frame's camera position for temporal history weighting.
@@ -326,8 +329,6 @@ pub struct State {
     pub prev_sun_position: [f32; 3],
     /// Whether `shadow_history_texture` contains valid previous-frame data.
     pub shadow_history_valid: bool,
-    /// Active water reflection mode (`0 = off`, `1 = SSSR`).
-    pub reflection_mode: u32,
     /// Toggles runtime shadow rendering without rebuilding pipelines.
     pub shadows_enabled: bool,
 

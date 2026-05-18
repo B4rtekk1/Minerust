@@ -3,9 +3,11 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, RENDER_DISTANCE,
-    SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, World, build_block_outline,
-    build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, CSM_CASCADE_SHADOW_MAP_SIZES, CSM_PCF_SAMPLES, CSM_SHADOW_ATLAS_RECTS,
+    DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, SHADOW_SUN_MIN_ANGLE_STEP, SHADOW_SUN_UPDATE_HZ,
+    ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, World, build_block_outline,
+    build_player_model, extract_frustum_planes, get_csm_shadow_atlas_rects_normalized,
+    get_csm_shadow_sizes, get_shadow_mask_size,
 };
 
 use crate::logger::{LogLevel, log};
@@ -153,9 +155,9 @@ impl State {
     /// 5. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
     ///    the opaque terrain and water indirect managers.
     /// 6. **Opaque pass** – sky dome → terrain → remote player models → sun/moon.
-    ///    Resolves MSAA into `ssr_color_view` for later water reflections.
+    ///    Draws the opaque scene into the MSAA target.
     /// 7. **Depth resolve compute** – resolves the multisampled depth buffer
-    ///    into `ssr_depth_view` (for water refraction) and the first Hi-Z mip
+    ///    into `resolved_depth_view` and the first Hi-Z mip
     ///    level (for next-frame occlusion culling).
     /// 8. **Hi-Z generation** (compute) – downsamples the depth mip chain.
     /// 9. **Transparent pass** – water surfaces, alpha-blended on top of the
@@ -301,9 +303,20 @@ impl State {
         // ── CSM (Cascaded Shadow Maps) update ─────────────────────────────── //
         // `CsmManager::update` computes the four tight orthographic light-space
         // matrices that cover successive depth ranges of the camera frustum.
+        let now_shadow = std::time::Instant::now();
+        let shadow_update_interval = std::time::Duration::from_secs_f32(1.0 / SHADOW_SUN_UPDATE_HZ);
+        let shadow_sun_angle_delta = self.shadow_sun_dir.angle_between(sun_dir);
+        let shadow_sun_update_elapsed =
+            now_shadow.duration_since(self.last_shadow_sun_update) >= shadow_update_interval;
+        if shadow_sun_angle_delta >= SHADOW_SUN_MIN_ANGLE_STEP && shadow_sun_update_elapsed {
+            self.shadow_sun_dir = sun_dir;
+            self.last_shadow_sun_update = now_shadow;
+        }
+        let shadow_sun_dir = self.shadow_sun_dir;
+
         let csm = &mut self.csm;
         let fov_y = DEFAULT_FOV;
-        csm.update(&view_mat, sun_dir, 0.1, 300.0, aspect, fov_y);
+        csm.update(&view_mat, shadow_sun_dir, 0.1, 300.0, aspect, fov_y);
 
         // Pack cascade view-projection matrices into the uniform struct format.
         let csm_view_proj: [[[f32; 4]; 4]; 4] = [
@@ -344,7 +357,7 @@ impl State {
                 is_underwater,
                 screen_size: [self.config.width as f32, self.config.height as f32],
                 water_level: SEA_LEVEL as f32 - 1.0,
-                reflection_mode: self.reflection_mode as f32,
+                _pad_water: 0.0,
                 moon_position,
                 _pad1_moon: 0.0,
                 moon_intensity,
@@ -354,13 +367,17 @@ impl State {
                 rain_factor: 0.0,
                 shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
                 sky_visibility: self.sky_visibility,
+                csm_shadow_rects: get_csm_shadow_atlas_rects_normalized(),
+                csm_shadow_sizes: get_csm_shadow_sizes(),
+                shadow_sun_position: shadow_sun_dir.to_array(),
+                _pad_shadow_sun: 0.0,
             }]),
         );
         self.queue.write_buffer(
             &self.shadow_config_buffer,
             0,
             bytemuck::cast_slice(&[ShadowConfig {
-                shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
+                shadow_map_size: CSM_CASCADE_SHADOW_MAP_SIZES[0] as f32,
                 pcf_samples: if self.shadows_enabled {
                     CSM_PCF_SAMPLES
                 } else {
@@ -372,7 +389,7 @@ impl State {
         let temporal_history_valid =
             self.shadow_history_valid && self.shadows_enabled && self.game_state != GameState::Menu;
         let camera_motion = Vec3::from_array(self.prev_camera_pos).distance(eye_pos);
-        let sun_motion = Vec3::from_array(self.prev_sun_position).distance(sun_dir);
+        let sun_motion = Vec3::from_array(self.prev_sun_position).distance(shadow_sun_dir);
         let camera_history_factor = (1.0 - camera_motion * 0.12).clamp(0.35, 1.0);
         let sun_history_factor = (1.0 - sun_motion * 64.0).clamp(0.50, 1.0);
         let history_weight = if temporal_history_valid {
@@ -460,13 +477,18 @@ impl State {
         };
         for i in 0..shadow_pass_count {
             let offset = (i * 256) as u32;
+            let atlas_rect = CSM_SHADOW_ATLAS_RECTS[i];
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(SHADOW_PASS_LABELS[i]),
                 color_attachments: &[], // depth-only pass, no color output
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_cascade_views[i],
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0), // clear to max depth
+                        load: if i == 0 {
+                            wgpu::LoadOp::Clear(1.0)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -478,6 +500,20 @@ impl State {
 
             if self.shadows_enabled && i < active_cascades {
                 shadow_pass.set_pipeline(&self.shadow_pipeline);
+                shadow_pass.set_viewport(
+                    atlas_rect[0] as f32,
+                    atlas_rect[1] as f32,
+                    atlas_rect[2] as f32,
+                    atlas_rect[3] as f32,
+                    0.0,
+                    1.0,
+                );
+                shadow_pass.set_scissor_rect(
+                    atlas_rect[0],
+                    atlas_rect[1],
+                    atlas_rect[2],
+                    atlas_rect[3],
+                );
                 // Dynamic offset selects cascade i's light-space matrix in the
                 // 256-byte-aligned shadow cascade buffer.
                 shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[offset]);
@@ -666,6 +702,8 @@ impl State {
         }
 
         // ── Shadow mask compute ──────────────────────────────────────────── //
+        let (shadow_mask_width, shadow_mask_height) =
+            get_shadow_mask_size(self.config.width, self.config.height);
         if self.game_state != GameState::Menu {
             let mut shadow_mask_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Shadow Mask Compute Pass"),
@@ -677,8 +715,8 @@ impl State {
             shadow_mask_pass.set_bind_group(2, &self.shadow_mask_output_bind_group, &[]);
             shadow_mask_pass.set_bind_group(3, &self.temporal_shadow_bind_group, &[]);
             shadow_mask_pass.dispatch_workgroups(
-                (self.config.width + 7) / 8,
-                (self.config.height + 7) / 8,
+                (shadow_mask_width + 7) / 8,
+                (shadow_mask_height + 7) / 8,
                 1,
             );
         }
@@ -697,19 +735,19 @@ impl State {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
+                    width: shadow_mask_width,
+                    height: shadow_mask_height,
                     depth_or_array_layers: 1,
                 },
             );
             self.prev_view_proj = view_proj_array;
             self.prev_camera_pos = eye_pos.to_array();
-            self.prev_sun_position = [sun_x, sun_y, sun_z];
+            self.prev_sun_position = shadow_sun_dir.to_array();
             self.shadow_history_valid = self.shadows_enabled;
         } else {
             self.prev_view_proj = view_proj_array;
             self.prev_camera_pos = eye_pos.to_array();
-            self.prev_sun_position = [sun_x, sun_y, sun_z];
+            self.prev_sun_position = shadow_sun_dir.to_array();
             self.shadow_history_valid = false;
         }
 
@@ -730,21 +768,18 @@ impl State {
 
         // ── Opaque pass ───────────────────────────────────────────────────── //
         // Renders: sky dome → terrain chunks → remote player models → sun/moon.
-        // Writes to the 4× MSAA color target which is resolved simultaneously
-        // into `ssr_color_view` (used by the water pass for reflections).
+        // Writes to the 4× MSAA color target.
         {
             let opaque_resolve_target = if self.game_state == GameState::Menu {
                 &view
             } else {
-                &self.ssr_color_view
+                &self.scene_color_view
             };
 
             let mut opaque_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Opaque Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
-                    // Resolve MSAA into the SSR color target so the water
-                    // shader can sample the opaque scene for reflections.
                     resolve_target: Some(opaque_resolve_target),
                     depth_slice: None,
                     ops: wgpu::Operations {

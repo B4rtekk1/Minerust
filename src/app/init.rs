@@ -15,9 +15,10 @@ use crate::logger::{LogLevel, log};
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZE, Camera, DiggingState, IndirectManager, InputState,
-    OutlineVertex, RENDER_DISTANCE, SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms,
-    Vertex, World, build_crosshair,
+    CSM_PCF_SAMPLES, CSM_SHADOW_ATLAS_HEIGHT, CSM_SHADOW_ATLAS_WIDTH, Camera, DiggingState,
+    IndirectManager, InputState, OutlineVertex, RENDER_DISTANCE, SEA_LEVEL, ShadowConfig,
+    TemporalShadowUniforms, Uniforms, Vertex, World, build_crosshair,
+    get_csm_shadow_atlas_rects_normalized, get_csm_shadow_sizes, get_shadow_mask_size,
 };
 
 use super::state::State;
@@ -74,7 +75,7 @@ impl State {
     /// 4. **Shader compilation** – compiles all WGSL shaders (terrain, water,
     ///    shadow, sky, sun, UI, Hi-Z, depth-resolve, composite).
     /// 5. **Buffers & textures** – allocates the uniform buffer, shadow map
-    ///    cascade array, SSR color/depth targets, MSAA resolve targets, and
+    ///    cascade array, resolved depth target, MSAA resolve targets, and
     ///    the hierarchical-Z (Hi-Z) mip chain.
     /// 6. **Bind group layouts & bind groups** – wires textures, samplers, and
     ///    buffers to the correct shader bindings for each pipeline.
@@ -208,7 +209,7 @@ impl State {
             height: size.height,
             // `Immediate` disables vsync so the frame rate is uncapped.
             // Switch to `Fifo` (vsync) to reduce GPU power consumption.
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: wgpu::PresentMode::Immediate,
             alpha_mode: surface_caps
                 .alpha_modes
                 .iter()
@@ -246,8 +247,7 @@ impl State {
 
         // A multisampled Depth32Float texture is used for all geometry passes
         // (terrain, water, sun, sky).  A separate single-sampled depth texture
-        // is used for SSR so that the water shader can sample the opaque scene
-        // depth at full precision.
+        // stores a resolved copy used by screen-space shadows and water depth.
         let depth_texture = Self::create_depth_texture(&device, &config, msaa_sample_count);
         let msaa_texture_view =
             Self::create_msaa_texture(&device, &config, surface_format, msaa_sample_count);
@@ -274,7 +274,7 @@ impl State {
         });
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
-            // Translucent water pass: SSR reflection, refraction, foam edge
+            // Translucent water pass: sky reflection, depth tint, foam edge
             // detection, Fresnel blend.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water.wgsl").into()),
         });
@@ -329,8 +329,7 @@ impl State {
                 screen_size: [1920.0, 1080.0],
                 // Y coordinate (in world blocks) of the water surface.
                 water_level: SEA_LEVEL as f32 - 1.0,
-                // 1.0 = SSSR enabled, 0.0 = flat reflection fallback.
-                reflection_mode: 1.0,
+                _pad_water: 0.0,
                 moon_position: [-0.4, 0.2, -0.3],
                 _pad1_moon: 0.0,
                 moon_intensity: 0.0,
@@ -340,6 +339,10 @@ impl State {
                 rain_factor: 0.0,
                 shadows_enabled: 1.0,
                 sky_visibility: 1.0,
+                csm_shadow_rects: get_csm_shadow_atlas_rects_normalized(),
+                csm_shadow_sizes: get_csm_shadow_sizes(),
+                shadow_sun_position: [0.0, 1.0, 0.0],
+                _pad_shadow_sun: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -372,16 +375,15 @@ impl State {
         // Shadow map (Cascaded Shadow Maps – CSM)
         // ------------------------------------------------------------------ //
 
-        // A Depth32Float texture array with 4 layers, one per cascade.
-        // Increasing `shadow_map_size` improves shadow sharpness at the cost
-        // of VRAM and shadow-pass render time.
-        let shadow_map_size = CSM_SHADOW_MAP_SIZE;
+        // A single Depth32Float atlas stores all CSM cascades in fixed
+        // rectangles. This allows near cascades to keep 2048px detail while
+        // farther cascades render into smaller regions.
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow Map"),
+            label: Some("Shadow Atlas"),
             size: wgpu::Extent3d {
-                width: shadow_map_size,
-                height: shadow_map_size,
-                depth_or_array_layers: 4, // one layer per CSM cascade
+                width: CSM_SHADOW_ATLAS_WIDTH,
+                height: CSM_SHADOW_ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -391,24 +393,23 @@ impl State {
             view_formats: &[],
         });
 
-        // `D2Array` view used by the terrain fragment shader to sample all
-        // four cascades in a single `textureSampleCompareLevel` call.
+        // Full atlas view used by the terrain/water shaders and as the shadow
+        // depth attachment. Individual cascades are selected with viewport and
+        // UV atlas rects rather than array layers.
         let shadow_texture_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("Shadow Map Array View"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            label: Some("Shadow Atlas View"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
             ..Default::default()
         });
 
-        // Individual `D2` views, one per cascade, used as render targets in
-        // the shadow pass (wgpu render attachments cannot target array layers
-        // through an array view).
+        // Full atlas views used as render targets. Each pass sets a cascade-
+        // specific viewport/scissor so cascades write only their own atlas
+        // rectangle.
         let shadow_cascade_views = (0..4)
             .map(|i| {
                 shadow_texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some(&format!("Shadow Map Cascade View {}", i)),
+                    label: Some(&format!("Shadow Atlas Cascade View {}", i)),
                     dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: i,
-                    array_layer_count: Some(1),
                     ..Default::default()
                 })
             })
@@ -444,11 +445,13 @@ impl State {
 
         // Screen-space shadow mask sampled by `terrain.wgsl` (R32Float).
         // Written each frame by the shadow-mask compute pass.
+        let (shadow_mask_width, shadow_mask_height) =
+            get_shadow_mask_size(config.width, config.height);
         let shadow_mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Shadow Mask Texture"),
             size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
+                width: shadow_mask_width,
+                height: shadow_mask_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -466,8 +469,8 @@ impl State {
         let shadow_history_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Temporal Shadow History Texture"),
             size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
+                width: shadow_mask_width,
+                height: shadow_mask_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -481,70 +484,54 @@ impl State {
             shadow_history_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         {
-            let mut clear_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Shadow Mask Clear Encoder"),
-                });
             // Initialise to "fully lit" (1.0) so sampling is valid before
-            // the first compute dispatch.
-            let shadow_mask_init_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Shadow Mask Init Buffer"),
-                    contents: bytemuck::cast_slice(&vec![
-                        1.0f32;
-                        (config.width * config.height) as usize
-                    ]),
-                    usage: wgpu::BufferUsages::COPY_SRC,
-                });
-            clear_encoder.copy_buffer_to_texture(
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &shadow_mask_init_buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * config.width),
-                        rows_per_image: Some(config.height),
-                    },
-                },
+            // the first compute dispatch. Queue writes avoid the 256-byte row
+            // alignment requirement of command-encoder buffer copies.
+            let shadow_mask_init_data =
+                vec![1.0f32; (shadow_mask_width * shadow_mask_height) as usize];
+            let shadow_mask_init_bytes = bytemuck::cast_slice(&shadow_mask_init_data);
+            let shadow_mask_extent = wgpu::Extent3d {
+                width: shadow_mask_width,
+                height: shadow_mask_height,
+                depth_or_array_layers: 1,
+            };
+
+            queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &shadow_mask_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::Extent3d {
-                    width: config.width,
-                    height: config.height,
-                    depth_or_array_layers: 1,
+                shadow_mask_init_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * shadow_mask_width),
+                    rows_per_image: Some(shadow_mask_height),
                 },
+                shadow_mask_extent,
             );
-            clear_encoder.copy_buffer_to_texture(
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &shadow_mask_init_buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * config.width),
-                        rows_per_image: Some(config.height),
-                    },
-                },
+            queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &shadow_history_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::Extent3d {
-                    width: config.width,
-                    height: config.height,
-                    depth_or_array_layers: 1,
+                shadow_mask_init_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * shadow_mask_width),
+                    rows_per_image: Some(shadow_mask_height),
                 },
+                shadow_mask_extent,
             );
-            queue.submit(Some(clear_encoder.finish()));
         }
 
         let shadow_config_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Shadow Config Buffer"),
             contents: bytemuck::cast_slice(&[ShadowConfig {
-                shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
+                shadow_map_size: minerust::CSM_CASCADE_SHADOW_MAP_SIZES[0] as f32,
                 pcf_samples: CSM_PCF_SAMPLES,
                 _pad: [0; 2],
             }]),
@@ -611,7 +598,7 @@ impl State {
                         visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
                         count: None,
@@ -682,7 +669,7 @@ impl State {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain_gbuffer_bind_group_layout"),
                 entries: &[
-                    // group(1) binding(0): ssr_depth texture (R32Float, non-filterable)
+                    // group(1) binding(0): resolved depth texture (R32Float, non-filterable)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -741,37 +728,18 @@ impl State {
                 ],
             });
 
-        // Bind groups that depend on `ssr_depth_view` are created later, after
-        // the SSR textures are allocated.
+        // Bind groups that depend on `resolved_depth_view` are created later,
+        // after the resolved depth texture is allocated.
         let terrain_gbuffer_bind_group: wgpu::BindGroup;
         let terrain_shadow_output_bind_group: wgpu::BindGroup;
         let shadow_mask_output_bind_group: wgpu::BindGroup;
 
         // ------------------------------------------------------------------ //
-        // SSR (Screen-Space Reflections) targets
+        // Resolved depth target
         // ------------------------------------------------------------------ //
 
-        // The terrain pass renders into these textures first.  The water
-        // shader then samples them to produce planar reflections of the scene
-        // above the water surface.
-        let ssr_color_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSR Color Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1, // SSR targets are single-sampled (no MSAA)
-            dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let ssr_color_view = ssr_color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let ssr_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSR Depth Texture"),
+        let resolved_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Resolved Depth Texture"),
             size: wgpu::Extent3d {
                 width: config.width,
                 height: config.height,
@@ -784,7 +752,8 @@ impl State {
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let ssr_depth_view = ssr_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let resolved_depth_view =
+            resolved_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Bind groups for the shadow-mask compute now that resolved depth exists.
         terrain_gbuffer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -792,7 +761,7 @@ impl State {
             layout: &terrain_gbuffer_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
+                resource: wgpu::BindingResource::TextureView(&resolved_depth_view),
             }],
         });
         terrain_shadow_output_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -823,10 +792,9 @@ impl State {
             ],
         });
 
-        // Nearest-neighbor sampler for SSR lookups; bilinear filtering would
-        // blur the reflected image and cause incorrect depth comparisons.
-        let ssr_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("SSR Sampler"),
+        // Nearest-neighbor sampler for screen-sized masks.
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Nearest Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -887,12 +855,10 @@ impl State {
         // Water bind group layout & bind group
         // ------------------------------------------------------------------ //
 
-        // Extends the terrain layout with SSR and flow-map bindings:
-        //   5 – SSR color texture (fragment)
-        //   6 – SSR depth texture  (fragment)
-        //   7 – SSR sampler        (fragment)
-        //   8 – flow map texture   (fragment)
-        //   9 – flow sampler       (fragment)
+        // Extends the terrain layout with resolved-depth and flow-map bindings:
+        //   5 – resolved depth texture (fragment)
+        //   6 – flow map texture       (fragment)
+        //   7 – flow sampler           (fragment)
         let water_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("water_bind_group_layout"),
@@ -928,7 +894,7 @@ impl State {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
                         count: None,
@@ -939,21 +905,9 @@ impl State {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
-                    // SSR color – the opaque scene rendered before the water pass.
+                    // Resolved scene depth used for water thickness estimates.
                     wgpu::BindGroupLayoutEntry {
                         binding: 5,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // SSR depth – used to detect where the reflection ray intersects
-                    // the opaque scene for refraction and ray termination.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 6,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -962,15 +916,8 @@ impl State {
                         },
                         count: None,
                     },
-                    // SSR sampler – nearest neighbor for correct texel fetches.
                     wgpu::BindGroupLayoutEntry {
-                        binding: 7,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 8,
+                        binding: 6,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -980,7 +927,7 @@ impl State {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 9,
+                        binding: 7,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
@@ -1013,22 +960,14 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&ssr_color_view),
+                    resource: wgpu::BindingResource::TextureView(&resolved_depth_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::Sampler(&ssr_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
                     resource: wgpu::BindingResource::TextureView(&flow_map_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 9,
+                    binding: 7,
                     resource: wgpu::BindingResource::Sampler(&flow_sampler),
                 },
             ],
@@ -1091,7 +1030,7 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&ssr_sampler),
+                    resource: wgpu::BindingResource::Sampler(&nearest_sampler),
                 },
             ],
             label: Some("shadow_mask_bind_group"),
@@ -1125,7 +1064,7 @@ impl State {
                 label: Some("Shadow Mask Pipeline Layout"),
                 bind_group_layouts: &[
                     &uniform_bind_group_layout,            // group: 0
-                    &terrain_gbuffer_bind_group_layout,    // group: 1 (ssr_depth)
+                    &terrain_gbuffer_bind_group_layout,    // group: 1 (resolved depth)
                     &shadow_mask_output_bind_group_layout, // group: 2 (shadow mask output)
                     &temporal_shadow_bind_group_layout,    // group: 3 (previous shadow history)
                 ],
@@ -1656,8 +1595,8 @@ impl State {
 
         // After the MSAA opaque pass we resolve the multisampled depth buffer
         // into two single-sampled outputs:
-        //   • `hiz_mips[0]`    – conservative max-depth seed for Hi-Z
-        //   • `ssr_depth_view` – closest-depth copy for water refraction
+        //   • `hiz_mips[0]`          – conservative max-depth seed for Hi-Z
+        //   • `resolved_depth_view`  – closest-depth copy for shadows/water
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Resolve Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_resolve.wgsl").into()),
@@ -1986,7 +1925,7 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
+                    resource: wgpu::BindingResource::TextureView(&resolved_depth_view),
                 },
             ],
         });
@@ -2070,7 +2009,6 @@ impl State {
             texture_sampler,
             game_state: GameState::Menu,
             menu_state: MenuState::default(),
-            reflection_mode: 1,
             shadows_enabled: true,
             is_underwater: 0.0,
             sky_visibility: 1.0,
@@ -2094,11 +2032,9 @@ impl State {
             visible_chunk_columns: Vec::new(),
             visible_chunk_cache_center: (i32::MIN, i32::MIN),
             visible_chunk_columns_dirty: true,
-            ssr_color_texture,
-            ssr_color_view,
-            ssr_depth_texture,
-            ssr_depth_view,
-            ssr_sampler,
+            resolved_depth_texture,
+            resolved_depth_view,
+            nearest_sampler,
             flow_map_texture,
             flow_map_view,
             flow_sampler,
@@ -2142,6 +2078,8 @@ impl State {
             depth_resolve_bind_group,
             supports_indirect_count,
             csm: minerust::render_core::csm::CsmManager::new(),
+            shadow_sun_dir: glam::Vec3::Y,
+            last_shadow_sun_update: Instant::now(),
             prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             prev_camera_pos: [0.0, 0.0, 0.0],
             prev_sun_position: [0.0, 1.0, 0.0],
@@ -2168,7 +2106,7 @@ impl State {
     ///                    from here so the depth texture always matches the
     ///                    swap-chain resolution.
     /// - `sample_count` – Number of MSAA samples.  Pass `1` for a
-    ///                    single-sampled texture (e.g., SSR targets) or `4`
+    ///                    single-sampled texture or `4`
     ///                    for the main multisampled depth buffer.
     ///
     /// # Returns
