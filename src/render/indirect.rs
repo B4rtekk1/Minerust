@@ -933,7 +933,7 @@ impl IndirectManager {
             cpass.set_bind_group(0, bind_group, &[]);
 
             // Round up to a full workgroup; the shader discards out-of-range threads.
-            let workgroup_count = (active + 63) / 64;
+            let workgroup_count = (active + 127) / 128;
             cpass.dispatch_workgroups(workgroup_count, 1, 1);
         }
     }

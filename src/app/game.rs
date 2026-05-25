@@ -524,9 +524,8 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                         for chunk_data in &saved.chunks {
                                             let cx = chunk_data.cx;
                                             let cz = chunk_data.cz;
-                                            for (&sy, block_data) in &chunk_data.subchunks {
-                                                if let Some(chunk) = world.chunks.get_mut(&(cx, cz))
-                                                {
+                                            if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
+                                                for (&sy, block_data) in &chunk_data.subchunks {
                                                     if (sy as usize) < chunk.subchunks.len() {
                                                         let subchunk =
                                                             &mut chunk.subchunks[sy as usize];
@@ -547,8 +546,9 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                                         subchunk.is_empty = false;
                                                         subchunk.mesh_dirty = true;
                                                     }
-                                                    chunk.player_modified = true;
                                                 }
+                                                chunk.player_modified = true;
+                                                chunk.rebuild_metadata();
                                             }
                                         }
                                     }

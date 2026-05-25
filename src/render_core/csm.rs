@@ -1,6 +1,6 @@
 use glam::{Mat4, Vec3, Vec4};
 
-use crate::constants::{CSM_CASCADE_COUNT, CSM_CASCADE_SPLITS, CSM_SHADOW_MAP_SIZE};
+use crate::constants::{CSM_CASCADE_COUNT, CSM_CASCADE_SPLITS, CSM_SHADOW_MAP_SIZES};
 #[derive(Debug, Clone, Copy)]
 pub struct CascadeData {
     pub view_proj: Mat4,
@@ -59,7 +59,7 @@ impl CsmManager {
             // Use a bounding sphere instead of a tight AABB. The square
             // projection is slightly larger, but its size does not breathe as
             // the camera moves, which prevents front/back cascade jumps.
-            let shadow_size = CSM_SHADOW_MAP_SIZE.max(1) as f32;
+            let shadow_size = CSM_SHADOW_MAP_SIZES[cascade_idx].max(1) as f32;
             let radius = calculate_frustum_bounding_radius(
                 cascade_near,
                 cascade_far,

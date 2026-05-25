@@ -433,11 +433,8 @@ impl ChunkGenerator {
         // ── Pass 6: surface decorations ───────────────────────────────────── //
         self.generate_decorations(&mut chunk, cx, cz, &biome_map, &height_map);
 
-        // ── Pass 7: sub-chunk metadata ────────────────────────────────────── //
-        for subchunk in &mut chunk.subchunks {
-            subchunk.check_empty();
-            subchunk.check_fully_opaque();
-        }
+        // ── Pass 7: chunk/sub-chunk metadata ──────────────────────────────── //
+        chunk.rebuild_metadata();
 
         chunk
     }

@@ -156,8 +156,6 @@ pub struct State {
     pub depth_texture: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
-    /// Full shadow cascade array texture view (all cascades as one 2-D array).
-    pub shadow_texture_view: wgpu::TextureView,
     /// Screen-space shadow mask sampled by `terrain.wgsl`.
     #[allow(dead_code)]
     pub shadow_mask_texture: wgpu::Texture,
@@ -170,7 +168,7 @@ pub struct State {
     /// View of the previous-frame screen-space shadow mask.
     #[allow(dead_code)]
     pub shadow_history_view: wgpu::TextureView,
-    /// One `wgpu::TextureView` per shadow cascade for per-cascade rendering.
+    /// One `wgpu::TextureView` per shadow cascade for rendering and sampling.
     pub shadow_cascade_views: Vec<wgpu::TextureView>,
     /// GPU buffer containing the packed `CascadeData` array for all cascades.
     pub shadow_cascade_buffer: wgpu::Buffer,

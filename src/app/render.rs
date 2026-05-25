@@ -3,7 +3,7 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZE, DEFAULT_FOV, RENDER_DISTANCE,
+    BlockType, CHUNK_SIZE, CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZES, DEFAULT_FOV, RENDER_DISTANCE,
     SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, World, build_block_outline,
     build_player_model, extract_frustum_planes,
 };
@@ -360,13 +360,13 @@ impl State {
             &self.shadow_config_buffer,
             0,
             bytemuck::cast_slice(&[ShadowConfig {
-                shadow_map_size: CSM_SHADOW_MAP_SIZE as f32,
+                shadow_map_sizes: CSM_SHADOW_MAP_SIZES.map(|size| size as f32),
                 pcf_samples: if self.shadows_enabled {
                     CSM_PCF_SAMPLES
                 } else {
                     0
                 },
-                _pad: [0; 2],
+                _pad: [0; 3],
             }]),
         );
         let temporal_history_valid =

@@ -93,8 +93,6 @@ impl State {
                 chunk.subchunks[sy as usize].mesh_dirty = true;
             }
         }
-
-        self.visible_chunk_columns_dirty = true;
     }
 
     /// Main per-frame update: advances physics, processes input, loads chunks,

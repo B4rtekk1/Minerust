@@ -606,14 +606,15 @@ impl World {
                 for pz in 0..MESH_CACHE_SIZE as i32 {
                     let wx = base_x + px - MESH_CACHE_PAD as i32;
                     let wz = base_z + pz - MESH_CACHE_PAD as i32;
-                    let mut highest_opaque = -1i16;
-
-                    for wy in (0..WORLD_HEIGHT).rev() {
-                        if self.get_block(wx, wy, wz).is_solid_opaque() {
-                            highest_opaque = wy as i16;
-                            break;
-                        }
-                    }
+                    let cx = wx.div_euclid(CHUNK_SIZE);
+                    let cz = wz.div_euclid(CHUNK_SIZE);
+                    let lx = wx.rem_euclid(CHUNK_SIZE);
+                    let lz = wz.rem_euclid(CHUNK_SIZE);
+                    let highest_opaque = self
+                        .chunks
+                        .get(&(cx, cz))
+                        .map(|chunk| chunk.highest_opaque_y(lx, lz))
+                        .unwrap_or(-1);
 
                     sky_height_cache[(px as usize) * MESH_CACHE_SIZE + pz as usize] =
                         highest_opaque;

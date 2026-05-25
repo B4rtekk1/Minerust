@@ -165,6 +165,12 @@ pub struct Chunk {
     /// Ordered list of sub-chunks, bottom (index 0) to top (index `NUM_SUBCHUNKS - 1`).
     pub subchunks: Vec<SubChunk>,
 
+    /// Highest solid opaque block Y for each local X/Z column, or `-1` if none.
+    ///
+    /// Mesh snapshots use this to answer sky-visibility queries without scanning
+    /// the full world height for every subchunk rebuild.
+    highest_opaque_y: [[i16; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
+
     /// `true` if a player has placed or broken any block in this chunk.
     ///
     /// Used to prioritize saving and to distinguish generated chunks from
@@ -183,6 +189,7 @@ impl Chunk {
         }
         Chunk {
             subchunks,
+            highest_opaque_y: [[-1i16; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
             player_modified: false,
         }
     }
@@ -205,11 +212,64 @@ impl Chunk {
     /// `x` and `z` are in chunk-local space `[0, CHUNK_SIZE)`.
     /// Silently ignores writes where `y` is outside `[0, WORLD_HEIGHT)`.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
-        if y < 0 || y >= WORLD_HEIGHT {
+        if x < 0 || x >= CHUNK_SIZE || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= CHUNK_SIZE {
             return;
         }
+        let old_block = self.get_block(x, y, z);
         let subchunk_idx = (y / SUBCHUNK_HEIGHT) as usize;
         let local_y = y % SUBCHUNK_HEIGHT;
         self.subchunks[subchunk_idx].set_block(x, local_y, z, block);
+        self.update_highest_opaque_after_set(x, y, z, old_block, block);
+    }
+
+    /// Returns the cached highest opaque block in local column `(x, z)`.
+    pub fn highest_opaque_y(&self, x: i32, z: i32) -> i16 {
+        if x < 0 || x >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE {
+            return -1;
+        }
+        self.highest_opaque_y[x as usize][z as usize]
+    }
+
+    /// Rebuilds derived metadata after bulk block writes.
+    pub fn rebuild_metadata(&mut self) {
+        for subchunk in &mut self.subchunks {
+            subchunk.check_empty();
+            subchunk.check_fully_opaque();
+        }
+
+        for x in 0..CHUNK_SIZE as usize {
+            for z in 0..CHUNK_SIZE as usize {
+                self.highest_opaque_y[x][z] =
+                    self.find_highest_opaque_in_column(x as i32, z as i32);
+            }
+        }
+    }
+
+    fn update_highest_opaque_after_set(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        old_block: BlockType,
+        new_block: BlockType,
+    ) {
+        let current = self.highest_opaque_y[x as usize][z as usize];
+        if new_block.is_solid_opaque() {
+            if y as i16 > current {
+                self.highest_opaque_y[x as usize][z as usize] = y as i16;
+            }
+        } else if old_block.is_solid_opaque() && current == y as i16 {
+            self.highest_opaque_y[x as usize][z as usize] =
+                self.find_highest_opaque_in_column(x, z);
+        }
+    }
+
+    fn find_highest_opaque_in_column(&self, x: i32, z: i32) -> i16 {
+        for y in (0..WORLD_HEIGHT).rev() {
+            if self.get_block(x, y, z).is_solid_opaque() {
+                return y as i16;
+            }
+        }
+        -1
     }
 }

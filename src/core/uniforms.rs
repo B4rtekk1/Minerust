@@ -114,12 +114,12 @@ pub struct Uniforms {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ShadowConfig {
-    /// Shadow map resolution in texels for one cascade face.
-    pub shadow_map_size: f32,
+    /// Shadow map resolutions in texels for the four CSM cascades.
+    pub shadow_map_sizes: [f32; 4],
     /// Number of PCF taps used when filtering the shadow map.
     pub pcf_samples: u32,
-    /// Explicit padding so the buffer remains 16 bytes wide.
-    pub _pad: [u32; 2],
+    /// Explicit padding so the buffer remains 16-byte aligned.
+    pub _pad: [u32; 3],
 }
 
 /// Per-frame temporal shadow reprojection state.

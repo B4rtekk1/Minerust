@@ -5,7 +5,7 @@ struct Uniforms {
     csm_split_distances: vec4<f32>,
     camera_pos:          vec3<f32>,
     time:                f32,
-    sun_position:        vec3<f32>,
+    sun_dir:             vec3<f32>,  // OPT: pre-normalized on CPU (was sun_position)
     is_underwater:       f32,
     screen_size:         vec2<f32>,
     water_level:         f32,
@@ -23,8 +23,8 @@ struct Uniforms {
 };
 
 struct ShadowConfig {
-    shadow_map_size: f32,
-    pcf_samples:     u32,
+    shadow_map_sizes: vec4<f32>,
+    pcf_samples:      u32,
 }
 
 struct TemporalShadowUniforms {
@@ -38,21 +38,47 @@ struct TemporalShadowUniforms {
 @group(0) @binding(0) var<uniform> uniforms:       Uniforms;
 @group(0) @binding(1) var texture_atlas:           texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler:         sampler;
-@group(0) @binding(3) var shadow_map:              texture_depth_2d_array;
-@group(0) @binding(4) var shadow_sampler:          sampler_comparison;
-@group(0) @binding(5) var<uniform> shadow_config: ShadowConfig;
+@group(0) @binding(3) var shadow_map_0:            texture_depth_2d;
+@group(0) @binding(4) var shadow_map_1:            texture_depth_2d;
+@group(0) @binding(5) var shadow_map_2:            texture_depth_2d;
+@group(0) @binding(6) var shadow_map_3:            texture_depth_2d;
+@group(0) @binding(7) var shadow_sampler:          sampler_comparison;
+@group(0) @binding(8) var<uniform> shadow_config: ShadowConfig;
 
 @group(1) @binding(0) var ssr_depth: texture_2d<f32>;
 
 @group(2) @binding(0) var output_shadow: texture_storage_2d<r32float, write>;
 
-@group(3) @binding(0) var shadow_mask:   texture_2d<f32>;
-@group(3) @binding(1) var point_sampler: sampler;
+@group(3) @binding(0) var shadow_mask:      texture_2d<f32>;
+@group(3) @binding(1) var point_sampler:    sampler;
 @group(3) @binding(2) var<uniform> temporal_shadow: TemporalShadowUniforms;
+// OPT: add a linear sampler binding here for bilinear shadow mask sampling
+// @group(3) @binding(3) var linear_sampler: sampler;
 
-const MAX_PCF_SAMPLES:  i32 = 32;
+const MAX_PCF_SAMPLES:       i32 = 32;
 const TEMPORAL_SHADOW_CLAMP: f32 = 0.35;
-const TAU: f32 = 6.28318530718;
+const TAU:                   f32 = 6.28318530718;
+
+// OPT: moved from local var inside function to module-level const —
+//      avoids per-invocation stack allocation of 32 vec2s
+const POISSON_DISK: array<vec2<f32>, 32> = array<vec2<f32>, 32>(
+    vec2<f32>(-0.94201624, -0.39906216), vec2<f32>( 0.94558609, -0.76890725),
+    vec2<f32>(-0.09418410, -0.92938870), vec2<f32>( 0.34495938,  0.29387760),
+    vec2<f32>(-0.91588581,  0.45771432), vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543,  0.27676845), vec2<f32>( 0.97484398,  0.75648379),
+    vec2<f32>( 0.44323325, -0.97511554), vec2<f32>( 0.53742981, -0.47373420),
+    vec2<f32>(-0.65476012, -0.05147385), vec2<f32>( 0.18395645,  0.89721549),
+    vec2<f32>(-0.09715394, -0.00673456), vec2<f32>( 0.53472400,  0.73356543),
+    vec2<f32>(-0.45611231, -0.40212851), vec2<f32>(-0.57321081,  0.65476012),
+    vec2<f32>(-0.97540200, -0.07113860), vec2<f32>(-0.92034700, -0.41142000),
+    vec2<f32>(-0.88451800,  0.56804100), vec2<f32>(-0.81194500, -0.90521000),
+    vec2<f32>(-0.53795000,  0.71666600), vec2<f32>(-0.42094200,  0.99127200),
+    vec2<f32>(-0.26114700,  0.58848800), vec2<f32>(-0.14633600, -0.25919400),
+    vec2<f32>(-0.13943900, -0.88866800), vec2<f32>( 0.01168860,  0.32639500),
+    vec2<f32>( 0.03805660,  0.62547700), vec2<f32>( 0.06259350, -0.50853000),
+    vec2<f32>( 0.16946900, -0.99725300), vec2<f32>( 0.35917200, -0.63371700),
+    vec2<f32>( 0.74315600, -0.50517300), vec2<f32>( 0.86541300,  0.76372600),
+);
 
 fn shadow_hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
@@ -63,28 +89,31 @@ fn poisson_rotation(world_pos: vec3<f32>) -> f32 {
 }
 
 fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
-    var disk = array<vec2<f32>, 32>(
-        vec2<f32>(-0.94201624, -0.39906216), vec2<f32>( 0.94558609, -0.76890725),
-        vec2<f32>(-0.09418410, -0.92938870), vec2<f32>( 0.34495938,  0.29387760),
-        vec2<f32>(-0.91588581,  0.45771432), vec2<f32>(-0.81544232, -0.87912464),
-        vec2<f32>(-0.38277543,  0.27676845), vec2<f32>( 0.97484398,  0.75648379),
-        vec2<f32>( 0.44323325, -0.97511554), vec2<f32>( 0.53742981, -0.47373420),
-        vec2<f32>(-0.65476012, -0.05147385), vec2<f32>( 0.18395645,  0.89721549),
-        vec2<f32>(-0.09715394, -0.00673456), vec2<f32>( 0.53472400,  0.73356543),
-        vec2<f32>(-0.45611231, -0.40212851), vec2<f32>(-0.57321081,  0.65476012),
-        vec2<f32>(-0.97540200, -0.07113860), vec2<f32>(-0.92034700, -0.41142000),
-        vec2<f32>(-0.88451800,  0.56804100), vec2<f32>(-0.81194500, -0.90521000),
-        vec2<f32>(-0.53795000,  0.71666600), vec2<f32>(-0.42094200,  0.99127200),
-        vec2<f32>(-0.26114700,  0.58848800), vec2<f32>(-0.14633600, -0.25919400),
-        vec2<f32>(-0.13943900, -0.88866800), vec2<f32>( 0.01168860,  0.32639500),
-        vec2<f32>( 0.03805660,  0.62547700), vec2<f32>( 0.06259350, -0.50853000),
-        vec2<f32>( 0.16946900, -0.99725300), vec2<f32>( 0.35917200, -0.63371700),
-        vec2<f32>( 0.74315600, -0.50517300), vec2<f32>( 0.86541300,  0.76372600),
-    );
-    let p = disk[idx];
+    // OPT: reads from module-level const instead of per-call stack array
+    let p = POISSON_DISK[idx];
     let s = sin(rotation);
     let c = cos(rotation);
     return vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+// OPT: replaced 4 if-branches with vec4 component array indexing
+fn cascade_shadow_map_size(cascade_idx: i32) -> f32 {
+    let sizes = shadow_config.shadow_map_sizes;
+    let v = array<f32, 4>(sizes.x, sizes.y, sizes.z, sizes.w);
+    return max(v[cascade_idx], 1.0);
+}
+
+fn sample_shadow_map(cascade_idx: i32, uv: vec2<f32>, depth_ref: f32) -> f32 {
+    if cascade_idx == 0 {
+        return textureSampleCompareLevel(shadow_map_0, shadow_sampler, uv, depth_ref);
+    }
+    if cascade_idx == 1 {
+        return textureSampleCompareLevel(shadow_map_1, shadow_sampler, uv, depth_ref);
+    }
+    if cascade_idx == 2 {
+        return textureSampleCompareLevel(shadow_map_2, shadow_sampler, uv, depth_ref);
+    }
+    return textureSampleCompareLevel(shadow_map_3, shadow_sampler, uv, depth_ref);
 }
 
 fn sample_cascade_pcf(
@@ -104,7 +133,7 @@ fn sample_cascade_pcf(
     if pcf_samples <= 0 { return 1.0; }
 
     var shadow = 0.0;
-    let shadow_map_size = max(shadow_config.shadow_map_size, 1.0);
+    let shadow_map_size = cascade_shadow_map_size(cascade_idx);
     let cascade_filter_texels = array<f32, 4>(1.55, 2.00, 2.60, 3.30);
     let filter_radius = cascade_filter_texels[cascade_idx] / shadow_map_size;
     let texel = 1.0 / shadow_map_size;
@@ -118,28 +147,37 @@ fn sample_cascade_pcf(
             vec2<f32>(texel),
             vec2<f32>(1.0 - texel),
         );
-        shadow += textureSampleCompareLevel(shadow_map, shadow_sampler, suv, cascade_idx, depth_ref);
+        shadow += sample_shadow_map(cascade_idx, suv, depth_ref);
     }
 
     return mix(1.0, shadow / f32(pcf_samples), edge_fade);
 }
 
+// OPT: unrolled loop — avoids per-call stack array for `splits`, clearer control flow
 fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
     let bf = 0.10;
-    let splits = array<f32, 3>(
-        uniforms.csm_split_distances.x,
-        uniforms.csm_split_distances.y,
-        uniforms.csm_split_distances.z,
-    );
+    let s0 = uniforms.csm_split_distances.x;
+    let s1 = uniforms.csm_split_distances.y;
+    let s2 = uniforms.csm_split_distances.z;
 
-    for (var i = 0; i < 3; i++) {
-        let blend_start = splits[i] * (1.0 - bf);
-        if view_depth < blend_start { return vec2<f32>(f32(i), 0.0); }
-        if view_depth < splits[i] {
-            let t = (view_depth - blend_start) / (splits[i] - blend_start);
-            return vec2<f32>(f32(i), smoothstep(0.0, 1.0, t));
-        }
+    let b0 = s0 * (1.0 - bf);
+    if view_depth < b0 { return vec2<f32>(0.0, 0.0); }
+    if view_depth < s0 {
+        return vec2<f32>(0.0, smoothstep(0.0, 1.0, (view_depth - b0) / (s0 - b0)));
     }
+
+    let b1 = s1 * (1.0 - bf);
+    if view_depth < b1 { return vec2<f32>(1.0, 0.0); }
+    if view_depth < s1 {
+        return vec2<f32>(1.0, smoothstep(0.0, 1.0, (view_depth - b1) / (s1 - b1)));
+    }
+
+    let b2 = s2 * (1.0 - bf);
+    if view_depth < b2 { return vec2<f32>(2.0, 0.0); }
+    if view_depth < s2 {
+        return vec2<f32>(2.0, smoothstep(0.0, 1.0, (view_depth - b2) / (s2 - b2)));
+    }
+
     return vec2<f32>(3.0, 0.0);
 }
 
@@ -170,7 +208,7 @@ fn fast_global_illumination(
     let sky_energy    = mix(0.035, 0.27, day_factor) + twilight_factor * 0.08;
     let ground_energy = mix(0.010, 0.070, day_factor) + twilight_factor * 0.020;
 
-    let sky_light = sky_color * sky_energy * (0.35 + 0.65 * sky_visibility);
+    let sky_light    = sky_color * sky_energy * (0.35 + 0.65 * sky_visibility);
     let ground_light = ground_color
         * ground_energy
         * (ground_visibility + side_visibility * 0.35);
@@ -216,12 +254,14 @@ fn calculate_shadow(
     return shadow_a;
 }
 
+// OPT: removed redundant clamp(uv, 0, 1) — the subsequent clamp on `pos` already bounds it.
+// NOTE: if a linear_sampler binding is added, this whole function can be replaced with:
+//   return textureSample(shadow_mask, linear_sampler, uv).r;
 fn sample_shadow_mask_bilinear(uv: vec2<f32>) -> f32 {
     let dims_u = textureDimensions(shadow_mask);
     let dims = vec2<f32>(dims_u);
-    let clamped_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
     let pos = clamp(
-        clamped_uv * dims - vec2<f32>(0.5),
+        uv * dims - vec2<f32>(0.5),
         vec2<f32>(0.0),
         dims - vec2<f32>(1.0),
     );
@@ -242,10 +282,6 @@ fn sample_shadow_mask_bilinear(uv: vec2<f32>) -> f32 {
     let sx0 = mix(s00, s10, frac_part.x);
     let sx1 = mix(s01, s11, frac_part.x);
     return mix(sx0, sx1, frac_part.y);
-}
-
-fn sample_shadow_history(uv: vec2<f32>) -> f32 {
-    return sample_shadow_mask_bilinear(uv);
 }
 
 fn temporal_shadow_accumulation(world_pos: vec3<f32>, current_shadow: f32) -> f32 {
@@ -270,7 +306,8 @@ fn temporal_shadow_accumulation(world_pos: vec3<f32>, current_shadow: f32) -> f3
 
     let edge_dist = min(min(prev_uv.x, prev_uv.y), min(1.0 - prev_uv.x, 1.0 - prev_uv.y));
     let edge_fade = smoothstep(0.0, 0.03, edge_dist);
-    let history = sample_shadow_history(prev_uv);
+    // OPT: inlined sample_shadow_history (was a trivial one-line wrapper)
+    let history = sample_shadow_mask_bilinear(prev_uv);
     let clamped_history = clamp(
         history,
         current_shadow - TEMPORAL_SHADOW_CLAMP,
@@ -316,7 +353,8 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let view_depth = length(world_pos - uniforms.camera_pos);
 
-    let sun_dir = normalize(uniforms.sun_position);
+    // OPT: uniforms.sun_dir is pre-normalized on the CPU side — no normalize() needed here
+    let sun_dir = uniforms.sun_dir;
 
     var shadow_factor = 1.0;
     if (sun_dir.y > 0.0) {
@@ -391,12 +429,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
     if tex.a < 0.5 { discard; }
 
-    let sun_dir = normalize(uniforms.sun_position);
+    // OPT: uniforms.sun_dir is pre-normalized on CPU — no normalize() needed
+    let sun_dir = uniforms.sun_dir;
 
     let day_factor      = clamp(sun_dir.y, 0.0, 1.0);
     let twilight_factor = smoothstep(-0.1, 0.15, sun_dir.y) * smoothstep(0.4, 0.0, sun_dir.y);
 
-    let normal = normalize(in.normal);
+    // OPT: face normals from vs_main are axis-aligned unit vectors, no need to re-normalize
+    let normal = in.normal;
     var shadow = 1.0;
     if uniforms.shadows_enabled > 0.5 && sun_dir.y > 0.0 {
         shadow = sample_screen_shadow(in.clip_position);
@@ -412,9 +452,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
     let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * shadow * day_factor;
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
-    let fill_diff = max(dot(normal, fill_dir), 0.0)
-        * 0.045
-        * day_factor;
+    let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor;
 
     var face_shade: f32;
     if      abs(normal.y) > 0.5 { face_shade = select(0.5, 1.0, normal.y > 0.0); }

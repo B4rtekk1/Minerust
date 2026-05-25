@@ -184,32 +184,44 @@ impl State {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_texture_view),
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[0]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[1]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[3]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
                         // ← new SSR color view from the recreated texture
                         resource: wgpu::BindingResource::TextureView(&self.ssr_color_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 6,
+                        binding: 9,
                         // ← new SSR depth view from the recreated texture
                         resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 7,
+                        binding: 10,
                         resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 8,
+                        binding: 11,
                         resource: wgpu::BindingResource::TextureView(&self.flow_map_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 9,
+                        binding: 12,
                         resource: wgpu::BindingResource::Sampler(&self.flow_sampler),
                     },
                 ],
