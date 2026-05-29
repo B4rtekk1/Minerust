@@ -196,18 +196,15 @@ pub enum AoMode {
 /// Water surface rendering quality settings.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WaterSettings {
-    /// Whether screen-space or planar reflections are rendered on water surfaces.
-    pub reflections: bool,
     /// Whether procedural wave displacement (Tesla waves) is applied to water.
     /// More visually dynamic but more expensive than flat water.
     pub tesla_waves: bool,
 }
 
 impl Default for WaterSettings {
-    /// Enables reflections, disables tesla waves.
+    /// Disables tesla waves.
     fn default() -> Self {
         Self {
-            reflections: true,
             tesla_waves: false,
         }
     }
@@ -294,8 +291,6 @@ pub struct Keybinds {
     pub save_world: String,
     /// Load the most recent world save. Default: `keyboard.F9`.
     pub load_world: String,
-    /// Toggle reflection rendering debug mode. Default: `keyboard.R`.
-    pub reflection_mode: String,
     /// Interact with a block or entity. Default: `mouse.Right`.
     /// Added after initial release; falls back to [`default_interact_key`].
     #[serde(default = "default_interact_key")]
@@ -337,7 +332,6 @@ impl Default for Keybinds {
             screenshot: "keyboard.F2".to_string(),
             save_world: "keyboard.F5".to_string(),
             load_world: "keyboard.F9".to_string(),
-            reflection_mode: "keyboard.R".to_string(),
             interact: default_interact_key(),
             toggle_fly: default_fly_key(),
         }

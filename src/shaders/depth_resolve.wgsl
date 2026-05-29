@@ -5,7 +5,7 @@ var msaa_depth: texture_depth_multisampled_2d;
 var hiz_seed: texture_storage_2d<r32float, write>;
 
 @group(0) @binding(2)
-var ssr_depth: texture_storage_2d<r32float, write>;
+var resolved_depth: texture_storage_2d<r32float, write>;
 
 fn resolve_min_max_depth(coords: vec2<u32>) -> vec2<f32> {
     let s0 = textureLoad(msaa_depth, vec2<i32>(coords), 0);
@@ -26,6 +26,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let depths = resolve_min_max_depth(id.xy);
-    textureStore(ssr_depth, vec2<i32>(id.xy), vec4<f32>(depths.x, 0.0, 0.0, 1.0));
+    textureStore(resolved_depth, vec2<i32>(id.xy), vec4<f32>(depths.x, 0.0, 0.0, 1.0));
     textureStore(hiz_seed, vec2<i32>(id.xy), vec4<f32>(depths.y, 0.0, 0.0, 1.0));
 }
