@@ -114,6 +114,8 @@ pub struct State {
     pub crosshair_index_buffer: wgpu::Buffer,
     /// Number of indices in the crosshair index buffer.
     pub num_crosshair_indices: u32,
+    /// Whether the in-game crosshair and hotbar are rendered.
+    pub show_crosshair: bool,
 
     // -------------------------------------------------------------------------
     // Uniforms and bind groups
@@ -140,6 +142,8 @@ pub struct State {
     pub water_bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group for the composite pass (scene color + SSR resources).
     pub composite_bind_group: wgpu::BindGroup,
+    /// Bind group for the main-menu background image composite pass.
+    pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
     /// Bind group exposing the resolved depth texture to the shadow-mask compute.
@@ -182,6 +186,11 @@ pub struct State {
     pub scene_color_texture: wgpu::Texture,
     /// View of `scene_color_texture`.
     pub scene_color_view: wgpu::TextureView,
+    /// Static menu background image texture loaded from `assets/menu.png`.
+    #[allow(dead_code)]
+    pub menu_background_texture: wgpu::Texture,
+    /// View of `menu_background_texture`.
+    pub menu_background_view: wgpu::TextureView,
     /// Color texture used as the SSR source (previous-frame or resolved).
     pub ssr_color_texture: wgpu::Texture,
     /// View of `ssr_color_texture`.
@@ -382,28 +391,14 @@ pub struct State {
 
     /// FPS / performance stats overlay buffer.
     pub fps_buffer: glyphon::Buffer,
+    /// Whether the FPS/chunk debug overlay is rendered.
+    pub show_debug_overlay: bool,
 
     // Main-menu text buffers.
-    /// Large title text shown on the main menu.
-    pub menu_title_buffer: glyphon::Buffer,
-    /// Subtitle / version text shown below the title.
-    pub menu_subtitle_buffer: glyphon::Buffer,
-    /// Label "Server:" on the connection form.
-    pub menu_server_label_buffer: glyphon::Buffer,
-    /// Editable server address value on the connection form.
-    pub menu_server_value_buffer: glyphon::Buffer,
-    /// Label "Username:" on the connection form.
-    pub menu_username_label_buffer: glyphon::Buffer,
-    /// Editable username value on the connection form.
-    pub menu_username_value_buffer: glyphon::Buffer,
-    /// Rotating tip or instruction text shown at the bottom of the menu.
-    pub menu_tips_buffer: glyphon::Buffer,
-    /// "Connect" button label.
+    /// "multiplayer" menu label.
     pub menu_connect_button_buffer: glyphon::Buffer,
-    /// "Singleplayer" button label.
+    /// "new world" menu label.
     pub menu_singleplayer_button_buffer: glyphon::Buffer,
-    /// Status / error message shown below the buttons (e.g. "Connecting…").
-    pub menu_status_buffer: glyphon::Buffer,
 
     // In-game HUD text buffers.
     /// Item name label shown above the hotbar when the slot changes.

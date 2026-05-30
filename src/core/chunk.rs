@@ -116,6 +116,16 @@ impl SubChunk {
         }
     }
 
+    /// Sets a block without updating derived metadata.
+    ///
+    /// Intended for chunk generation, where thousands of blocks are written and
+    /// metadata is rebuilt once at the end via [`Chunk::rebuild_metadata`].
+    pub fn set_block_raw(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
+        if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
+            self.blocks[x as usize][y as usize][z as usize] = block;
+        }
+    }
+
     /// Scans all blocks and updates [`Self::is_empty`].
     ///
     /// Prefer this over relying solely on the incremental flag when blocks may
@@ -220,6 +230,19 @@ impl Chunk {
         let local_y = y % SUBCHUNK_HEIGHT;
         self.subchunks[subchunk_idx].set_block(x, local_y, z, block);
         self.update_highest_opaque_after_set(x, y, z, old_block, block);
+    }
+
+    /// Sets a block without updating per-column or subchunk metadata.
+    ///
+    /// Use this only during bulk generation followed by
+    /// [`Self::rebuild_metadata`]. Gameplay edits should use [`Self::set_block`].
+    pub fn set_block_raw(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
+        if x < 0 || x >= CHUNK_SIZE || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= CHUNK_SIZE {
+            return;
+        }
+        let subchunk_idx = (y / SUBCHUNK_HEIGHT) as usize;
+        let local_y = y % SUBCHUNK_HEIGHT;
+        self.subchunks[subchunk_idx].set_block_raw(x, local_y, z, block);
     }
 
     /// Returns the cached highest opaque block in local column `(x, z)`.

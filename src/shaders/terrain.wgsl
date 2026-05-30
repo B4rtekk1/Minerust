@@ -116,7 +116,7 @@ fn sample_shadow_map(cascade_idx: i32, uv: vec2<f32>, depth_ref: f32) -> f32 {
     return textureSampleCompareLevel(shadow_map_3, shadow_sampler, uv, depth_ref);
 }
 
-fn sample_cascade_pcf(
+fn sample_cascade_shadow(
     world_pos:     vec3<f32>,
     cascade_idx:   i32,
     bias:          f32,
@@ -129,16 +129,22 @@ fn sample_cascade_pcf(
     let uv = vec2<f32>(sc.x * 0.5 + 0.5, 1.0 - (sc.y * 0.5 + 0.5));
     if sc.z < 0.0 || sc.z > 1.0 { return 1.0; }
 
+    let shadow_map_size = cascade_shadow_map_size(cascade_idx);
+    let texel = 1.0 / shadow_map_size;
+    let depth_ref = clamp(sc.z - bias, 0.0, 1.0);
+    let edge_dist = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+
+    if cascade_idx > 0 {
+        let suv = clamp(uv, vec2<f32>(texel), vec2<f32>(1.0 - texel));
+        let edge_fade = smoothstep(0.0, texel, edge_dist);
+        return mix(1.0, sample_shadow_map(cascade_idx, suv, depth_ref), edge_fade);
+    }
+
     let pcf_samples = min(i32(shadow_config.pcf_samples), MAX_PCF_SAMPLES);
     if pcf_samples <= 0 { return 1.0; }
 
     var shadow = 0.0;
-    let shadow_map_size = cascade_shadow_map_size(cascade_idx);
-    let cascade_filter_texels = array<f32, 4>(1.55, 2.00, 2.60, 3.30);
-    let filter_radius = cascade_filter_texels[cascade_idx] / shadow_map_size;
-    let texel = 1.0 / shadow_map_size;
-    let depth_ref = clamp(sc.z - bias, 0.0, 1.0);
-    let edge_dist = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    let filter_radius = 1.55 / shadow_map_size;
     let edge_fade = smoothstep(0.0, filter_radius + texel, edge_dist);
 
     for (var i = 0; i < pcf_samples; i++) {
@@ -153,32 +159,18 @@ fn sample_cascade_pcf(
     return mix(1.0, shadow / f32(pcf_samples), edge_fade);
 }
 
-// OPT: unrolled loop — avoids per-call stack array for `splits`, clearer control flow
 fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
     let bf = 0.10;
     let s0 = uniforms.csm_split_distances.x;
-    let s1 = uniforms.csm_split_distances.y;
-    let s2 = uniforms.csm_split_distances.z;
+    let blend_width = max(s0 * bf, 1.0);
+    let blend_start = max(s0 - blend_width, 0.0);
 
-    let b0 = s0 * (1.0 - bf);
-    if view_depth < b0 { return vec2<f32>(0.0, 0.0); }
+    if view_depth < blend_start { return vec2<f32>(0.0, 0.0); }
     if view_depth < s0 {
-        return vec2<f32>(0.0, smoothstep(0.0, 1.0, (view_depth - b0) / (s0 - b0)));
+        return vec2<f32>(0.0, smoothstep(0.0, 1.0, (view_depth - blend_start) / blend_width));
     }
 
-    let b1 = s1 * (1.0 - bf);
-    if view_depth < b1 { return vec2<f32>(1.0, 0.0); }
-    if view_depth < s1 {
-        return vec2<f32>(1.0, smoothstep(0.0, 1.0, (view_depth - b1) / (s1 - b1)));
-    }
-
-    let b2 = s2 * (1.0 - bf);
-    if view_depth < b2 { return vec2<f32>(2.0, 0.0); }
-    if view_depth < s2 {
-        return vec2<f32>(2.0, smoothstep(0.0, 1.0, (view_depth - b2) / (s2 - b2)));
-    }
-
-    return vec2<f32>(3.0, 0.0);
+    return vec2<f32>(1.0, 0.0);
 }
 
 fn fast_global_illumination(
@@ -231,24 +223,27 @@ fn calculate_shadow(
     view_depth: f32,
 ) -> f32 {
     if sun_dir.y < 0.05 { return 0.0; }
+    if view_depth >= uniforms.csm_split_distances.y { return 1.0; }
 
     let cos_t = max(dot(normal, sun_dir), 0.0);
     let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
 
-    let rot = poisson_rotation(world_pos);
-
     let cb = select_cascade_with_blend(view_depth);
     let ci = i32(cb.x);
+    var rot = 0.0;
+    if ci == 0 {
+        rot = poisson_rotation(world_pos);
+    }
 
     let cascade_bias_scale = array<f32, 4>(1.0, 1.2, 1.45, 1.75);
     let base_bias = clamp(0.00035 + 0.0012 * sin_t / max(cos_t, 0.10), 0.00035, 0.0035);
 
-    let shadow_a = sample_cascade_pcf(world_pos, ci, base_bias * cascade_bias_scale[ci], rot);
+    let shadow_a = sample_cascade_shadow(world_pos, ci, base_bias * cascade_bias_scale[ci], rot);
 
-    if cb.y > 0.001 && ci < 3 {
+    if cb.y > 0.001 && ci < 1 {
         let next_ci = ci + 1;
         let shadow_b =
-            sample_cascade_pcf(world_pos, next_ci, base_bias * cascade_bias_scale[next_ci], rot);
+            sample_cascade_shadow(world_pos, next_ci, base_bias * cascade_bias_scale[next_ci], rot);
         return mix(shadow_a, shadow_b, cb.y);
     }
     return shadow_a;
@@ -351,7 +346,11 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     let wp4 = uniforms.inv_view_proj * ndc;
     let world_pos = wp4.xyz / max(wp4.w, 1e-6);
 
-    let view_depth = length(world_pos - uniforms.camera_pos);
+    // CSM split distances are linear view depths, not radial camera distances.
+    let center_far_clip = uniforms.inv_view_proj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    let center_far = center_far_clip.xyz / max(center_far_clip.w, 1e-6);
+    let camera_forward = normalize(center_far - uniforms.camera_pos);
+    let view_depth = max(dot(world_pos - uniforms.camera_pos, camera_forward), 0.0);
 
     // OPT: uniforms.sun_dir is pre-normalized on the CPU side — no normalize() needed here
     let sun_dir = uniforms.sun_dir;

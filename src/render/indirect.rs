@@ -544,6 +544,7 @@ impl IndirectManager {
         // Empty geometry means the subchunk should be removed.
         if vertices.is_empty() || indices.is_empty() {
             if let Some(old_alloc) = self.allocations.remove(&key) {
+                self.zero_metadata_slot(queue, old_alloc.slot_index);
                 if old_alloc.vertex_count > 0 {
                     Self::add_free_block(
                         &mut self.free_vertex_blocks,
@@ -563,7 +564,9 @@ impl IndirectManager {
                     );
                 }
                 self.free_slots.push(old_alloc.slot_index);
-                self.active_subchunk_count = self.active_subchunk_count.saturating_sub(1);
+                self.active_subchunk_count = self.allocations.len() as u32;
+                self.shrink_max_slot_bound_after_free(old_alloc.slot_index);
+                self.maybe_coalesce();
             }
             return true;
         }
@@ -737,17 +740,7 @@ impl IndirectManager {
     pub fn remove_subchunk(&mut self, queue: &wgpu::Queue, key: SubchunkKey) {
         if let Some(alloc) = self.allocations.remove(&key) {
             // Zero the metadata slot so the culling shader ignores it.
-            let subchunk_meta = SubchunkGpuMeta {
-                aabb_min: [0.0; 4],
-                aabb_max: [0.0; 4],
-                draw_data: [0, 0, 0, 0],
-            };
-            let meta_byte_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>();
-            queue.write_buffer(
-                &self.subchunk_meta_buffer,
-                meta_byte_offset as u64,
-                bytemuck::bytes_of(&subchunk_meta),
-            );
+            self.zero_metadata_slot(queue, alloc.slot_index);
             self.free_slots.push(alloc.slot_index);
 
             if alloc.vertex_count > 0 {
@@ -770,8 +763,38 @@ impl IndirectManager {
             }
 
             self.active_subchunk_count = self.allocations.len() as u32;
+            self.shrink_max_slot_bound_after_free(alloc.slot_index);
             self.maybe_coalesce();
         }
+    }
+
+    /// Zeros one metadata slot so the culling shader ignores it.
+    fn zero_metadata_slot(&self, queue: &wgpu::Queue, slot_index: usize) {
+        let subchunk_meta = SubchunkGpuMeta {
+            aabb_min: [0.0; 4],
+            aabb_max: [0.0; 4],
+            draw_data: [0, 0, 0, 0],
+        };
+        let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
+        queue.write_buffer(
+            &self.subchunk_meta_buffer,
+            meta_byte_offset as u64,
+            bytemuck::bytes_of(&subchunk_meta),
+        );
+    }
+
+    /// Keeps culling dispatches bounded by the highest currently allocated slot.
+    fn shrink_max_slot_bound_after_free(&mut self, freed_slot: usize) {
+        if self.max_slot_bound != freed_slot as u32 + 1 {
+            return;
+        }
+
+        self.max_slot_bound = self
+            .allocations
+            .values()
+            .map(|alloc| alloc.slot_index as u32 + 1)
+            .max()
+            .unwrap_or(0);
     }
 
     /// Merges adjacent free blocks in `blocks` to reduce fragmentation.

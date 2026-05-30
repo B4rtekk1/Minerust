@@ -104,6 +104,12 @@ pub struct Uniforms {
     /// `1.0` means the camera is outdoors, `0.0` means a solid ceiling blocks
     /// the column above it. Terrain GI uses this to darken caves and tunnels.
     pub sky_visibility: f32,
+
+    /// Non-zero while the main menu is open, enabling menu-only post effects.
+    pub menu_blur: f32,
+
+    /// Explicit padding so the uniform block remains 16-byte aligned.
+    pub _pad_menu: [f32; 3],
 }
 
 /// Small shadow-specific configuration uploaded separately from the main

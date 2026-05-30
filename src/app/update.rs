@@ -7,6 +7,7 @@ use minerust::{
 
 use crate::multiplayer::network::update_network;
 use crate::ui;
+use crate::ui::menu::GameState;
 
 use super::state::{State, WorldSnapshot, WorldWriteOps};
 
@@ -125,6 +126,14 @@ impl State {
         // tunnel through terrain or fly out of bounds.
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
+
+        if self.game_state != GameState::Playing {
+            self.input.jump = false;
+            self.highlighted_block = None;
+            self.is_underwater = 0.0;
+            self.sky_visibility = 1.0;
+            return;
+        }
 
         // --- 3. Chunk streaming ---
         let completed_chunks = self.chunk_loader.poll_results(MAX_CHUNKS_PER_FRAME);

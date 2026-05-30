@@ -1,7 +1,10 @@
 use minerust::camera::check_intersection;
+use minerust::{CHUNK_SIZE, RENDER_DISTANCE, World};
 use winit::event::MouseButton;
+use winit::window::CursorGrabMode;
 
-use crate::ui::menu::{MenuField, MenuHit, MenuLayout};
+use crate::logger::{LogLevel, log};
+use crate::ui::menu::{MenuHit, MenuLayout};
 use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
@@ -20,10 +23,8 @@ impl State {
     /// # Behavior per hit result
     /// | `MenuHit` variant       | Effect                                                  |
     /// |-------------------------|---------------------------------------------------------|
-    /// | `ServerAddress`         | Moves keyboard focus to the server-address text field.  |
-    /// | `Username`              | Moves keyboard focus to the username text field.        |
-    /// | `Connect`               | Initiates a multiplayer connection attempt.             |
-    /// | `Singleplayer`          | Transitions directly to `GameState::Playing`.           |
+    /// | `NewWorld`              | Transitions directly to `GameState::Playing`.           |
+    /// | `Multiplayer`           | Initiates a multiplayer connection attempt.             |
     /// | `None` (missed all UI)  | Clears the active field so keyboard input is ignored.   |
     ///
     /// # Parameters
@@ -33,14 +34,64 @@ impl State {
         let layout = MenuLayout::new(self.config.width, self.config.height);
 
         match layout.hit_test(x, y) {
-            Some(MenuHit::ServerAddress) => self.menu_state.select_field(MenuField::ServerAddress),
-            Some(MenuHit::Username) => self.menu_state.select_field(MenuField::Username),
-            Some(MenuHit::Connect) => self.connect_to_server(),
-            Some(MenuHit::Singleplayer) => self.game_state = crate::ui::menu::GameState::Playing,
-            // Clicking outside any widget deselects everything so subsequent
-            // key events are not accidentally routed to a text field.
-            None => self.menu_state.select_field(MenuField::None),
+            Some(MenuHit::NewWorld) => self.start_new_world(),
+            Some(MenuHit::Multiplayer) => self.connect_to_server(),
+            None => {}
         }
+    }
+
+    fn start_new_world(&mut self) {
+        let world = World::new();
+        let seed = world.seed;
+        let spawn = world.find_spawn_point();
+        let spawn_cx = (spawn.0 / CHUNK_SIZE as f32).floor() as i32;
+        let spawn_cz = (spawn.2 / CHUNK_SIZE as f32).floor() as i32;
+
+        {
+            let mut world_lock = self.world.write();
+            *world_lock = world;
+            world_lock.generate_chunks_in_radius(spawn_cx, spawn_cz, 2);
+        }
+        World::spawn_chunks_in_ring_async(
+            self.world.clone(),
+            spawn_cx,
+            spawn_cz,
+            2,
+            RENDER_DISTANCE,
+        );
+
+        self.chunk_loader = minerust::ChunkLoader::new(seed);
+        self.mesh_loader =
+            minerust::MeshLoader::new(self.world.clone(), minerust::get_mesh_worker_count());
+        self.indirect_manager.clear();
+        self.water_indirect_manager.clear();
+        self.visible_chunk_columns.clear();
+        self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
+        self.visible_chunk_columns_dirty = true;
+        self.last_gen_player_cx = i32::MIN;
+        self.last_gen_player_cz = i32::MIN;
+        self.highlighted_block = None;
+        self.input = Default::default();
+        self.digging = Default::default();
+        self.placement = Default::default();
+        self.camera = minerust::Camera::new(spawn);
+        self.game_start_time = std::time::Instant::now();
+        self.last_frame = std::time::Instant::now();
+        self.game_state = crate::ui::menu::GameState::Playing;
+        self.mouse_captured = true;
+        let _ = self
+            .window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked));
+        self.window.set_cursor_visible(false);
+
+        log(
+            LogLevel::Info,
+            &format!(
+                "New world generated from menu click (seed: {}, spawn: {:?})",
+                seed, spawn
+            ),
+        );
     }
 
     /// Processes a mouse-button press or release event.

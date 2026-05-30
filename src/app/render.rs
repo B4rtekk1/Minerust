@@ -10,81 +10,11 @@ use minerust::{
 
 use crate::logger::{LogLevel, log};
 use crate::multiplayer::player::queue_remote_players_labels;
-use crate::ui::menu::{GameState, MenuField, MenuLayout, Rect};
+use crate::ui::menu::{GameState, MenuHit, MenuLayout};
 
 use super::init::OPENGL_TO_WGPU_MATRIX;
 use super::init::frustum_planes_to_array;
 use super::state::State;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// NDC conversion helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Converts a horizontal pixel coordinate to Normalised Device Coordinates.
-///
-/// wgpu's NDC X axis runs from −1.0 (left edge) to +1.0 (right edge).
-///
-/// # Parameters
-/// - `x`     – Pixel coordinate, origin at the left edge of the window.
-/// - `width` – Current surface width in physical pixels.
-fn px_to_ndc_x(x: f32, width: f32) -> f32 {
-    (x / width) * 2.0 - 1.0
-}
-
-/// Converts a vertical pixel coordinate to Normalised Device Coordinates.
-///
-/// wgpu's NDC Y axis runs from +1.0 (top) to −1.0 (bottom), which is the
-/// opposite of the typical screen-space convention where Y increases downward.
-///
-/// # Parameters
-/// - `y`      – Pixel coordinate, origin at the top edge of the window.
-/// - `height` – Current surface height in physical pixels.
-fn px_to_ndc_y(y: f32, height: f32) -> f32 {
-    1.0 - (y / height) * 2.0
-}
-
-/// Appends a screen-space rectangle to shared vertex and index lists.
-///
-/// The rectangle is specified in pixel space (origin = top-left corner of the
-/// window) and is converted to NDC internally.  Four vertices and two
-/// triangles (six indices) are appended; the index base is derived from the
-/// current length of `vertices` so that multiple rectangles can share the
-/// same buffers.
-///
-/// # Parameters
-/// - `vertices` – Target vertex list (extended in-place).
-/// - `indices`  – Target index list (extended in-place).
-/// - `rect`     – Position and size in pixel space.
-/// - `color`    – Pre-packed RGBA color produced by [`rgba`].
-/// - `width`    – Surface width used for the NDC conversion.
-/// - `height`   – Surface height used for the NDC conversion.
-fn push_rect(
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    rect: Rect,
-    color: [f32; 4],
-    width: f32,
-    height: f32,
-) {
-    let base = vertices.len() as u32;
-    let x0 = px_to_ndc_x(rect.x, width);
-    let y0 = px_to_ndc_y(rect.y, height);
-    let x1 = px_to_ndc_x(rect.x + rect.w, width);
-    let y1 = px_to_ndc_y(rect.y + rect.h, height);
-    let normal_idx = Vertex::pack_normal([0.0, 0.0, 1.0]);
-
-    // Top-left → top-right → bottom-right → bottom-left (corner_idx 0..3)
-    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
-    for (i, &(x, y)) in corners.iter().enumerate() {
-        vertices.push(Vertex {
-            position: [x, y, 0.0],
-            packed: Vertex::pack_ui(normal_idx, color, 0, i as u8),
-        });
-    }
-
-    // Two counter-clockwise triangles covering the quad.
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-}
 
 /// Computes which faces of the highlighted block should be outlined.
 ///
@@ -354,6 +284,12 @@ impl State {
                 rain_factor: 0.0,
                 shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
                 sky_visibility: self.sky_visibility,
+                menu_blur: if self.game_state != GameState::Playing {
+                    1.0
+                } else {
+                    0.0
+                },
+                _pad_menu: [0.0; 3],
             }]),
         );
         self.queue.write_buffer(
@@ -425,16 +361,11 @@ impl State {
                 shadow_frustum_arrays[i] = frustum_planes_to_array(&shadow_frustum);
             }
 
-            // Dispatch GPU occlusion + frustum culling for each active cascade,
-            // for both opaque terrain and water chunks.
+            // Dispatch shadow frustum culling for opaque terrain only. Water is
+            // not drawn in the shadow pass, so culling it here would only fill
+            // command buffers that are never consumed.
             for i in 0..active_cascades {
                 self.indirect_manager.dispatch_shadow_culling(
-                    &mut encoder,
-                    &self.queue,
-                    i,
-                    &shadow_frustum_arrays[i],
-                );
-                self.water_indirect_manager.dispatch_shadow_culling(
                     &mut encoder,
                     &self.queue,
                     i,
@@ -733,19 +664,13 @@ impl State {
         // Writes to the 4× MSAA color target which is resolved simultaneously
         // into `ssr_color_view` (used by the water pass for reflections).
         {
-            let opaque_resolve_target = if self.game_state == GameState::Menu {
-                &view
-            } else {
-                &self.ssr_color_view
-            };
-
             let mut opaque_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Opaque Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
                     // Resolve MSAA into the SSR color target so the water
                     // shader can sample the opaque scene for reflections.
-                    resolve_target: Some(opaque_resolve_target),
+                    resolve_target: Some(&self.ssr_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         // Clear to the sky color computed above.
@@ -850,18 +775,12 @@ impl State {
         // Loads (does not clear) the existing MSAA color and depth buffers so
         // water is composited on top of the opaque scene.  Resolves into
         // `scene_color_view` for the composite pass.
-        let resolve_target = if self.game_state == GameState::Menu {
-            &view
-        } else {
-            &self.scene_color_view
-        };
-
         {
             let mut transparent_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Transparent Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
-                    resolve_target: Some(resolve_target), // -> scene_color_view
+                    resolve_target: Some(&self.scene_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // keep opaque scene color
@@ -971,7 +890,9 @@ impl State {
         // scene) and writes the post-processed result directly to the
         // swap-chain surface.  The composite shader handles underwater fog
         // color grading, vignette, and similar full-screen effects.
-        if self.game_state != GameState::Menu {
+        let menu_visible = self.game_state != GameState::Playing;
+
+        {
             let mut composite_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Composite Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -988,7 +909,12 @@ impl State {
             });
 
             composite_pass.set_pipeline(&self.composite_pipeline);
-            composite_pass.set_bind_group(0, &self.composite_bind_group, &[]);
+            let composite_bind_group = if menu_visible {
+                &self.menu_composite_bind_group
+            } else {
+                &self.composite_bind_group
+            };
+            composite_pass.set_bind_group(0, composite_bind_group, &[]);
             composite_pass.draw(0..3, 0..1); // full-screen triangle
         }
 
@@ -1013,51 +939,54 @@ impl State {
                 ..Default::default()
             });
 
-            // --- Crosshair ---
-            ui_pass.set_pipeline(&self.crosshair_pipeline);
-            ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            ui_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            ui_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            ui_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
-            ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
-            ui_pass.set_index_buffer(
-                self.crosshair_index_buffer.slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            ui_pass.draw_indexed(0..self.num_crosshair_indices, 0, 0..1);
+            if !menu_visible {
+                ui_pass.set_pipeline(&self.crosshair_pipeline);
+                ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                ui_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
+                ui_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
+                ui_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
 
-            // --- Coordinate debug overlay ---
-            // Only drawn when `coords_vertex_buffer` has been populated (i.e.,
-            // when the player has moved to a new chunk and the overlay was
-            // rebuilt by `update`).
-            if let (Some(vb), Some(ib)) = (&self.coords_vertex_buffer, &self.coords_index_buffer) {
-                if self.coords_num_indices > 0 {
-                    ui_pass.set_vertex_buffer(0, vb.slice(..));
-                    ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    ui_pass.draw_indexed(0..self.coords_num_indices, 0, 0..1);
+                // --- Crosshair ---
+                if self.show_crosshair {
+                    ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
+                    ui_pass.set_index_buffer(
+                        self.crosshair_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    ui_pass.draw_indexed(0..self.num_crosshair_indices, 0, 0..1);
                 }
-            }
 
-            // --- Hotbar ---
-            // Only drawn in-game (not on the menu).  Rebuilt lazily when
-            // `hotbar_dirty` is true (e.g., after a slot change).
-            if self.game_state != GameState::Menu {
-                if self.hotbar_dirty || self.hotbar_vertex_buffer.is_none() {
-                    let aspect = self.config.width as f32 / self.config.height as f32;
-                    let (vb, ib, count) =
-                        crate::ui::ui::build_hotbar(&self.device, self.hotbar_slot, aspect);
-                    self.hotbar_vertex_buffer = Some(vb);
-                    self.hotbar_index_buffer = Some(ib);
-                    self.hotbar_num_indices = count;
-                    self.hotbar_dirty = false;
-                }
+                // --- Coordinate debug overlay ---
+                // Only drawn when `coords_vertex_buffer` has been populated.
                 if let (Some(vb), Some(ib)) =
-                    (&self.hotbar_vertex_buffer, &self.hotbar_index_buffer)
+                    (&self.coords_vertex_buffer, &self.coords_index_buffer)
                 {
-                    if self.hotbar_num_indices > 0 {
+                    if self.coords_num_indices > 0 {
                         ui_pass.set_vertex_buffer(0, vb.slice(..));
                         ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                        ui_pass.draw_indexed(0..self.hotbar_num_indices, 0, 0..1);
+                        ui_pass.draw_indexed(0..self.coords_num_indices, 0, 0..1);
+                    }
+                }
+
+                // --- Hotbar ---
+                if self.show_crosshair {
+                    if self.hotbar_dirty || self.hotbar_vertex_buffer.is_none() {
+                        let aspect = self.config.width as f32 / self.config.height as f32;
+                        let (vb, ib, count) =
+                            crate::ui::ui::build_hotbar(&self.device, self.hotbar_slot, aspect);
+                        self.hotbar_vertex_buffer = Some(vb);
+                        self.hotbar_index_buffer = Some(ib);
+                        self.hotbar_num_indices = count;
+                        self.hotbar_dirty = false;
+                    }
+                    if let (Some(vb), Some(ib)) =
+                        (&self.hotbar_vertex_buffer, &self.hotbar_index_buffer)
+                    {
+                        if self.hotbar_num_indices > 0 {
+                            ui_pass.set_vertex_buffer(0, vb.slice(..));
+                            ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            ui_pass.draw_indexed(0..self.hotbar_num_indices, 0, 0..1);
+                        }
                     }
                 }
             }
@@ -1190,7 +1119,7 @@ impl State {
         }
 
         // ── Menu overlay or remote player labels ──────────────────────────── //
-        if self.game_state == GameState::Menu {
+        if menu_visible {
             self.render_menu(&mut encoder, &view);
         } else {
             // Projects each remote player's world position into screen space
@@ -1208,30 +1137,32 @@ impl State {
         // objects are updated lazily (only when the underlying text changes)
         // to avoid redundant re-shaping work.
         {
-            // ---- FPS counter (always visible) ----
-            let fps_text = format!(
-                "FPS: {:.0}\nFrame: {:.2} ms\nCPU update: {:.2} ms\nChunks: {}\nSubchunks: {}",
-                self.current_fps,
-                self.frame_time_ms,
-                self.cpu_update_ms,
-                self.chunks_rendered,
-                self.subchunks_rendered
-            );
-            self.fps_buffer.set_text(
-                &mut self.font_system,
-                &fps_text,
-                &Attrs::new().family(Family::SansSerif),
-                Shaping::Advanced,
-                None,
-            );
-            self.fps_buffer.set_size(
-                &mut self.font_system,
-                Some(self.config.width as f32),
-                Some(self.config.height as f32),
-            );
+            // ---- FPS counter (in-game only) ----
+            if !menu_visible && self.show_debug_overlay {
+                let fps_text = format!(
+                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU update: {:.2} ms\nChunks: {}\nSubchunks: {}",
+                    self.current_fps,
+                    self.frame_time_ms,
+                    self.cpu_update_ms,
+                    self.chunks_rendered,
+                    self.subchunks_rendered
+                );
+                self.fps_buffer.set_text(
+                    &mut self.font_system,
+                    &fps_text,
+                    &Attrs::new().family(Family::SansSerif),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.fps_buffer.set_size(
+                    &mut self.font_system,
+                    Some(self.config.width as f32),
+                    Some(self.config.height as f32),
+                );
+            }
 
             // ---- Hotbar slot label (in-game only, updated on slot change) ----
-            if self.game_state != GameState::Menu && self.last_hotbar_slot != self.hotbar_slot {
+            if !menu_visible && self.last_hotbar_slot != self.hotbar_slot {
                 let block = crate::ui::ui::HOTBAR_SLOTS[self.hotbar_slot];
                 let label = block.display_name();
                 self.hotbar_label_buffer.set_text(
@@ -1261,7 +1192,7 @@ impl State {
             // In menu mode: update all menu label buffers via `prepare_menu_text`.
             // In game mode: project remote player positions and grow the label
             // buffer pool as needed (one `glyphon::Buffer` per player).
-            let labels = if self.game_state == GameState::Menu {
+            let labels = if menu_visible {
                 self.prepare_menu_text();
                 Vec::new() // menu text is rendered through dedicated buffers
             } else {
@@ -1304,218 +1235,11 @@ impl State {
             // position, clipping bounds, and default color.
             let mut text_areas = Vec::with_capacity(4);
 
-            // FPS counter – top-left, always on top of all other UI.
-            text_areas.push(TextArea {
-                buffer: &self.fps_buffer,
-                left: 10.0,
-                top: 10.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
-                },
-                default_color: Color::rgb(255, 255, 255),
-                custom_glyphs: &[],
-            });
-
-            if self.game_state == GameState::Menu {
-                // ---- Menu text layout ----
-                // `MenuLayout` computes all element rectangles from the current
-                // surface size so menu text scales correctly at any resolution.
-                let layout = MenuLayout::new(self.config.width, self.config.height);
-
-                // Small offsets (+6, +56, etc.) fine-tune vertical alignment
-                // within each panel so text sits inside its background rect
-                // with comfortable padding.
-                let title_x = layout.header.x + 10.0;
-                let title_y = layout.header.y + 6.0;
-                let subtitle_x = layout.header.x + 10.0;
-                let subtitle_y = layout.header.y + 56.0;
-                let server_label_y = layout.server_label.y - 6.0;
-                let username_label_y = layout.username_label.y - 6.0;
-                let server_value_y = layout.server_field.y + 12.0;
-                let username_value_y = layout.username_field.y + 12.0;
-                let tips_y = layout.quick_card.y + 86.0;
-                let button_text_y = layout.connect_button.y + 15.0;
-                let single_text_y = layout.singleplayer_button.y + 15.0;
-                let status_y = layout.status_pill.y + 8.0;
-
+            if !menu_visible && self.show_debug_overlay {
                 text_areas.push(TextArea {
-                    buffer: &self.menu_title_buffer,
-                    left: title_x,
-                    top: title_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(242, 227, 187), // warm gold
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_subtitle_buffer,
-                    left: subtitle_x,
-                    top: subtitle_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(186, 201, 214), // muted blue-grey
-                    custom_glyphs: &[],
-                });
-
-                text_areas.push(TextArea {
-                    buffer: &self.menu_server_label_buffer,
-                    left: layout.server_label.x + 2.0,
-                    top: server_label_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(140, 153, 167),
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_server_value_buffer,
-                    left: layout.server_field.x + 16.0,
-                    top: server_value_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(248, 250, 252),
-                    custom_glyphs: &[],
-                });
-
-                text_areas.push(TextArea {
-                    buffer: &self.menu_username_label_buffer,
-                    left: layout.username_label.x + 2.0,
-                    top: username_label_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(140, 153, 167),
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_username_value_buffer,
-                    left: layout.username_field.x + 16.0,
-                    top: username_value_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(248, 250, 252),
-                    custom_glyphs: &[],
-                });
-
-                text_areas.push(TextArea {
-                    buffer: &self.menu_tips_buffer,
-                    left: layout.quick_card.x + 20.0,
-                    top: tips_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(171, 189, 202),
-                    custom_glyphs: &[],
-                });
-
-                // Buttons are centred by estimating the text width
-                // (chars × ~10.5 px) and offsetting accordingly.
-                let connect_estimate = 7.0 * 10.5; // "CONNECT" ≈ 7 chars
-                let single_estimate = 12.0 * 10.5; // "SINGLEPLAYER" ≈ 12 chars
-                text_areas.push(TextArea {
-                    buffer: &self.menu_connect_button_buffer,
-                    left: layout.connect_button.x
-                        + (layout.connect_button.w - connect_estimate) * 0.5,
-                    top: button_text_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(245, 249, 255),
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_singleplayer_button_buffer,
-                    left: layout.singleplayer_button.x
-                        + (layout.singleplayer_button.w - single_estimate) * 0.5,
-                    top: single_text_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: Color::rgb(220, 228, 236),
-                    custom_glyphs: &[],
-                });
-
-                // Status pill color reflects the current state:
-                //   red   → connection error
-                //   teal  → in-progress status (connecting…)
-                //   gray  → idle / ready
-                text_areas.push(TextArea {
-                    buffer: &self.menu_status_buffer,
-                    left: layout.status_pill.x + 16.0,
-                    top: status_y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
-                    default_color: if self.menu_state.error_message.is_some() {
-                        Color::rgb(255, 124, 124) // error red
-                    } else if self.menu_state.status_message.is_some() {
-                        Color::rgb(124, 224, 208) // progress teal
-                    } else {
-                        Color::rgb(219, 229, 239) // idle grey
-                    },
-                    custom_glyphs: &[],
-                });
-            } else {
-                // ---- In-game HUD text ----
-
-                // Hotbar slot name: centred above the hotbar, clamped to the
-                // screen width.
-                let label_width = self.hotbar_label_width.min(self.config.width as f32);
-                let label_left = (self.config.width as f32 - label_width) * 0.5;
-                // 170 px above the bottom edge keeps the label above the hotbar.
-                let label_top = (self.config.height as f32 - 170.0).max(0.0);
-                text_areas.push(TextArea {
-                    buffer: &self.hotbar_label_buffer,
-                    left: label_left,
-                    top: label_top,
+                    buffer: &self.fps_buffer,
+                    left: 10.0,
+                    top: 10.0,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
@@ -1526,6 +1250,77 @@ impl State {
                     default_color: Color::rgb(255, 255, 255),
                     custom_glyphs: &[],
                 });
+            }
+
+            if menu_visible {
+                let layout = MenuLayout::new(self.config.width, self.config.height);
+                let hovered = self
+                    .cursor_position
+                    .and_then(|(x, y)| layout.hit_test(x, y));
+                let new_world_color = if matches!(hovered, Some(MenuHit::NewWorld)) {
+                    Color::rgb(255, 255, 255)
+                } else {
+                    Color::rgb(238, 241, 236)
+                };
+                let multiplayer_color = if matches!(hovered, Some(MenuHit::Multiplayer)) {
+                    Color::rgb(255, 255, 255)
+                } else {
+                    Color::rgb(211, 226, 238)
+                };
+
+                text_areas.push(TextArea {
+                    buffer: &self.menu_singleplayer_button_buffer,
+                    left: layout.new_world_text.x,
+                    top: layout.new_world_text.y + 3.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: new_world_color,
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_connect_button_buffer,
+                    left: layout.multiplayer_text.x,
+                    top: layout.multiplayer_text.y + 3.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: multiplayer_color,
+                    custom_glyphs: &[],
+                });
+            } else {
+                // ---- In-game HUD text ----
+
+                if self.show_crosshair {
+                    // Hotbar slot name: centred above the hotbar, clamped to the
+                    // screen width.
+                    let label_width = self.hotbar_label_width.min(self.config.width as f32);
+                    let label_left = (self.config.width as f32 - label_width) * 0.5;
+                    // 170 px above the bottom edge keeps the label above the hotbar.
+                    let label_top = (self.config.height as f32 - 170.0).max(0.0);
+                    text_areas.push(TextArea {
+                        buffer: &self.hotbar_label_buffer,
+                        left: label_left,
+                        top: label_top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: self.config.width as i32,
+                            bottom: self.config.height as i32,
+                        },
+                        default_color: Color::rgb(255, 255, 255),
+                        custom_glyphs: &[],
+                    });
+                }
 
                 // Remote player name tags (one per visible player).
                 for (i, label) in labels.iter().enumerate() {
@@ -1590,151 +1385,12 @@ impl State {
         Ok(())
     }
 
-    /// Updates all `glyphon::Buffer` objects that display menu text.
-    ///
-    /// This method is called once per frame while in `GameState::Menu`.  It
-    /// reads from `menu_state` and `config` to produce the correct strings,
-    /// then calls `set_text` + `set_size` on every relevant buffer.
-    ///
-    /// Separating text content update from `TextArea` assembly (which happens
-    /// in `render`) keeps the render function focused on GPU commands and makes
-    /// it easy to add or remove menu fields without touching the render loop.
-    ///
-    /// # Active-field label decoration
-    /// When a text field is selected, its label gains a `"  •  active"` suffix
-    /// so the player has a clear visual indication of where keyboard input goes.
+    /// Updates the two clickable main-menu labels.
     pub fn prepare_menu_text(&mut self) {
-        let selected = self.menu_state.selected_field;
-
-        let title = "Minerust";
-        let subtitle = "Voxel sandbox with multiplayer and custom UI";
-
-        // Append an activity indicator to the label of the focused field.
-        let server_label = if selected == MenuField::ServerAddress {
-            "SERVER ADDRESS  •  active"
-        } else {
-            "SERVER ADDRESS"
-        };
-        let username_label = if selected == MenuField::Username {
-            "USERNAME  •  active"
-        } else {
-            "USERNAME"
-        };
-
-        let server_value = self.menu_state.server_address.as_str();
-        let username_value = self.menu_state.username.as_str();
-        let tips = "TAB switch field\nENTER connect\nESC singleplayer\nF11 fullscreen";
-        let connect_button = "CONNECT";
-        let singleplayer_button = "SINGLEPLAYER";
-
-        // Status pill: prefer error > status > idle ready message.
-        let status_text = if let Some(ref err) = self.menu_state.error_message {
-            format!("ERROR: {}", err)
-        } else if let Some(ref status) = self.menu_state.status_message {
-            format!("STATUS: {}", status)
-        } else {
-            "READY: ENTER joins multiplayer, ESC starts solo".to_string()
-        };
-
-        // ---- Update each buffer ----
-        // All buffers use the same pattern: `set_text` to reshape the string,
-        // then `set_size` to update the wrap/clip width.
-
-        self.menu_title_buffer.set_text(
-            &mut self.font_system,
-            title,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_title_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_subtitle_buffer.set_text(
-            &mut self.font_system,
-            subtitle,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_subtitle_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_server_label_buffer.set_text(
-            &mut self.font_system,
-            server_label,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_server_label_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_server_value_buffer.set_text(
-            &mut self.font_system,
-            server_value,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_server_value_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_username_label_buffer.set_text(
-            &mut self.font_system,
-            username_label,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_username_label_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_username_value_buffer.set_text(
-            &mut self.font_system,
-            username_value,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_username_value_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_tips_buffer.set_text(
-            &mut self.font_system,
-            tips,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_tips_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
         self.menu_connect_button_buffer.set_text(
             &mut self.font_system,
-            connect_button,
-            &Attrs::new().family(Family::SansSerif),
+            "multiplayer",
+            &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
         );
@@ -1746,8 +1402,8 @@ impl State {
 
         self.menu_singleplayer_button_buffer.set_text(
             &mut self.font_system,
-            singleplayer_button,
-            &Attrs::new().family(Family::SansSerif),
+            "new world",
+            &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
         );
@@ -1756,399 +1412,10 @@ impl State {
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );
-
-        self.menu_status_buffer.set_text(
-            &mut self.font_system,
-            &status_text,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_status_buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
     }
 
-    /// Renders the main-menu overlay as a series of flat colored rectangles.
-    ///
-    /// All geometry is built in CPU memory each frame using [`push_rect`] and
-    /// uploaded via `create_buffer_init` (the buffers are too small and
-    /// change-heavy to justify a persistent mapped buffer).  The pass reuses
-    /// the `crosshair_pipeline` because the menu quads share the same vertex
-    /// format and require the same alpha-blended, no-depth-test rendering.
-    ///
-    /// # Visual structure (back to front)
-    /// 1. Full-screen semi-transparent dark overlay.
-    /// 2. Panel drop-shadow (slightly larger than the panel itself).
-    /// 3. Panel background.
-    /// 4. Panel top accent stripe (gold).
-    /// 5. Title badge background + left accent stripe.
-    /// 6. Quick-tips card + left accent stripe.
-    /// 7. Server address field (border + fill, highlight when active).
-    /// 8. Username field (border + fill, highlight when active).
-    /// 9. Connect button (border + fill, highlight on hover).
-    /// 10. Singleplayer button (border + fill, highlight on hover).
-    /// 11. Status pill background.
-    /// 12. Active-field top underline (gold, only when a field is selected).
-    /// 13. Text cursor (blinking gold bar inside the active field).
-    ///
-    /// # Parameters
-    /// - `encoder` – Command encoder to append the render pass to.
-    /// - `view`    – Swap-chain texture view to draw into.
-    pub fn render_menu(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        let layout = MenuLayout::new(self.config.width, self.config.height);
-        let width = self.config.width as f32;
-        let height = self.config.height as f32;
-        let panel = layout.panel;
-
-        // Determine which interactive element the cursor is currently over so
-        // hover highlight colors can be applied to the correct button.
-        let hovered = self
-            .cursor_position
-            .and_then(|(x, y)| layout.hit_test(x, y));
-
-        let mut vertices = Vec::with_capacity(96);
-        let mut indices = Vec::with_capacity(144);
-
-        // 1. Full-screen backdrop. Keep it fully transparent so the world
-        //    stays visible behind the menu.
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: width,
-                h: height,
-            },
-            [0.0, 0.0, 0.0, 0.0],
-            width,
-            height,
-        );
-
-        // 2. Panel drop-shadow (10 px bleed on each side).
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: panel.x - 10.0,
-                y: panel.y - 10.0,
-                w: panel.w + 20.0,
-                h: panel.h + 20.0,
-            },
-            [0.08, 0.12, 0.18, 0.28],
-            width,
-            height,
-        );
-
-        // 3. Panel background.
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            panel,
-            [0.12, 0.15, 0.20, 0.72],
-            width,
-            height,
-        );
-
-        // 4. Gold top accent stripe (6 px high).
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: panel.x,
-                y: panel.y,
-                w: panel.w,
-                h: 6.0,
-            },
-            [0.95, 0.72, 0.24, 1.0],
-            width,
-            height,
-        );
-
-        // 5a. Title badge background.
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: panel.x + 20.0,
-                y: panel.y + 18.0,
-                w: 180.0,
-                h: 34.0,
-            },
-            [0.16, 0.20, 0.26, 0.82],
-            width,
-            height,
-        );
-
-        // 5b. Title badge left accent stripe (gold, 8 px wide).
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: panel.x + 16.0,
-                y: panel.y + 16.0,
-                w: 8.0,
-                h: 40.0,
-            },
-            [0.97, 0.74, 0.24, 1.0],
-            width,
-            height,
-        );
-
-        // 6a. Quick-tips card background.
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: layout.quick_card.x,
-                y: layout.quick_card.y,
-                w: layout.quick_card.w,
-                h: layout.quick_card.h,
-            },
-            [0.15, 0.19, 0.24, 0.76],
-            width,
-            height,
-        );
-
-        // 6b. Quick-tips card left accent stripe (teal, 4 px wide).
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: layout.quick_card.x,
-                y: layout.quick_card.y,
-                w: 4.0,
-                h: layout.quick_card.h,
-            },
-            [0.35, 0.8, 0.78, 1.0],
-            width,
-            height,
-        );
-
-        // 7. Server address field (active = slightly brighter fill).
-        let field_color = if self.menu_state.selected_field == MenuField::ServerAddress {
-            [0.13, 0.2, 0.27, 0.88]
-        } else {
-            [0.13, 0.17, 0.22, 0.78]
-        };
-        // Outer dark border (1 px implied by the 2 px inset of the inner rect).
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            layout.server_field,
-            [0.04, 0.05, 0.07, 0.78],
-            width,
-            height,
-        );
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: layout.server_field.x + 2.0,
-                y: layout.server_field.y + 2.0,
-                w: layout.server_field.w - 4.0,
-                h: layout.server_field.h - 4.0,
-            },
-            field_color,
-            width,
-            height,
-        );
-
-        // 8. Username field (same pattern as server field).
-        let username_color = if self.menu_state.selected_field == MenuField::Username {
-            [0.13, 0.2, 0.27, 0.88]
-        } else {
-            [0.13, 0.17, 0.22, 0.78]
-        };
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            layout.username_field,
-            [0.04, 0.05, 0.07, 0.78],
-            width,
-            height,
-        );
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: layout.username_field.x + 2.0,
-                y: layout.username_field.y + 2.0,
-                w: layout.username_field.w - 4.0,
-                h: layout.username_field.h - 4.0,
-            },
-            username_color,
-            width,
-            height,
-        );
-
-        // 9. Connect button (brighter fill on hover).
-        let connect_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Connect)) {
-            [0.24, 0.52, 0.84, 1.0]
-        } else {
-            [0.2, 0.45, 0.74, 1.0]
-        };
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            layout.connect_button,
-            [0.16, 0.33, 0.55, 1.0],
-            width,
-            height,
-        ); // border
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: layout.connect_button.x + 2.0,
-                y: layout.connect_button.y + 2.0,
-                w: layout.connect_button.w - 4.0,
-                h: layout.connect_button.h - 4.0,
-            },
-            connect_fill,
-            width,
-            height,
-        );
-
-        // 10. Singleplayer button (same pattern, darker palette).
-        let single_fill = if matches!(hovered, Some(crate::ui::menu::MenuHit::Singleplayer)) {
-            [0.19, 0.22, 0.28, 1.0]
-        } else {
-            [0.16, 0.19, 0.24, 1.0]
-        };
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            layout.singleplayer_button,
-            [0.1, 0.11, 0.14, 1.0],
-            width,
-            height,
-        );
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            Rect {
-                x: layout.singleplayer_button.x + 2.0,
-                y: layout.singleplayer_button.y + 2.0,
-                w: layout.singleplayer_button.w - 4.0,
-                h: layout.singleplayer_button.h - 4.0,
-            },
-            single_fill,
-            width,
-            height,
-        );
-
-        // 11. Status pill background.
-        push_rect(
-            &mut vertices,
-            &mut indices,
-            layout.status_pill,
-            [0.12, 0.15, 0.19, 0.82],
-            width,
-            height,
-        );
-
-        // 12. Active-field top underline (gold, 3 px high).
-        // Only drawn when a field is actually selected.
-        let selected_field_x = match self.menu_state.selected_field {
-            MenuField::ServerAddress => Some(layout.server_field),
-            MenuField::Username => Some(layout.username_field),
-            MenuField::None => None,
-        };
-        if let Some(field) = selected_field_x {
-            push_rect(
-                &mut vertices,
-                &mut indices,
-                Rect {
-                    x: field.x - 2.0,
-                    y: field.y - 2.0,
-                    w: field.w + 4.0,
-                    h: 3.0,
-                },
-                [0.97, 0.74, 0.24, 1.0],
-                width,
-                height,
-            );
-        }
-
-        // 13. Text cursor (2 px wide gold bar inside the active field).
-        // Positioned after the last character; clamped so it never leaves
-        // the field bounds.  A proper blinking cursor would require time-based
-        // alpha, which can be added by sampling `self.game_start_time`.
-        let active_field = match self.menu_state.selected_field {
-            MenuField::ServerAddress => {
-                Some((layout.server_field, self.menu_state.server_address.as_str()))
-            }
-            MenuField::Username => Some((layout.username_field, self.menu_state.username.as_str())),
-            MenuField::None => None,
-        };
-        if let Some((field, value)) = active_field {
-            let char_count = value.chars().count() as f32;
-            // 11 px per character is an approximation for the menu font size.
-            let cursor_x = (field.x + 16.0 + char_count * 11.0).min(field.x + field.w - 12.0);
-            push_rect(
-                &mut vertices,
-                &mut indices,
-                Rect {
-                    x: cursor_x,
-                    y: field.y + 8.0,
-                    w: 2.0,
-                    h: field.h - 16.0,
-                },
-                [0.97, 0.74, 0.24, 0.95],
-                width,
-                height,
-            );
-        }
-
-        // ── Upload and draw ───────────────────────────────────────────────── //
-        if !vertices.is_empty() {
-            // Allocate fresh buffers every frame; the menu geometry is small
-            // enough that the allocation overhead is negligible.
-            let vb = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Menu UI VB"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ib = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Menu UI IB"),
-                    contents: bytemuck::cast_slice(&indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Menu UI Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        // Preserve the already composited world and draw the
-                        // menu overlay on top of it.
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.crosshair_pipeline);
-            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
-            pass.set_vertex_buffer(0, vb.slice(..));
-            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
-        }
-    }
+    /// Menu blur is applied in the composite shader; menu labels are drawn in the text pass.
+    pub fn render_menu(&mut self, _encoder: &mut wgpu::CommandEncoder, _view: &wgpu::TextureView) {}
 
     /// Projects remote player world positions into screen space for name-tag
     /// rendering.

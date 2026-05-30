@@ -156,7 +156,9 @@ fn read_clipboard_text() -> Option<String> {
 /// | 1–9 | Select hotbar slot. |
 /// | Escape (mouse captured) | Release cursor without leaving the game. |
 /// | Escape (mouse free) | Open the main menu. |
+/// | F1 | Toggle crosshair and hotbar. |
 /// | F5 | Save world to disk. |
+/// | F3 | Toggle FPS/chunk debug overlay. |
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
 /// | R | Cycle water reflection mode (Off -> SSSR). |
@@ -343,7 +345,11 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     // current keyboard layout and dead-key composition) rather
                     // than the raw key code, so it handles accented characters
                     // and IME input transparently.
-                    if state.game_state == GameState::Menu && pressed && !menu_control_v {
+                    if state.game_state == GameState::Menu
+                        && pressed
+                        && !menu_control_v
+                        && state.menu_state.is_editing()
+                    {
                         if let Some(ref txt) = text {
                             for ch in txt.chars() {
                                 state.menu_state.handle_char(ch);
@@ -359,10 +365,6 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(text) = read_clipboard_text() {
                                         state.menu_state.handle_paste(&text);
                                     }
-                                }
-                                KeyCode::Tab => {
-                                    // Cycle focus: ServerAddress → Username → ServerAddress.
-                                    state.menu_state.next_field();
                                 }
                                 KeyCode::Enter => {
                                     state.connect_to_server();
@@ -436,6 +438,22 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                         winit::window::Fullscreen::Borderless(None),
                                     ));
                                 }
+                            }
+
+                            KeyCode::F1 if pressed && !repeat => {
+                                state.show_crosshair = !state.show_crosshair;
+                                let state_name = if state.show_crosshair { "On" } else { "Off" };
+                                log(LogLevel::Info, &format!("HUD: {}", state_name));
+                            }
+
+                            KeyCode::F3 if pressed && !repeat => {
+                                state.show_debug_overlay = !state.show_debug_overlay;
+                                let state_name = if state.show_debug_overlay {
+                                    "On"
+                                } else {
+                                    "Off"
+                                };
+                                log(LogLevel::Info, &format!("Debug overlay: {}", state_name));
                             }
 
                             KeyCode::KeyR if pressed => {

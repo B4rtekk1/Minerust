@@ -60,16 +60,18 @@ impl CsmManager {
             // projection is slightly larger, but its size does not breathe as
             // the camera moves, which prevents front/back cascade jumps.
             let shadow_size = CSM_SHADOW_MAP_SIZES[cascade_idx].max(1) as f32;
+            let center_depth = stable_cascade_center_depth(cascade_idx, cascade_near, cascade_far);
             let radius = calculate_frustum_bounding_radius(
                 cascade_near,
                 cascade_far,
+                center_depth,
                 fov_y,
                 aspect,
                 shadow_size,
             );
             let extent = radius * 2.0;
             let texel_size = extent / shadow_size;
-            let center = calculate_frustum_center(cascade_near, cascade_far, &inv_view);
+            let center = calculate_frustum_center(center_depth, &inv_view);
             let snapped_center =
                 snap_cascade_center_to_texel_grid(center, light_x, light_y, texel_size);
             let depth_pad = (slice_depth * 1.5).clamp(64.0, 256.0);
@@ -110,8 +112,18 @@ impl Default for CsmManager {
     }
 }
 
-fn calculate_frustum_center(near: f32, far: f32, inv_view: &Mat4) -> Vec3 {
-    let center_depth = -(near + far) * 0.5;
+fn stable_cascade_center_depth(cascade_idx: usize, near: f32, far: f32) -> f32 {
+    // Distant cascades use large world-space texels, so tying their center to
+    // camera rotation makes the shadow grid visibly step. Anchor them at the eye.
+    if cascade_idx >= 1 {
+        0.0
+    } else {
+        (near + far) * 0.5
+    }
+}
+
+fn calculate_frustum_center(center_depth: f32, inv_view: &Mat4) -> Vec3 {
+    let center_depth = -center_depth;
     let center = *inv_view * Vec4::new(0.0, 0.0, center_depth, 1.0);
     center.truncate() / center.w
 }
@@ -119,20 +131,20 @@ fn calculate_frustum_center(near: f32, far: f32, inv_view: &Mat4) -> Vec3 {
 fn calculate_frustum_bounding_radius(
     near: f32,
     far: f32,
+    center_depth: f32,
     fov_y: f32,
     aspect: f32,
     shadow_size: f32,
 ) -> f32 {
     let tan_half_fov = (fov_y / 2.0).tan();
-    let half_depth = ((far - near) * 0.5).abs();
 
     let near_height = near * tan_half_fov;
     let near_width = near_height * aspect;
     let far_height = far * tan_half_fov;
     let far_width = far_height * aspect;
 
-    let near_radius = Vec3::new(near_width, near_height, half_depth).length();
-    let far_radius = Vec3::new(far_width, far_height, half_depth).length();
+    let near_radius = Vec3::new(near_width, near_height, near - center_depth).length();
+    let far_radius = Vec3::new(far_width, far_height, far - center_depth).length();
     snap_up(
         near_radius.max(far_radius).max(1.0),
         1.0 / shadow_size.max(1.0),

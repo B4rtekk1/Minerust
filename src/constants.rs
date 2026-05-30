@@ -42,9 +42,10 @@ pub const PLAYER_CROUCH_SPEED_MULTIPLIER: f32 = 0.35;
 pub const PLAYER_JUMP_HEIGHT: f32 = 1.0;
 
 pub const CSM_CASCADE_COUNT: usize = 4;
-pub const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [16.0, 48.0, 128.0, 300.0];
-pub const CSM_SHADOW_MAP_SIZES: [u32; CSM_CASCADE_COUNT] = [4096, 3072, 2048, 1024];
-pub const CSM_PCF_SAMPLES: u32 = 32;
+pub const CSM_ACTIVE_CASCADE_COUNT: usize = 2;
+pub const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [24.0, 300.0, 300.0, 300.0];
+pub const CSM_SHADOW_MAP_SIZES: [u32; CSM_CASCADE_COUNT] = [4096, 2048, 1, 1];
+pub const CSM_PCF_SAMPLES: u32 = 1;
 
 pub const DEFAULT_FOV: f32 = 70.0 * std::f32::consts::PI / 180.0;
 
@@ -66,10 +67,6 @@ pub fn get_mesh_worker_count() -> usize {
     ((cores.saturating_sub(2)) / 2).max(2).min(6)
 }
 
-pub fn get_active_cascade_count(render_distance: i32) -> usize {
-    match render_distance {
-        0..=6 => 2,
-        7..=12 => 3,
-        _ => 4,
-    }
+pub fn get_active_cascade_count(_render_distance: i32) -> usize {
+    CSM_ACTIVE_CASCADE_COUNT
 }

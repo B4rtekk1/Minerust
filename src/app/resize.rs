@@ -379,6 +379,27 @@ impl State {
                     },
                 ],
             });
+            self.menu_composite_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Menu Composite Bind Group"),
+                    layout: &composite_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.menu_background_view,
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&composite_sampler),
+                        },
+                    ],
+                });
 
             // ── Hierarchical-Z (Hi-Z) texture rebuild ─────────────────────── //
             // The Hi-Z mip count is `⌊log₂(max(width, height))⌋ + 1`.  This

@@ -16,8 +16,8 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
     CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZES, Camera, DiggingState, IndirectManager, InputState,
-    OutlineVertex, RENDER_DISTANCE, SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms,
-    Vertex, World, build_crosshair,
+    OutlineVertex, SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, WORLD_HEIGHT,
+    World, build_crosshair,
 };
 
 use super::state::State;
@@ -39,6 +39,54 @@ pub const OPENGL_TO_WGPU_MATRIX: Mat4 = Mat4::from_cols_array(&[
     0.0, 0.0, 0.5, 0.0,
     0.0, 0.0, 0.5, 1.0,
 ]);
+
+fn create_menu_background_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let image = image::load_from_memory(include_bytes!("../../assets/menu.png"))
+        .expect("Failed to decode assets/menu.png")
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Menu Background Texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        image.as_raw(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
 
 /// Converts an array of six frustum planes from `glam::Vec4` into
 /// a plain `[[f32; 4]; 6]` that can be sent directly to a GPU buffer.
@@ -340,6 +388,8 @@ impl State {
                 rain_factor: 0.0,
                 shadows_enabled: 1.0,
                 sky_visibility: 1.0,
+                menu_blur: 1.0,
+                _pad_menu: [0.0; 3],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1612,21 +1662,12 @@ impl State {
         // ------------------------------------------------------------------ //
         // World, camera, chunk loader
         // ------------------------------------------------------------------ //
-        log(LogLevel::Info, "Generating world in background...");
         let world = Arc::new(parking_lot::RwLock::new(World::new()));
-
-        // `find_spawn_point` searches downward from a candidate column until
-        // it finds a non-air block, ensuring the player spawns on solid ground.
-        let spawn = world.read().find_spawn_point();
-        let camera = Camera::new(spawn);
-
-        {
-            let mut world = world.write();
-            world.generate_chunks_in_radius(0, 0, 2);
-        }
-        World::spawn_chunks_in_ring_async(Arc::clone(&world), 0, 0, 2, RENDER_DISTANCE);
-
-        log(LogLevel::Info, &format!("Spawn selected: {:?}", spawn));
+        let camera = Camera::new((0.0, WORLD_HEIGHT as f32 - 1.0, 0.0));
+        log(
+            LogLevel::Info,
+            "World generation deferred until New World is clicked.",
+        );
 
         let seed = world.read().seed;
         // `ChunkLoader` generates chunk data (terrain noise, biomes, structures)
@@ -1702,24 +1743,10 @@ impl State {
         let fps_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(40.0, 48.0));
 
         // --- Main-menu text buffers ---
-        let menu_title_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(44.0, 52.0));
-        let menu_subtitle_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 30.0));
-        let menu_server_label_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
-        let menu_server_value_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0));
-        let menu_username_label_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
-        let menu_username_value_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0));
-        /// Random tip shown in the menu footer.
-        let menu_tips_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
         let menu_connect_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
+            glyphon::Buffer::new(&mut font_system, Metrics::new(48.0, 58.0));
         let menu_singleplayer_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
-        /// Connection status / error message shown below the buttons.
-        let menu_status_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+            glyphon::Buffer::new(&mut font_system, Metrics::new(48.0, 58.0));
 
         // Hotbar slot name (e.g., "Stone Sword") displayed above the hotbar.
         let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
@@ -1818,6 +1845,8 @@ impl State {
         });
         let scene_color_view =
             scene_color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (menu_background_texture, menu_background_view) =
+            create_menu_background_texture(&device, &queue);
 
         let composite_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1872,6 +1901,24 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&scene_color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&composite_sampler),
+                },
+            ],
+        });
+        let menu_composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Menu Composite Bind Group"),
+            layout: &composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&menu_background_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -2091,6 +2138,7 @@ impl State {
             crosshair_vertex_buffer,
             crosshair_index_buffer,
             num_crosshair_indices,
+            show_crosshair: true,
             uniform_buffer,
             shadow_config_buffer,
             temporal_shadow_buffer,
@@ -2184,24 +2232,20 @@ impl State {
             text_renderer,
             viewport,
             fps_buffer,
-            menu_title_buffer,
-            menu_subtitle_buffer,
-            menu_server_label_buffer,
-            menu_server_value_buffer,
-            menu_username_label_buffer,
-            menu_username_value_buffer,
-            menu_tips_buffer,
+            show_debug_overlay: true,
             menu_connect_button_buffer,
             menu_singleplayer_button_buffer,
-            menu_status_buffer,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,
             last_hotbar_slot: usize::MAX,
             player_label_buffers: Vec::new(),
             composite_pipeline,
             composite_bind_group,
+            menu_composite_bind_group,
             scene_color_texture,
             scene_color_view,
+            menu_background_texture,
+            menu_background_view,
             indirect_manager,
             water_indirect_manager,
             hiz_texture,

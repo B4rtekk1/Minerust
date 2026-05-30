@@ -107,8 +107,8 @@ Space         → Jump
 Shift         → Sprint
 Mouse         → Look around
 Esc           → Pause menu
-F1            → Toggle UI
-F3            → Debug info
+F1            → Toggle crosshair + hotbar
+F3            → Toggle debug info
 F11           → Fullscreen
 ```
 
