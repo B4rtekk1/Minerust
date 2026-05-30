@@ -24,6 +24,8 @@ pub struct MeshResult {
     pub cz: i32,
     /// Vertical index of the subchunk within its chunk column.
     pub sy: i32,
+    /// Mesh-input revision captured with the world snapshot used for this mesh.
+    pub mesh_version: u64,
     /// Terrain mesh as `(vertices, indices)`.
     pub terrain: (Vec<Vertex>, Vec<u32>),
     /// Water mesh as `(vertices, indices)`.
@@ -96,6 +98,7 @@ impl MeshLoader {
                                 cx: req.cx,
                                 cz: req.cz,
                                 sy: req.sy,
+                                mesh_version: snapshot.mesh_version,
                                 terrain: meshes.0,
                                 water: meshes.1,
                             })

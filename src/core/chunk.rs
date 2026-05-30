@@ -30,6 +30,13 @@ pub struct SubChunk {
     /// Cleared by the meshing system after a successful upload.
     pub mesh_dirty: bool,
 
+    /// Monotonic revision of the mesh inputs for this sub-chunk.
+    ///
+    /// Mesh workers copy world data asynchronously. The main thread compares a
+    /// completed result against this value before uploading it, so stale worker
+    /// results cannot clear a newer dirty state.
+    pub mesh_version: u64,
+
     /// Number of solid-geometry indices in the current GPU mesh.
     ///
     /// Used by the render pass to issue the correct `draw_indexed` call.
@@ -75,6 +82,7 @@ impl SubChunk {
             is_empty: true,
             is_fully_opaque: false,
             mesh_dirty: true,
+            mesh_version: 0,
             num_indices: 0,
             num_water_indices: 0,
             aabb: AABB::new(
@@ -108,12 +116,21 @@ impl SubChunk {
     /// a full scan is needed (e.g. after bulk edits).
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
+            if self.blocks[x as usize][y as usize][z as usize] == block {
+                return;
+            }
             self.blocks[x as usize][y as usize][z as usize] = block;
-            self.mesh_dirty = true;
+            self.mark_mesh_dirty();
             if block != BlockType::Air {
                 self.is_empty = false;
             }
         }
+    }
+
+    /// Marks this sub-chunk's mesh as stale and advances its mesh revision.
+    pub fn mark_mesh_dirty(&mut self) {
+        self.mesh_dirty = true;
+        self.mesh_version = self.mesh_version.wrapping_add(1);
     }
 
     /// Sets a block without updating derived metadata.

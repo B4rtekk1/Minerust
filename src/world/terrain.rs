@@ -75,6 +75,7 @@ pub struct SubchunkMeshSnapshot {
     pub chunk_x: i32,
     pub chunk_z: i32,
     pub subchunk_y: i32,
+    pub mesh_version: u64,
     pub has_blocks: bool,
     pub block_cache: [BlockType; MESH_CACHE_LEN],
     pub sky_height_cache: [i16; MESH_SKY_CACHE_LEN],
@@ -549,9 +550,12 @@ impl World {
         chunk_z: i32,
         subchunk_y: i32,
     ) -> Option<SubchunkMeshSnapshot> {
-        if !self.chunks.contains_key(&(chunk_x, chunk_z)) {
-            return None;
-        }
+        let mesh_version = self
+            .chunks
+            .get(&(chunk_x, chunk_z))?
+            .subchunks
+            .get(subchunk_y as usize)?
+            .mesh_version;
 
         let base_x = chunk_x * CHUNK_SIZE;
         let base_y = subchunk_y * SUBCHUNK_HEIGHT;
@@ -626,6 +630,7 @@ impl World {
             chunk_x,
             chunk_z,
             subchunk_y,
+            mesh_version,
             has_blocks,
             block_cache,
             sky_height_cache,

@@ -57,6 +57,9 @@ impl State {
                 None => return, // Chunk was unloaded while the mesh was in flight.
             };
             let subchunk = &mut chunk.subchunks[sy as usize];
+            if subchunk.mesh_version != result.mesh_version {
+                return; // A newer block edit or neighbor change invalidated this mesh.
+            }
             let aabb = subchunk.aabb;
             subchunk.num_indices = result.terrain.1.len() as u32;
             subchunk.num_water_indices = result.water.1.len() as u32;
@@ -368,9 +371,11 @@ impl State {
 
         // Dirty-marking runs outside the write-lock window above to avoid
         // holding the lock across the full neighbor scan.
-        for (bx, by, bz) in write_ops.mark_dirty {
+        let player_dirty_blocks = write_ops.mark_dirty;
+        for &(bx, by, bz) in &player_dirty_blocks {
             self.mark_chunk_dirty(bx, by, bz);
         }
+        self.rebuild_player_dirty_meshes_now(&player_dirty_blocks);
 
         // Update the underwater post-process uniform.
         self.is_underwater = if snapshot.eye_block == BlockType::Water {
@@ -422,12 +427,12 @@ impl State {
 
         for sy in 0..NUM_SUBCHUNKS as usize {
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
-                chunk.subchunks[sy].mesh_dirty = true;
+                chunk.subchunks[sy].mark_mesh_dirty();
             }
 
             for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
                 if let Some(chunk) = world.chunks.get_mut(&(nx, nz)) {
-                    chunk.subchunks[sy].mesh_dirty = true;
+                    chunk.subchunks[sy].mark_mesh_dirty();
                 }
             }
         }
@@ -446,68 +451,96 @@ impl State {
     /// Checks are bounds-guarded; out-of-range subchunk indices or absent
     /// chunks are silently skipped.
     pub fn mark_chunk_dirty(&mut self, x: i32, y: i32, z: i32) {
-        let cx = (x as f32 / CHUNK_SIZE as f32).floor() as i32;
-        let cz = (z as f32 / CHUNK_SIZE as f32).floor() as i32;
-        let sy = y / SUBCHUNK_HEIGHT;
+        let mut affected_subchunks = Vec::with_capacity(7);
+        Self::collect_affected_subchunk_keys(x, y, z, &mut affected_subchunks);
 
         let mut world = self.world.write();
-
-        // Mark the subchunk that owns this block.
-        if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
-            if sy >= 0 && (sy as usize) < chunk.subchunks.len() {
-                chunk.subchunks[sy as usize].mesh_dirty = true;
+        for (cx, cz, sy) in affected_subchunks {
+            if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
+                if let Some(subchunk) = chunk.subchunks.get_mut(sy as usize) {
+                    subchunk.mark_mesh_dirty();
+                }
             }
         }
+    }
 
-        // Local coordinates within the chunk / subchunk — used to detect
-        // whether the block lies on a boundary face.
+    fn rebuild_player_dirty_meshes_now(&mut self, dirty_blocks: &[(i32, i32, i32)]) {
+        if dirty_blocks.is_empty() {
+            return;
+        }
+
+        let mut subchunks = Vec::with_capacity(dirty_blocks.len() * 7);
+        for &(x, y, z) in dirty_blocks {
+            Self::collect_affected_subchunk_keys(x, y, z, &mut subchunks);
+        }
+        subchunks.sort_unstable();
+        subchunks.dedup();
+
+        let seed = self.world.read().seed;
+        let generator = minerust::ChunkGenerator::new(seed);
+
+        for (cx, cz, sy) in subchunks {
+            let snapshot = {
+                let world = self.world.read();
+                let Some(chunk) = world.chunks.get(&(cx, cz)) else {
+                    continue;
+                };
+                let Some(subchunk) = chunk.subchunks.get(sy as usize) else {
+                    continue;
+                };
+                if !subchunk.mesh_dirty {
+                    continue;
+                }
+                world.snapshot_subchunk_mesh(cx, cz, sy)
+            };
+
+            let Some(snapshot) = snapshot else {
+                continue;
+            };
+
+            let meshes = minerust::World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
+            self.update_subchunk_mesh(minerust::mesh_loader::MeshResult {
+                cx,
+                cz,
+                sy,
+                mesh_version: snapshot.mesh_version,
+                terrain: meshes.0,
+                water: meshes.1,
+            });
+        }
+    }
+
+    fn collect_affected_subchunk_keys(x: i32, y: i32, z: i32, out: &mut Vec<(i32, i32, i32)>) {
+        let cx = x.div_euclid(CHUNK_SIZE);
+        let cz = z.div_euclid(CHUNK_SIZE);
+        let sy = y.div_euclid(SUBCHUNK_HEIGHT);
+        if !(0..NUM_SUBCHUNKS).contains(&sy) {
+            return;
+        }
+
+        out.push((cx, cz, sy));
+
         let lx = x.rem_euclid(CHUNK_SIZE);
         let lz = z.rem_euclid(CHUNK_SIZE);
         let ly = y.rem_euclid(SUBCHUNK_HEIGHT);
 
-        // West neighbor (block is on the -X face of its chunk column).
         if lx == 0 {
-            if let Some(chunk) = world.chunks.get_mut(&(cx - 1, cz)) {
-                if sy >= 0 && (sy as usize) < chunk.subchunks.len() {
-                    chunk.subchunks[sy as usize].mesh_dirty = true;
-                }
-            }
+            out.push((cx - 1, cz, sy));
         }
-        // East neighbor (block is on the +X face of its chunk column).
         if lx == CHUNK_SIZE - 1 {
-            if let Some(chunk) = world.chunks.get_mut(&(cx + 1, cz)) {
-                if sy >= 0 && (sy as usize) < chunk.subchunks.len() {
-                    chunk.subchunks[sy as usize].mesh_dirty = true;
-                }
-            }
+            out.push((cx + 1, cz, sy));
         }
-        // North neighbor (block is on the -Z face of its chunk column).
         if lz == 0 {
-            if let Some(chunk) = world.chunks.get_mut(&(cx, cz - 1)) {
-                if sy >= 0 && (sy as usize) < chunk.subchunks.len() {
-                    chunk.subchunks[sy as usize].mesh_dirty = true;
-                }
-            }
+            out.push((cx, cz - 1, sy));
         }
-        // South neighbor (block is on the +Z face of its chunk column).
         if lz == CHUNK_SIZE - 1 {
-            if let Some(chunk) = world.chunks.get_mut(&(cx, cz + 1)) {
-                if sy >= 0 && (sy as usize) < chunk.subchunks.len() {
-                    chunk.subchunks[sy as usize].mesh_dirty = true;
-                }
-            }
+            out.push((cx, cz + 1, sy));
         }
-        // Subchunk below (block is on the bottom face of its subchunk).
         if ly == 0 && sy > 0 {
-            if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
-                chunk.subchunks[(sy - 1) as usize].mesh_dirty = true;
-            }
+            out.push((cx, cz, sy - 1));
         }
-        // Subchunk above (block is on the top face of its subchunk).
         if ly == SUBCHUNK_HEIGHT - 1 && sy < NUM_SUBCHUNKS - 1 {
-            if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
-                chunk.subchunks[(sy + 1) as usize].mesh_dirty = true;
-            }
+            out.push((cx, cz, sy + 1));
         }
     }
 
@@ -533,6 +566,7 @@ impl State {
         );
 
         if let Some(seed) = new_seed {
+            self.has_entered_world = true;
             // Apply new world seed from server
             {
                 let mut world_lock = self.world.write();

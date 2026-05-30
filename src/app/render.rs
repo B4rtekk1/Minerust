@@ -112,12 +112,17 @@ impl State {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let menu_visible = self.game_state != GameState::Playing;
+        let world_has_loaded_chunks = menu_visible && !self.world.read().chunks.is_empty();
+        let menu_uses_world_background =
+            menu_visible && (self.has_entered_world || world_has_loaded_chunks);
+        let render_world_scene = !menu_visible || menu_uses_world_background;
 
         // ── Remote player model buffers ───────────────────────────────────── //
         // All remote player meshes are concatenated into a single vertex/index
         // buffer pair that grows on demand (doubling strategy).  This avoids
         // per-player draw calls and keeps buffer management simple.
-        if !self.remote_players.is_empty() && self.game_state != GameState::Menu {
+        if !self.remote_players.is_empty() && render_world_scene {
             let mut all_vertices = Vec::with_capacity(self.remote_players.len() * 16);
             let mut all_indices = Vec::with_capacity(self.remote_players.len() * 24);
 
@@ -284,11 +289,7 @@ impl State {
                 rain_factor: 0.0,
                 shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
                 sky_visibility: self.sky_visibility,
-                menu_blur: if self.game_state != GameState::Playing {
-                    1.0
-                } else {
-                    0.0
-                },
+                menu_blur: if menu_visible { 1.0 } else { 0.0 },
                 _pad_menu: [0.0; 3],
             }]),
         );
@@ -306,7 +307,7 @@ impl State {
             }]),
         );
         let temporal_history_valid =
-            self.shadow_history_valid && self.shadows_enabled && self.game_state != GameState::Menu;
+            self.shadow_history_valid && self.shadows_enabled && render_world_scene;
         let camera_motion = Vec3::from_array(self.prev_camera_pos).distance(eye_pos);
         let sun_motion = Vec3::from_array(self.prev_sun_position).distance(sun_dir);
         let camera_history_factor = (1.0 - camera_motion * 0.12).clamp(0.35, 1.0);
@@ -528,7 +529,7 @@ impl State {
         // ── Terrain depth prepass ─────────────────────────────────────────── //
         // Fill the MSAA depth buffer first so we can resolve it and compute a
         // screen-space shadow mask before shading the terrain.
-        if self.game_state != GameState::Menu {
+        if render_world_scene {
             let mut depth_prepass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Terrain Depth Prepass"),
                 color_attachments: &[],
@@ -582,7 +583,7 @@ impl State {
         // ── Depth resolve compute pass ───────────────────────────────────── //
         // Resolve MSAA depth early (from the prepass) so the shadow-mask compute
         // can reconstruct world positions.
-        if self.game_state != GameState::Menu {
+        if render_world_scene {
             let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Depth Resolve Compute Pass (Prepass)"),
                 timestamp_writes: None,
@@ -597,7 +598,7 @@ impl State {
         }
 
         // ── Shadow mask compute ──────────────────────────────────────────── //
-        if self.game_state != GameState::Menu {
+        if render_world_scene {
             let mut shadow_mask_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Shadow Mask Compute Pass"),
                 timestamp_writes: None,
@@ -613,7 +614,7 @@ impl State {
                 1,
             );
         }
-        if self.game_state != GameState::Menu {
+        if render_world_scene {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.shadow_mask_texture,
@@ -828,7 +829,7 @@ impl State {
         // resolved scene color includes the visible edges. The pass uses the
         // MSAA color target and the main depth buffer so hidden edges are
         // rejected by depth testing instead of being painted over the scene.
-        if self.game_state != GameState::Menu {
+        if self.game_state == GameState::Playing {
             let mut outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Block Outline Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -890,8 +891,6 @@ impl State {
         // scene) and writes the post-processed result directly to the
         // swap-chain surface.  The composite shader handles underwater fog
         // color grading, vignette, and similar full-screen effects.
-        let menu_visible = self.game_state != GameState::Playing;
-
         {
             let mut composite_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Composite Pass"),
@@ -909,7 +908,7 @@ impl State {
             });
 
             composite_pass.set_pipeline(&self.composite_pipeline);
-            let composite_bind_group = if menu_visible {
+            let composite_bind_group = if menu_visible && !menu_uses_world_background {
                 &self.menu_composite_bind_group
             } else {
                 &self.composite_bind_group

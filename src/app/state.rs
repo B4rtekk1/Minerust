@@ -413,6 +413,12 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Tracks whether the player is in the main menu, lobby, or in-game.
     pub game_state: GameState,
+    /// `true` after the player has entered a world at least once.
+    ///
+    /// The initial main menu uses the static menu background. Menus opened
+    /// after gameplay has started use the current world render as their
+    /// background instead.
+    pub has_entered_world: bool,
     /// Tracks focus / edit state of individual menu widgets.
     pub menu_state: MenuState,
     /// `1.0` when the camera eye is inside a water block; `0.0` otherwise.

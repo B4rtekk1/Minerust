@@ -78,6 +78,7 @@ impl State {
         self.game_start_time = std::time::Instant::now();
         self.last_frame = std::time::Instant::now();
         self.game_state = crate::ui::menu::GameState::Playing;
+        self.has_entered_world = true;
         self.mouse_captured = true;
         let _ = self
             .window

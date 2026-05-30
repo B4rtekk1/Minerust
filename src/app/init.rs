@@ -2190,6 +2190,7 @@ impl State {
             texture_view,
             texture_sampler,
             game_state: GameState::Menu,
+            has_entered_world: false,
             menu_state: MenuState::default(),
             reflection_mode: 1,
             shadows_enabled: true,

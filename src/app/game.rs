@@ -562,7 +562,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                                             }
                                                         }
                                                         subchunk.is_empty = false;
-                                                        subchunk.mesh_dirty = true;
+                                                        subchunk.mark_mesh_dirty();
                                                     }
                                                 }
                                                 chunk.player_modified = true;
@@ -578,7 +578,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                         let mut world = state.world.write();
                                         for chunk in world.chunks.values_mut() {
                                             for subchunk in &mut chunk.subchunks {
-                                                subchunk.mesh_dirty = true;
+                                                subchunk.mark_mesh_dirty();
                                             }
                                         }
                                     }
