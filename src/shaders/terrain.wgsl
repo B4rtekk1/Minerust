@@ -25,6 +25,7 @@ struct Uniforms {
 struct ShadowConfig {
     shadow_map_sizes: vec4<f32>,
     pcf_samples:      u32,
+    active_cascades:  u32,
 }
 
 struct TemporalShadowUniforms {
@@ -38,10 +39,7 @@ struct TemporalShadowUniforms {
 @group(0) @binding(0) var<uniform> uniforms:       Uniforms;
 @group(0) @binding(1) var texture_atlas:           texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler:         sampler;
-@group(0) @binding(3) var shadow_map_0:            texture_depth_2d;
-@group(0) @binding(4) var shadow_map_1:            texture_depth_2d;
-@group(0) @binding(5) var shadow_map_2:            texture_depth_2d;
-@group(0) @binding(6) var shadow_map_3:            texture_depth_2d;
+@group(0) @binding(3) var shadow_map:              texture_depth_2d;
 @group(0) @binding(7) var shadow_sampler:          sampler_comparison;
 @group(0) @binding(8) var<uniform> shadow_config: ShadowConfig;
 
@@ -96,56 +94,42 @@ fn get_poisson_sample(idx: i32, rotation: f32) -> vec2<f32> {
     return vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
 }
 
-// OPT: replaced 4 if-branches with vec4 component array indexing
-fn cascade_shadow_map_size(cascade_idx: i32) -> f32 {
-    let sizes = shadow_config.shadow_map_sizes;
-    let v = array<f32, 4>(sizes.x, sizes.y, sizes.z, sizes.w);
-    return max(v[cascade_idx], 1.0);
+fn shadow_map_size() -> f32 {
+    return max(shadow_config.shadow_map_sizes.x, 1.0);
 }
 
-fn sample_shadow_map(cascade_idx: i32, uv: vec2<f32>, depth_ref: f32) -> f32 {
-    if cascade_idx == 0 {
-        return textureSampleCompareLevel(shadow_map_0, shadow_sampler, uv, depth_ref);
-    }
-    if cascade_idx == 1 {
-        return textureSampleCompareLevel(shadow_map_1, shadow_sampler, uv, depth_ref);
-    }
-    if cascade_idx == 2 {
-        return textureSampleCompareLevel(shadow_map_2, shadow_sampler, uv, depth_ref);
-    }
-    return textureSampleCompareLevel(shadow_map_3, shadow_sampler, uv, depth_ref);
+fn sample_shadow_map(uv: vec2<f32>, depth_ref: f32) -> f32 {
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, depth_ref);
 }
 
-fn sample_cascade_shadow(
-    world_pos:     vec3<f32>,
-    cascade_idx:   i32,
-    bias:          f32,
-    rotation:      f32,
+fn sample_shadow(
+    world_pos: vec3<f32>,
+    bias:      f32,
+    rotation:  f32,
 ) -> f32 {
-    let sp = uniforms.csm_view_proj[cascade_idx] * vec4<f32>(world_pos, 1.0);
+    let sp = uniforms.csm_view_proj[0] * vec4<f32>(world_pos, 1.0);
     if sp.w <= 0.0 { return 1.0; }
 
     let sc = sp.xyz / sp.w;
     let uv = vec2<f32>(sc.x * 0.5 + 0.5, 1.0 - (sc.y * 0.5 + 0.5));
     if sc.z < 0.0 || sc.z > 1.0 { return 1.0; }
 
-    let shadow_map_size = cascade_shadow_map_size(cascade_idx);
-    let texel = 1.0 / shadow_map_size;
+    let map_size = shadow_map_size();
+    let texel = 1.0 / map_size;
     let depth_ref = clamp(sc.z - bias, 0.0, 1.0);
     let edge_dist = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-
-    if cascade_idx > 0 {
-        let suv = clamp(uv, vec2<f32>(texel), vec2<f32>(1.0 - texel));
-        let edge_fade = smoothstep(0.0, texel, edge_dist);
-        return mix(1.0, sample_shadow_map(cascade_idx, suv, depth_ref), edge_fade);
-    }
 
     let pcf_samples = min(i32(shadow_config.pcf_samples), MAX_PCF_SAMPLES);
     if pcf_samples <= 0 { return 1.0; }
 
-    var shadow = 0.0;
-    let filter_radius = 1.55 / shadow_map_size;
+    let filter_radius = 1.55 / map_size;
     let edge_fade = smoothstep(0.0, filter_radius + texel, edge_dist);
+    if pcf_samples == 1 {
+        let suv = clamp(uv, vec2<f32>(texel), vec2<f32>(1.0 - texel));
+        return mix(1.0, sample_shadow_map(suv, depth_ref), edge_fade);
+    }
+
+    var shadow = 0.0;
 
     for (var i = 0; i < pcf_samples; i++) {
         let suv = clamp(
@@ -153,24 +137,10 @@ fn sample_cascade_shadow(
             vec2<f32>(texel),
             vec2<f32>(1.0 - texel),
         );
-        shadow += sample_shadow_map(cascade_idx, suv, depth_ref);
+        shadow += sample_shadow_map(suv, depth_ref);
     }
 
     return mix(1.0, shadow / f32(pcf_samples), edge_fade);
-}
-
-fn select_cascade_with_blend(view_depth: f32) -> vec2<f32> {
-    let bf = 0.10;
-    let s0 = uniforms.csm_split_distances.x;
-    let blend_width = max(s0 * bf, 1.0);
-    let blend_start = max(s0 - blend_width, 0.0);
-
-    if view_depth < blend_start { return vec2<f32>(0.0, 0.0); }
-    if view_depth < s0 {
-        return vec2<f32>(0.0, smoothstep(0.0, 1.0, (view_depth - blend_start) / blend_width));
-    }
-
-    return vec2<f32>(1.0, 0.0);
 }
 
 fn fast_global_illumination(
@@ -223,30 +193,18 @@ fn calculate_shadow(
     view_depth: f32,
 ) -> f32 {
     if sun_dir.y < 0.05 { return 0.0; }
-    if view_depth >= uniforms.csm_split_distances.y { return 1.0; }
+    if view_depth >= uniforms.csm_split_distances.x { return 1.0; }
 
     let cos_t = max(dot(normal, sun_dir), 0.0);
     let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
 
-    let cb = select_cascade_with_blend(view_depth);
-    let ci = i32(cb.x);
     var rot = 0.0;
-    if ci == 0 {
+    if shadow_config.pcf_samples > 1u {
         rot = poisson_rotation(world_pos);
     }
 
-    let cascade_bias_scale = array<f32, 4>(1.0, 1.2, 1.45, 1.75);
     let base_bias = clamp(0.00035 + 0.0012 * sin_t / max(cos_t, 0.10), 0.00035, 0.0035);
-
-    let shadow_a = sample_cascade_shadow(world_pos, ci, base_bias * cascade_bias_scale[ci], rot);
-
-    if cb.y > 0.001 && ci < 1 {
-        let next_ci = ci + 1;
-        let shadow_b =
-            sample_cascade_shadow(world_pos, next_ci, base_bias * cascade_bias_scale[next_ci], rot);
-        return mix(shadow_a, shadow_b, cb.y);
-    }
-    return shadow_a;
+    return sample_shadow(world_pos, base_bias, rot);
 }
 
 // OPT: removed redundant clamp(uv, 0, 1) — the subsequent clamp on `pos` already bounds it.
@@ -277,6 +235,62 @@ fn sample_shadow_mask_bilinear(uv: vec2<f32>) -> f32 {
     let sx0 = mix(s00, s10, frac_part.x);
     let sx1 = mix(s01, s11, frac_part.x);
     return mix(sx0, sx1, frac_part.y);
+}
+
+fn reconstruct_world_sample(pixel: vec2<i32>, tex_size: vec2<u32>) -> vec4<f32> {
+    let max_pixel = vec2<i32>(tex_size) - vec2<i32>(1);
+    let p = clamp(pixel, vec2<i32>(0), max_pixel);
+    let depth = textureLoad(ssr_depth, p, 0).r;
+    if depth >= 0.999999 {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let uv = (vec2<f32>(p) + vec2<f32>(0.5)) / vec2<f32>(tex_size);
+    let ndc = vec4<f32>(
+        uv.x * 2.0 - 1.0,
+        (1.0 - uv.y) * 2.0 - 1.0,
+        depth,
+        1.0,
+    );
+    let wp4 = uniforms.inv_view_proj * ndc;
+    return vec4<f32>(wp4.xyz / max(wp4.w, 1e-6), 1.0);
+}
+
+fn estimate_world_normal(pixel: vec2<i32>, tex_size: vec2<u32>, world_pos: vec3<f32>) -> vec3<f32> {
+    let right = reconstruct_world_sample(pixel + vec2<i32>(1, 0), tex_size);
+    let left = reconstruct_world_sample(pixel + vec2<i32>(-1, 0), tex_size);
+    let down = reconstruct_world_sample(pixel + vec2<i32>(0, 1), tex_size);
+    let up = reconstruct_world_sample(pixel + vec2<i32>(0, -1), tex_size);
+
+    var dx = vec3<f32>(1.0, 0.0, 0.0);
+    if right.w > 0.5 && left.w > 0.5 {
+        dx = right.xyz - left.xyz;
+    } else if right.w > 0.5 {
+        dx = right.xyz - world_pos;
+    } else if left.w > 0.5 {
+        dx = world_pos - left.xyz;
+    }
+
+    var dy = vec3<f32>(0.0, 1.0, 0.0);
+    if down.w > 0.5 && up.w > 0.5 {
+        dy = down.xyz - up.xyz;
+    } else if down.w > 0.5 {
+        dy = down.xyz - world_pos;
+    } else if up.w > 0.5 {
+        dy = world_pos - up.xyz;
+    }
+
+    let normal_raw = cross(dx, dy);
+    let normal_len2 = dot(normal_raw, normal_raw);
+    if normal_len2 < 1e-8 {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+
+    var normal = normal_raw * inverseSqrt(normal_len2);
+    if dot(normal, uniforms.camera_pos - world_pos) < 0.0 {
+        normal = -normal;
+    }
+    return normal;
 }
 
 fn temporal_shadow_accumulation(world_pos: vec3<f32>, current_shadow: f32) -> f32 {
@@ -330,23 +344,15 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let depth = textureLoad(ssr_depth, gid.xy, 0).r;
-    if depth >= 0.999999 {
+    let pixel = vec2<i32>(gid.xy);
+    let world_sample = reconstruct_world_sample(pixel, tex_size);
+    if world_sample.w < 0.5 {
         textureStore(output_shadow, gid.xy, vec4<f32>(1.0, 0.0, 0.0, 0.0));
         return;
     }
+    let world_pos = world_sample.xyz;
 
-    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(tex_size);
-    let ndc = vec4<f32>(
-        uv.x * 2.0 - 1.0,
-        (1.0 - uv.y) * 2.0 - 1.0,
-        depth,
-        1.0,
-    );
-    let wp4 = uniforms.inv_view_proj * ndc;
-    let world_pos = wp4.xyz / max(wp4.w, 1e-6);
-
-    // CSM split distances are linear view depths, not radial camera distances.
+    // Shadow distance is a linear view depth, not radial camera distance.
     let center_far_clip = uniforms.inv_view_proj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
     let center_far = center_far_clip.xyz / max(center_far_clip.w, 1e-6);
     let camera_forward = normalize(center_far - uniforms.camera_pos);
@@ -357,7 +363,11 @@ fn compute_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var shadow_factor = 1.0;
     if (sun_dir.y > 0.0) {
-        shadow_factor = calculate_shadow(world_pos, vec3<f32>(0.0, 1.0, 0.0), sun_dir, view_depth);
+        var normal = vec3<f32>(0.0, 1.0, 0.0);
+        if view_depth < uniforms.csm_split_distances.x {
+            normal = estimate_world_normal(pixel, tex_size, world_pos);
+        }
+        shadow_factor = calculate_shadow(world_pos, normal, sun_dir, view_depth);
     }
     shadow_factor = temporal_shadow_accumulation(world_pos, shadow_factor);
 

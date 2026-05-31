@@ -43,7 +43,7 @@ impl BlockPlacementState {
 ///   (`render_pipeline`, `water_pipeline`, `sun_pipeline`, etc.).
 /// - **Static geometry buffers** – sun quad, crosshair.
 /// - **Uniforms & bind groups** – shared uniform buffer and per-pass bind groups.
-/// - **Render targets** – depth, MSAA, shadow cascade array, SSR, scene color,
+/// - **Render targets** – depth, MSAA, shadow map, SSR, scene color,
 ///   Hi-Z pyramid.
 /// - **World & camera** – the shared `World` behind an `RwLock`, camera, and
 ///   input state.
@@ -56,7 +56,7 @@ impl BlockPlacementState {
 ///   for background meshing.
 /// - **Indirect rendering** – `IndirectManager` for terrain and water, Hi-Z
 ///   pipeline and bind groups.
-/// - **CSM shadows** – `CsmManager` and cascade-related buffers/views.
+/// - **Shadows** – `CsmManager` and shadow matrix buffers/views.
 /// - **Post-processing** – composite pipeline and SSR resources.
 pub struct State {
     // -------------------------------------------------------------------------
@@ -133,7 +133,7 @@ pub struct State {
     pub terrain_gbuffer_bind_group: wgpu::BindGroup,
     /// Empty placeholder bind group for terrain pipeline group(2).
     pub terrain_shadow_output_bind_group: wgpu::BindGroup,
-    /// Bind group that exposes the shadow cascade array to the main render pass.
+    /// Bind group that exposes the shadow matrix to the shadow pass.
     pub shadow_bind_group: wgpu::BindGroup,
     /// Bind group for the water pass (SSR color/depth textures + sampler).
     pub water_bind_group: wgpu::BindGroup,
@@ -172,9 +172,9 @@ pub struct State {
     /// View of the previous-frame screen-space shadow mask.
     #[allow(dead_code)]
     pub shadow_history_view: wgpu::TextureView,
-    /// One `wgpu::TextureView` per shadow cascade for rendering and sampling.
+    /// Shadow map views. The views alias the same texture for legacy bind slots.
     pub shadow_cascade_views: Vec<wgpu::TextureView>,
-    /// GPU buffer containing the packed `CascadeData` array for all cascades.
+    /// GPU buffer containing the packed light-space shadow matrix slots.
     pub shadow_cascade_buffer: wgpu::Buffer,
     /// Sampler used when reading the shadow cascade array in the main pass.
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
@@ -321,9 +321,9 @@ pub struct State {
     pub water_indirect_manager: IndirectManager,
 
     // -------------------------------------------------------------------------
-    // Cascaded shadow maps (CSM)
+    // Shadows
     // -------------------------------------------------------------------------
-    /// Computes and stores the per-cascade light-space view-projection matrices.
+    /// Computes and stores the light-space shadow view-projection matrix.
     pub csm: CsmManager,
     /// Previous frame's camera view-projection matrix for shadow reprojection.
     pub prev_view_proj: [[f32; 4]; 4],

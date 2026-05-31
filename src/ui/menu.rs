@@ -241,12 +241,13 @@ impl MenuLayout {
         let w = width as f32;
         let h = height as f32;
 
-        let hit_w = (w * 0.28).clamp(220.0, 390.0).min((w - 48.0).max(180.0));
-        let hit_h = 64.0;
-        let gap = 22.0;
+        let hit_w = (w * 0.22).clamp(180.0, 300.0).min((w - 32.0).max(160.0));
+        let hit_h = 48.0;
+        let gap = 14.0;
         let total_h = hit_h * 2.0 + gap;
-        let x = (w * 0.08).clamp(32.0, 120.0);
-        let y = ((h - total_h) * 0.52).max(24.0);
+        let x = (w * 0.045).clamp(20.0, 72.0);
+        let bottom_margin = (h * 0.14).clamp(48.0, 120.0);
+        let y = (h - total_h - bottom_margin).max(24.0);
 
         Self {
             new_world_text: Rect {

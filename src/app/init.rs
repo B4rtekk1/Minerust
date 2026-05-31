@@ -15,30 +15,12 @@ use crate::logger::{LogLevel, log};
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZES, Camera, DiggingState, IndirectManager, InputState,
-    OutlineVertex, SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, WORLD_HEIGHT,
-    World, build_crosshair,
+    CSM_ACTIVE_CASCADE_COUNT, CSM_CASCADE_SPLITS, CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZES, Camera,
+    DiggingState, IndirectManager, InputState, OutlineVertex, SEA_LEVEL, ShadowConfig,
+    TemporalShadowUniforms, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
 };
 
 use super::state::State;
-
-/// Converts an OpenGL-style clip-space matrix to wgpu's NDC convention.
-///
-/// wgpu (like Metal and DirectX) uses a depth range of [0, 1] in NDC,
-/// whereas OpenGL uses [-1, 1]. This matrix remaps the Z axis accordingly.
-/// It should be applied **after** the projection matrix when computing the
-/// final `view_proj` uniform that is uploaded to the GPU.
-///
-/// ```text
-/// depth_wgpu = depth_gl * 0.5 + 0.5
-/// ```
-#[cfg_attr(rustfmt, rustfmt_skip)]
-pub const OPENGL_TO_WGPU_MATRIX: Mat4 = Mat4::from_cols_array(&[
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 0.5, 0.0,
-    0.0, 0.0, 0.5, 1.0,
-]);
 
 fn create_menu_background_texture(
     device: &wgpu::Device,
@@ -121,9 +103,9 @@ impl State {
     ///    `PresentMode::Immediate` (uncapped frame rate) with 4× MSAA.
     /// 4. **Shader compilation** – compiles all WGSL shaders (terrain, water,
     ///    shadow, sky, sun, UI, Hi-Z, depth-resolve, composite).
-    /// 5. **Buffers & textures** – allocates the uniform buffer, shadow map
-    ///    cascade array, SSR color/depth targets, MSAA resolve targets, and
-    ///    the hierarchical-Z (Hi-Z) mip chain.
+    /// 5. **Buffers & textures** – allocates the uniform buffer, shadow map,
+    ///    SSR color/depth targets, MSAA resolve targets, and the
+    ///    hierarchical-Z (Hi-Z) mip chain.
     /// 6. **Bind group layouts & bind groups** – wires textures, samplers, and
     ///    buffers to the correct shader bindings for each pipeline.
     /// 7. **Render pipelines** – builds one `RenderPipeline` per pass:
@@ -316,7 +298,7 @@ impl State {
         });
         let terrain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Terrain Shader"),
-            // Main opaque geometry pass: texture atlas lookup, CSM shadow
+            // Main opaque geometry pass: texture atlas lookup, shadow mask
             // comparison, and per-vertex AO.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
@@ -344,7 +326,7 @@ impl State {
         });
         let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow Shader"),
-            // Depth-only pass that writes each CSM cascade's shadow map.
+            // Depth-only pass that writes the shadow map.
             // Fragment stage is omitted entirely for maximum throughput.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
         });
@@ -367,9 +349,9 @@ impl State {
             contents: bytemuck::cast_slice(&[Uniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                // `csm_view_proj` holds four 4×4 matrices – one per cascade.
+                // Slot 0 holds the active shadow view-projection matrix.
                 csm_view_proj: [Mat4::IDENTITY.to_cols_array_2d(); 4],
-                csm_split_distances: [16.0, 48.0, 128.0, 300.0],
+                csm_split_distances: CSM_CASCADE_SPLITS,
                 camera_pos: [0.0, 0.0, 0.0],
                 time: 0.0,
                 sun_position: [0.4, -0.2, 0.3],
@@ -419,46 +401,42 @@ impl State {
         });
 
         // ------------------------------------------------------------------ //
-        // Shadow map (Cascaded Shadow Maps – CSM)
+        // Shadow map
         // ------------------------------------------------------------------ //
 
-        // Separate Depth32Float textures, one per cascade. Texture arrays
-        // require every layer to have identical dimensions, so separate
-        // textures are needed for true per-cascade shadow-map sizes.
-        let shadow_cascade_views = CSM_SHADOW_MAP_SIZES
-            .iter()
-            .enumerate()
-            .map(|(i, &shadow_map_size)| {
-                let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(&format!("Shadow Map Cascade {}", i)),
-                    size: wgpu::Extent3d {
-                        width: shadow_map_size,
-                        height: shadow_map_size,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Depth32Float,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                });
+        // One Depth32Float texture is rendered each frame. The extra views keep
+        // older bind group layouts intact while every binding points at the same
+        // physical shadow map.
+        let shadow_map_size = CSM_SHADOW_MAP_SIZES[0];
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Map"),
+            size: wgpu::Extent3d {
+                width: shadow_map_size,
+                height: shadow_map_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_cascade_views = (0..CSM_SHADOW_MAP_SIZES.len())
+            .map(|i| {
                 shadow_texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some(&format!("Shadow Map Cascade View {}", i)),
+                    label: Some(&format!("Shadow Map View {}", i)),
                     dimension: Some(wgpu::TextureViewDimension::D2),
                     ..Default::default()
                 })
             })
             .collect::<Vec<_>>();
 
-        // Dynamic-offset uniform buffer that stores the per-cascade light-space
-        // view-projection matrix.  Using a dynamic offset means we can switch
-        // cascades by simply changing the bind-group offset rather than
-        // rebinding a different buffer.
+        // Dynamic-offset uniform buffer retained for the shadow depth pass.
+        // Only offset 0 is used with the single shadow map.
         let shadow_cascade_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow Cascade Buffer"),
-            // 256 bytes × 4 cascades; 256-byte alignment satisfies the
+            // 256 bytes × 4 slots; 256-byte alignment satisfies the
             // `min_uniform_buffer_offset_alignment` requirement (typically 256 B).
             size: 256 * 4,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -584,7 +562,8 @@ impl State {
             contents: bytemuck::cast_slice(&[ShadowConfig {
                 shadow_map_sizes: CSM_SHADOW_MAP_SIZES.map(|size| size as f32),
                 pcf_samples: CSM_PCF_SAMPLES,
-                _pad: [0; 3],
+                active_cascades: CSM_ACTIVE_CASCADE_COUNT as u32,
+                _pad: [0; 2],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -609,7 +588,7 @@ impl State {
         //   0 – Uniforms (vertex + fragment)
         //   1 – Texture atlas array (fragment)
         //   2 – Atlas sampler (fragment)
-        //   3..6 – Shadow maps (fragment/compute, one depth texture per cascade)
+        //   3..6 – Shadow map views (fragment/compute, all alias one depth texture)
         //   7 – Shadow comparison sampler (fragment/compute)
         //   8 – Shadow config buffer (fragment/compute)
         let uniform_bind_group_layout =
@@ -704,8 +683,7 @@ impl State {
             });
 
         // Layout for the shadow depth pass.
-        // Binding 0 uses a **dynamic offset** so the same bind group can be
-        // reused for all four cascades; only the offset changes between draws.
+        // Binding 0 keeps a dynamic offset for compatibility with the shadow pass.
         let shadow_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("shadow_bind_group_layout"),
@@ -956,7 +934,7 @@ impl State {
         // ------------------------------------------------------------------ //
 
         // Extends the terrain-style layout with SSR and flow-map bindings:
-        //   3..6 – Shadow maps (fragment, one depth texture per cascade)
+        //   3..6 – Shadow map views (fragment, all alias one depth texture)
         //   7 – Shadow comparison sampler (fragment)
         //   8 – SSR color texture (fragment)
         //   9 – SSR depth texture  (fragment)
@@ -1190,9 +1168,8 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
-        // Bind the shadow cascade buffer at offset 0 (range = 80 bytes, which
-        // covers one 4×4 f32 matrix = 64 bytes + padding).  At draw time the
-        // dynamic offset selects which cascade's matrix to use.
+        // Bind the shadow matrix buffer at offset 0 (range = 80 bytes, which
+        // covers one 4×4 f32 matrix = 64 bytes + padding).
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &shadow_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
@@ -1518,7 +1495,7 @@ impl State {
         });
 
         // --- Shadow mask compute pipeline ---
-        // Writes `shadow_mask_texture` (R32Float) using resolved depth and CSM.
+        // Writes `shadow_mask_texture` (R32Float) using resolved depth and the shadow map.
         let shadow_mask_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Shadow Mask Pipeline"),
@@ -1744,9 +1721,9 @@ impl State {
 
         // --- Main-menu text buffers ---
         let menu_connect_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(48.0, 58.0));
+            glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
         let menu_singleplayer_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(48.0, 58.0));
+            glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
 
         // Hotbar slot name (e.g., "Stone Sword") displayed above the hotbar.
         let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
@@ -1970,7 +1947,7 @@ impl State {
         // cull step.  One manager for opaque terrain, one for water.
         let mut indirect_manager = IndirectManager::new(&device);
         let mut water_indirect_manager = IndirectManager::new(&device);
-        // Initialize the per-cascade shadow draw argument buffers.
+        // Initialize the shadow draw argument buffers.
         indirect_manager.init_shadow_resources(&device);
         water_indirect_manager.init_shadow_resources(&device);
 

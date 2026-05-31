@@ -170,7 +170,7 @@ fn read_clipboard_text() -> Option<String> {
 /// |---|---|
 /// | Tab | Move focus to the next text field. |
 /// | Enter | Attempt to connect to the server. |
-/// | Escape | Dismiss the menu and resume play. |
+/// | Escape | Resume play after entering a world; no-op on the initial menu. |
 /// | Backspace | Delete the last character in the active field. |
 /// | Ctrl+V | Paste clipboard text into the active field. |
 /// | F11 | Toggle borderless fullscreen. |
@@ -370,18 +370,20 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     state.connect_to_server();
                                 }
                                 KeyCode::Escape => {
-                                    // Dismiss the menu and return to the game
-                                    // without disconnecting, and immediately
-                                    // recapture the cursor for gameplay.
-                                    state.game_state = GameState::Playing;
-                                    state.mouse_captured = true;
-                                    let _ = state
-                                        .window
-                                        .set_cursor_grab(CursorGrabMode::Confined)
-                                        .or_else(|_| {
-                                            state.window.set_cursor_grab(CursorGrabMode::Locked)
-                                        });
-                                    state.window.set_cursor_visible(false);
+                                    if state.has_entered_world {
+                                        // Dismiss the menu and return to the game
+                                        // without disconnecting, and immediately
+                                        // recapture the cursor for gameplay.
+                                        state.game_state = GameState::Playing;
+                                        state.mouse_captured = true;
+                                        let _ = state
+                                            .window
+                                            .set_cursor_grab(CursorGrabMode::Confined)
+                                            .or_else(|_| {
+                                                state.window.set_cursor_grab(CursorGrabMode::Locked)
+                                            });
+                                        state.window.set_cursor_visible(false);
+                                    }
                                 }
                                 KeyCode::Backspace => {
                                     state.menu_state.handle_backspace();

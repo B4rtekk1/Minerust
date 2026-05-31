@@ -12,7 +12,6 @@ use crate::logger::{LogLevel, log};
 use crate::multiplayer::player::queue_remote_players_labels;
 use crate::ui::menu::{GameState, MenuHit, MenuLayout};
 
-use super::init::OPENGL_TO_WGPU_MATRIX;
 use super::init::frustum_planes_to_array;
 use super::state::State;
 
@@ -74,10 +73,10 @@ impl State {
     /// 1. **Player model update** – re-builds the combined vertex/index buffers
     ///    for all visible remote players if any exist.
     /// 2. **Uniform upload** – computes the camera matrices, advances the day
-    ///    cycle, updates CSM cascades, and uploads the `Uniforms` struct.
-    /// 3. **Shadow cull + shadow passes** (×`active_cascades`) – each cascade
-    ///    runs a GPU culling dispatch followed by a depth-only draw into its
-    ///    shadow map layer.
+    ///    cycle, updates the light-space shadow matrix, and uploads the
+    ///    `Uniforms` struct.
+    /// 3. **Shadow cull + shadow pass** – runs GPU culling followed by a
+    ///    depth-only draw into the shadow map.
     /// 4. **Mesh request** – walks the visible chunk grid, queues dirty sub-chunk
     ///    meshes for background rebuild, and tallies rendered counts.
     /// 5. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
@@ -205,9 +204,8 @@ impl State {
         let far_plane = (RENDER_DISTANCE as f32 * CHUNK_SIZE as f32 * 1.5).max(400.0);
         let proj = Mat4::perspective_rh(DEFAULT_FOV, aspect, 0.1, far_plane);
         let view_mat = self.camera.view_matrix();
-        // Combine projection, view, and the OpenGL→wgpu NDC correction into
-        // one matrix uploaded to the GPU once per frame.
-        let view_proj = OPENGL_TO_WGPU_MATRIX * proj * view_mat;
+        // `glam`'s RH projection helpers already use WebGPU's [0, 1] depth range.
+        let view_proj = proj * view_mat;
         let view_proj_array: [[f32; 4]; 4] = view_proj.to_cols_array_2d();
 
         // ── Day/night cycle ───────────────────────────────────────────────── //
@@ -233,22 +231,20 @@ impl State {
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
         self.rebuild_visible_chunk_cache(player_cx, player_cz);
 
-        // ── CSM (Cascaded Shadow Maps) update ─────────────────────────────── //
-        // `CsmManager::update` computes the four tight orthographic light-space
-        // matrices that cover successive depth ranges of the camera frustum.
+        // ── Shadow map update ────────────────────────────────────────────── //
+        // `CsmManager::update` stores the active light-space matrix in slot 0.
         let csm = &mut self.csm;
         let fov_y = DEFAULT_FOV;
         csm.update(&view_mat, sun_dir, 0.1, 300.0, aspect, fov_y);
 
-        // Pack cascade view-projection matrices into the uniform struct format.
+        // Pack light-space matrices into the uniform struct format.
         let csm_view_proj: [[[f32; 4]; 4]; 4] = [
             csm.cascades[0].view_proj.to_cols_array_2d(),
             csm.cascades[1].view_proj.to_cols_array_2d(),
             csm.cascades[2].view_proj.to_cols_array_2d(),
             csm.cascades[3].view_proj.to_cols_array_2d(),
         ];
-        // Split distances tell the terrain shader which cascade to sample for
-        // a given fragment based on its camera-space depth.
+        // The first split is the single shadow draw distance.
         let csm_split_distances: [f32; 4] = [
             csm.cascades[0].split_distance,
             csm.cascades[1].split_distance,
@@ -303,7 +299,8 @@ impl State {
                 } else {
                     0
                 },
-                _pad: [0; 3],
+                active_cascades: minerust::get_active_cascade_count(RENDER_DISTANCE) as u32,
+                _pad: [0; 2],
             }]),
         );
         let temporal_history_valid =
@@ -334,17 +331,14 @@ impl State {
         // matrix, used both for CPU-side mesh gating and the GPU cull shader.
         let frustum_planes = extract_frustum_planes(&view_proj);
 
-        // Fewer cascades are needed at short render distances because the far
-        // splits collapse below useful thresholds.
+        // Kept centralized with the split/shadow-map constants.
         let active_cascades = minerust::get_active_cascade_count(RENDER_DISTANCE);
 
-        // ── Shadow cascade buffer upload + shadow cull ────────────────────── //
+        // ── Shadow matrix buffer upload + shadow cull ────────────────────── //
         let mut shadow_frustum_arrays = [[[0f32; 4]; 6]; 4];
         if self.shadows_enabled {
             for i in 0..active_cascades {
-                // Pack the cascade's light-space matrix into a 256-byte aligned
-                // uniform slot so the dynamic-offset shadow bind group can select
-                // the correct cascade without rebinding.
+                // Pack the light-space matrix into a 256-byte aligned uniform slot.
                 let cascade_matrix: [[f32; 4]; 4] = csm.cascades[i].view_proj.to_cols_array_2d();
                 let mut shadow_uniform_data = [0f32; 64]; // 64 × 4 bytes = 256 bytes
                 shadow_uniform_data[0..16].copy_from_slice(cascade_matrix.as_flattened());
@@ -355,8 +349,8 @@ impl State {
                     bytemuck::cast_slice(&shadow_uniform_data),
                 );
 
-                // Extract the light-space frustum planes for this cascade so the
-                // GPU can cull chunks that are outside the cascade's projection.
+                // Extract the light-space frustum planes so the GPU can cull
+                // chunks outside the shadow projection.
                 let cascade_view_proj = csm.cascades[i].view_proj;
                 let shadow_frustum = extract_frustum_planes(&cascade_view_proj);
                 shadow_frustum_arrays[i] = frustum_planes_to_array(&shadow_frustum);
@@ -375,16 +369,9 @@ impl State {
             }
         }
 
-        // ── Shadow depth passes (one per active cascade) ──────────────────── //
-        // Each pass renders opaque terrain into one layer of the shadow map
-        // array using the corresponding light-space matrix.  The fragment
+        // ── Shadow depth pass ────────────────────────────────────────────── //
+        // Renders opaque terrain into the single shadow map. The fragment
         // shader is absent; only depth values are written.
-        const SHADOW_PASS_LABELS: [&str; 4] = [
-            "Shadow Pass Cascade 0",
-            "Shadow Pass Cascade 1",
-            "Shadow Pass Cascade 2",
-            "Shadow Pass Cascade 3",
-        ];
         let shadow_pass_count = if self.shadows_enabled {
             active_cascades
         } else {
@@ -393,7 +380,7 @@ impl State {
         for i in 0..shadow_pass_count {
             let offset = (i * 256) as u32;
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(SHADOW_PASS_LABELS[i]),
+                label: Some("Shadow Pass"),
                 color_attachments: &[], // depth-only pass, no color output
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_cascade_views[i],
@@ -410,8 +397,7 @@ impl State {
 
             if self.shadows_enabled && i < active_cascades {
                 shadow_pass.set_pipeline(&self.shadow_pipeline);
-                // Dynamic offset selects cascade i's light-space matrix in the
-                // 256-byte-aligned shadow cascade buffer.
+                // Dynamic offset selects the light-space matrix slot.
                 shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[offset]);
                 shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
                 shadow_pass.set_index_buffer(
@@ -434,6 +420,17 @@ impl State {
                         0,
                         self.indirect_manager.active_count(),
                     );
+                }
+
+                if self.player_model_num_indices > 0 {
+                    if let (Some(vb), Some(ib)) = (
+                        &self.player_model_vertex_buffer,
+                        &self.player_model_index_buffer,
+                    ) {
+                        shadow_pass.set_vertex_buffer(0, vb.slice(..));
+                        shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
+                    }
                 }
             }
         }
@@ -1256,13 +1253,23 @@ impl State {
                 let hovered = self
                     .cursor_position
                     .and_then(|(x, y)| layout.hit_test(x, y));
-                let new_world_color = if matches!(hovered, Some(MenuHit::NewWorld)) {
-                    Color::rgb(255, 255, 255)
+                let new_world_hovered = matches!(hovered, Some(MenuHit::NewWorld));
+                let multiplayer_hovered = matches!(hovered, Some(MenuHit::Multiplayer));
+                let hover_text_color = Color::rgb(255, 255, 255);
+                let menu_text_top_offset = 3.0;
+                let menu_text_bounds = TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                };
+                let new_world_color = if new_world_hovered {
+                    hover_text_color
                 } else {
                     Color::rgb(238, 241, 236)
                 };
-                let multiplayer_color = if matches!(hovered, Some(MenuHit::Multiplayer)) {
-                    Color::rgb(255, 255, 255)
+                let multiplayer_color = if multiplayer_hovered {
+                    hover_text_color
                 } else {
                     Color::rgb(211, 226, 238)
                 };
@@ -1270,28 +1277,18 @@ impl State {
                 text_areas.push(TextArea {
                     buffer: &self.menu_singleplayer_button_buffer,
                     left: layout.new_world_text.x,
-                    top: layout.new_world_text.y + 3.0,
+                    top: layout.new_world_text.y + menu_text_top_offset,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
+                    bounds: menu_text_bounds,
                     default_color: new_world_color,
                     custom_glyphs: &[],
                 });
                 text_areas.push(TextArea {
                     buffer: &self.menu_connect_button_buffer,
                     left: layout.multiplayer_text.x,
-                    top: layout.multiplayer_text.y + 3.0,
+                    top: layout.multiplayer_text.y + menu_text_top_offset,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
-                    },
+                    bounds: menu_text_bounds,
                     default_color: multiplayer_color,
                     custom_glyphs: &[],
                 });
@@ -1388,7 +1385,7 @@ impl State {
     pub fn prepare_menu_text(&mut self) {
         self.menu_connect_button_buffer.set_text(
             &mut self.font_system,
-            "multiplayer",
+            "MULTIPLAYER",
             &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
@@ -1401,7 +1398,7 @@ impl State {
 
         self.menu_singleplayer_button_buffer.set_text(
             &mut self.font_system,
-            "new world",
+            "NEW WORLD",
             &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,

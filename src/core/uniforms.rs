@@ -20,16 +20,15 @@ pub struct Uniforms {
     /// positions from NDC (e.g. in deferred or post-process passes).
     pub inv_view_proj: [[f32; 4]; 4],
 
-    /// Cascaded Shadow Map view-projection matrices.
+    /// Shadow view-projection matrices.
     ///
-    /// Layout: one `mat4x4` per cascade, 4 cascades total. Each matrix
-    /// transforms world-space into the light-space clip space of that cascade.
+    /// Slot 0 transforms world-space into light-space clip space for the active
+    /// shadow map. Remaining slots are kept for shader layout compatibility.
     pub csm_view_proj: [[[f32; 4]; 4]; 4],
 
-    /// World-space depth at which each CSM cascade ends.
+    /// Linear camera-view shadow draw distances.
     ///
-    /// `csm_split_distances[i]` is the far-plane distance of cascade `i`.
-    /// Compare against the camera-space fragment depth to select the correct cascade.
+    /// `csm_split_distances[0]` is the active single-map shadow distance.
     pub csm_split_distances: [f32; 4],
 
     /// World-space camera position `[x, y, z]`.
@@ -120,19 +119,21 @@ pub struct Uniforms {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ShadowConfig {
-    /// Shadow map resolutions in texels for the four CSM cascades.
+    /// Shadow map resolutions in texels. Slot 0 is the active map size.
     pub shadow_map_sizes: [f32; 4],
     /// Number of PCF taps used when filtering the shadow map.
     pub pcf_samples: u32,
+    /// Number of shadow maps rendered and sampled this frame.
+    pub active_cascades: u32,
     /// Explicit padding so the buffer remains 16-byte aligned.
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 2],
 }
 
 /// Per-frame temporal shadow reprojection state.
 ///
 /// The shadow-mask compute pass uses this to project the current pixel's
 /// reconstructed world position into the previous frame and blend the current
-/// CSM result with the previous screen-space shadow mask.
+/// shadow result with the previous screen-space shadow mask.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct TemporalShadowUniforms {
