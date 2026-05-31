@@ -10,7 +10,6 @@ use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
-use minerust::render_core::csm::CsmManager;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
@@ -43,8 +42,7 @@ impl BlockPlacementState {
 ///   (`render_pipeline`, `water_pipeline`, `sun_pipeline`, etc.).
 /// - **Static geometry buffers** – sun quad, crosshair.
 /// - **Uniforms & bind groups** – shared uniform buffer and per-pass bind groups.
-/// - **Render targets** – depth, MSAA, shadow map, SSR, scene color,
-///   Hi-Z pyramid.
+/// - **Render targets** – depth, MSAA, SSR, scene color, Hi-Z pyramid.
 /// - **World & camera** – the shared `World` behind an `RwLock`, camera, and
 ///   input state.
 /// - **Frame timing & stats** – FPS counter, frame time, CPU update time.
@@ -56,7 +54,6 @@ impl BlockPlacementState {
 ///   for background meshing.
 /// - **Indirect rendering** – `IndirectManager` for terrain and water, Hi-Z
 ///   pipeline and bind groups.
-/// - **Shadows** – `CsmManager` and shadow matrix buffers/views.
 /// - **Post-processing** – composite pipeline and SSR resources.
 pub struct State {
     // -------------------------------------------------------------------------
@@ -86,8 +83,6 @@ pub struct State {
     pub sun_pipeline: wgpu::RenderPipeline,
     /// Sky background render pipeline.
     pub sky_pipeline: wgpu::RenderPipeline,
-    /// Shadow-map generation pipeline (depth-only).
-    pub shadow_pipeline: wgpu::RenderPipeline,
     /// Screen-space crosshair render pipeline.
     pub crosshair_pipeline: wgpu::RenderPipeline,
     /// Full-screen composite pipeline that resolves MSAA and applies post-FX.
@@ -96,10 +91,8 @@ pub struct State {
     /// level 0 and the single-sampled SSR depth texture.
     pub depth_resolve_pipeline: wgpu::ComputePipeline,
     /// Depth-only prepass pipeline for terrain. Fills the depth buffer before
-    /// shadow-mask and Hi-Z compute passes.
+    /// Hi-Z compute passes.
     pub terrain_depth_pipeline: wgpu::RenderPipeline,
-    /// Compute pipeline that writes the screen-space shadow mask (R32Float).
-    pub shadow_mask_pipeline: wgpu::ComputePipeline,
 
     // -------------------------------------------------------------------------
     // Static geometry buffers
@@ -122,19 +115,8 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Uniform buffer containing per-frame data (view-proj, sun direction, etc.).
     pub uniform_buffer: wgpu::Buffer,
-    /// Small shadow settings buffer shared with the terrain shader.
-    #[allow(dead_code)]
-    pub shadow_config_buffer: wgpu::Buffer,
-    /// Previous-frame shadow reprojection data used by the temporal shadow pass.
-    pub temporal_shadow_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
-    /// Empty placeholder bind group for terrain pipeline group(1).
-    pub terrain_gbuffer_bind_group: wgpu::BindGroup,
-    /// Empty placeholder bind group for terrain pipeline group(2).
-    pub terrain_shadow_output_bind_group: wgpu::BindGroup,
-    /// Bind group that exposes the shadow matrix to the shadow pass.
-    pub shadow_bind_group: wgpu::BindGroup,
     /// Bind group for the water pass (SSR color/depth textures + sampler).
     pub water_bind_group: wgpu::BindGroup,
     /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
@@ -146,12 +128,6 @@ pub struct State {
     pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
-    /// Bind group exposing the resolved depth texture to the shadow-mask compute.
-    pub shadow_mask_input_bind_group: wgpu::BindGroup,
-    /// Bind group exposing the shadow-mask storage texture for compute writes.
-    pub shadow_mask_output_bind_group: wgpu::BindGroup,
-    /// Bind group exposing previous-frame shadow history to the compute pass.
-    pub temporal_shadow_bind_group: wgpu::BindGroup,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
@@ -160,28 +136,6 @@ pub struct State {
     pub depth_texture: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
-    /// Screen-space shadow mask sampled by `terrain.wgsl`.
-    #[allow(dead_code)]
-    pub shadow_mask_texture: wgpu::Texture,
-    /// View of the screen-space shadow mask texture.
-    #[allow(dead_code)]
-    pub shadow_mask_view: wgpu::TextureView,
-    /// Previous-frame screen-space shadow mask used for temporal reprojection.
-    #[allow(dead_code)]
-    pub shadow_history_texture: wgpu::Texture,
-    /// View of the previous-frame screen-space shadow mask.
-    #[allow(dead_code)]
-    pub shadow_history_view: wgpu::TextureView,
-    /// Shadow map views. The views alias the same texture for legacy bind slots.
-    pub shadow_cascade_views: Vec<wgpu::TextureView>,
-    /// GPU buffer containing the packed light-space shadow matrix slots.
-    pub shadow_cascade_buffer: wgpu::Buffer,
-    /// Sampler used when reading the shadow cascade array in the main pass.
-    /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
-    #[allow(dead_code)]
-    pub shadow_sampler: wgpu::Sampler,
-    /// Bind group that exposes the screen-space shadow mask to `terrain.wgsl`.
-    pub shadow_mask_bind_group: wgpu::BindGroup,
     /// Intermediate scene color texture rendered into before compositing.
     pub scene_color_texture: wgpu::Texture,
     /// View of `scene_color_texture`.
@@ -321,22 +275,8 @@ pub struct State {
     pub water_indirect_manager: IndirectManager,
 
     // -------------------------------------------------------------------------
-    // Shadows
-    // -------------------------------------------------------------------------
-    /// Computes and stores the light-space shadow view-projection matrix.
-    pub csm: CsmManager,
-    /// Previous frame's camera view-projection matrix for shadow reprojection.
-    pub prev_view_proj: [[f32; 4]; 4],
-    /// Previous frame's camera position for temporal history weighting.
-    pub prev_camera_pos: [f32; 3],
-    /// Previous frame's sun direction for temporal history weighting.
-    pub prev_sun_position: [f32; 3],
-    /// Whether `shadow_history_texture` contains valid previous-frame data.
-    pub shadow_history_valid: bool,
     /// Active water reflection mode (`0 = off`, `1 = SSSR`).
     pub reflection_mode: u32,
-    /// Toggles runtime shadow rendering without rebuilding pipelines.
-    pub shadows_enabled: bool,
 
     // -------------------------------------------------------------------------
     // HUD: coordinate display

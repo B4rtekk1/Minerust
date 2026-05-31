@@ -125,8 +125,6 @@ struct FreeBlock {
 /// occlusion culling each frame, writing surviving draw commands into a separate
 /// indirect command buffer that is consumed by the main render pass.
 ///
-/// Shadow cascades each get their own command + count buffers so culling can be
-/// dispatched independently per cascade without CPU readbacks.
 pub struct IndirectManager {
     /// Single large vertex buffer shared by all subchunks.
     unified_vertex_buffer: wgpu::Buffer,
@@ -166,7 +164,7 @@ pub struct IndirectManager {
 
     /// Compute pipeline that performs per-subchunk frustum + Hi-Z culling.
     cull_pipeline: wgpu::ComputePipeline,
-    /// Bind group layout shared between the main and shadow culling passes.
+    /// Bind group layout used by the main camera culling pass.
     cull_bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group for the main (camera) culling pass; rebuilt when the Hi-Z changes.
     cull_bind_group: Option<wgpu::BindGroup>,
@@ -175,15 +173,6 @@ pub struct IndirectManager {
 
     /// Nearest-neighbor sampler used to read the Hi-Z mip chain.
     hiz_sampler: wgpu::Sampler,
-
-    /// One indirect command output buffer per shadow cascade.
-    shadow_visible_commands: Vec<wgpu::Buffer>,
-    /// One visible-count atomic buffer per shadow cascade.
-    shadow_visible_counts: Vec<wgpu::Buffer>,
-    /// Pre-built bind groups for each shadow cascade culling pass.
-    shadow_bind_groups: Vec<wgpu::BindGroup>,
-    /// Per-cascade uniform buffers (frustum planes differ per cascade).
-    shadow_uniform_buffers: Vec<wgpu::Buffer>,
 
     /// Free-list for vertex buffer regions, keyed by block size for O(log n) lookup.
     free_vertex_blocks: BTreeMap<u32, Vec<FreeBlock>>,
@@ -385,10 +374,6 @@ impl IndirectManager {
             cull_bind_group: None,
             cull_uniforms_buffer,
             hiz_sampler,
-            shadow_visible_commands: Vec::new(),
-            shadow_visible_counts: Vec::new(),
-            shadow_bind_groups: Vec::new(),
-            shadow_uniform_buffers: Vec::new(),
             coalesce_counter: 0,
         }
     }
@@ -428,97 +413,6 @@ impl IndirectManager {
                 },
             ],
         }));
-    }
-
-    /// Allocates per-cascade GPU buffers and bind groups for shadow culling.
-    ///
-    /// Creates four sets of resources (one per shadow cascade).  Each cascade
-    /// gets its own indirect command buffer, visible-count buffer, uniform
-    /// buffer, and bind group.  A shared 1×1 dummy Hi-Z texture is bound for
-    /// shadow passes because shadow culling skips the occlusion test.
-    ///
-    /// Must be called once after [`new`] before [`dispatch_shadow_culling`].
-    pub fn init_shadow_resources(&mut self, device: &wgpu::Device) {
-        // A 1×1 placeholder texture satisfies the Hi-Z binding slot for shadow
-        // passes, which do not perform occlusion culling.
-        let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shared Shadow Dummy Hi-Z"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        for i in 0..4 {
-            let visible_commands = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Shadow Visible Draw Commands Buffer {}", i)),
-                size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
-                usage: wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let visible_count = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Shadow Visible Count Buffer {}", i)),
-                size: 4,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Shadow Cull Uniforms Buffer {}", i)),
-                size: size_of::<CullUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("Shadow Cull Bind Group {}", i)),
-                layout: &self.cull_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.subchunk_meta_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: visible_commands.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: visible_count.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&dummy_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
-                    },
-                ],
-            });
-
-            self.shadow_visible_commands.push(visible_commands);
-            self.shadow_visible_counts.push(visible_count);
-            self.shadow_bind_groups.push(bind_group);
-            self.shadow_uniform_buffers.push(uniform_buffer);
-        }
     }
 
     /// Uploads or replaces a subchunk's geometry in the unified buffers.
@@ -976,85 +870,14 @@ impl IndirectManager {
         &self.visible_draw_commands_buffer
     }
 
-    /// Returns the shadow cascade's indirect draw command buffer.
-    pub fn shadow_draw_commands(&self, cascade_idx: usize) -> &wgpu::Buffer {
-        &self.shadow_visible_commands[cascade_idx]
-    }
-
     /// Returns the main visible-count buffer (used as an indirect dispatch argument).
     pub fn visible_count_buffer(&self) -> &wgpu::Buffer {
         &self.visible_count_buffer
     }
 
-    /// Returns the visible-count buffer for the given shadow cascade.
-    pub fn shadow_visible_count_buffer(&self, cascade_idx: usize) -> &wgpu::Buffer {
-        &self.shadow_visible_counts[cascade_idx]
-    }
-
     /// Returns the number of subchunks currently allocated.
     pub fn active_count(&self) -> u32 {
         self.active_subchunk_count
-    }
-
-    /// Dispatches a frustum culling compute pass for one shadow cascade.
-    ///
-    /// Shadow culling uses the cascade's own frustum planes but skips Hi-Z
-    /// occlusion (the Hi-Z slot is bound to a 1×1 dummy texture).
-    ///
-    /// Does nothing if no subchunks are allocated or `cascade_idx` is out of range.
-    pub fn dispatch_shadow_culling(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
-        cascade_idx: usize,
-        frustum_planes: &[[f32; 4]; 6],
-    ) {
-        if self.active_subchunk_count == 0 || cascade_idx >= self.shadow_bind_groups.len() {
-            return;
-        }
-
-        // Reset the per-cascade visible counter.
-        queue.write_buffer(
-            &self.shadow_visible_counts[cascade_idx],
-            0,
-            &0u32.to_le_bytes(),
-        );
-
-        let active = self.max_slot_bound;
-
-        // view_proj, camera_pos, and screen/Hi-Z sizes are unused in shadow mode.
-        let uniforms = CullUniforms {
-            view_proj: [[0.0; 4]; 4],
-            frustum_planes: *frustum_planes,
-            camera_pos: [0.0, 0.0, 0.0],
-            subchunk_count: active,
-            hiz_size: [0.0, 0.0],
-            screen_size: [0.0, 0.0],
-        };
-        queue.write_buffer(
-            &self.shadow_uniform_buffers[cascade_idx],
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
-
-        let bytes_to_clear = (active as u64) * size_of::<DrawIndexedIndirect>() as u64;
-        if bytes_to_clear > 0 {
-            encoder.clear_buffer(
-                &self.shadow_visible_commands[cascade_idx],
-                0,
-                Some(bytes_to_clear),
-            );
-        }
-
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(&format!("Shadow Culling Pass {}", cascade_idx)),
-            timestamp_writes: None,
-        });
-        cpass.set_pipeline(&self.cull_pipeline);
-        cpass.set_bind_group(0, &self.shadow_bind_groups[cascade_idx], &[]);
-
-        let workgroup_count = (active + 63) / 64;
-        cpass.dispatch_workgroups(workgroup_count, 1, 1);
     }
 
     /// Returns `true` if `key` currently has an active GPU allocation.

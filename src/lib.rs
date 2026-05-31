@@ -4,8 +4,6 @@ pub mod player;
 
 pub mod render;
 
-pub mod render_core;
-
 pub mod world;
 
 pub mod biome {
@@ -59,11 +57,8 @@ pub mod save;
 mod shader_utils;
 
 pub use constants::*;
-pub use constants::{get_active_cascade_count, get_chunk_worker_count, get_mesh_worker_count};
-pub use core::{
-    Biome, BlockType, Chunk, GameItem, ShadowConfig, SubChunk, TemporalShadowUniforms, Uniforms,
-    Vertex,
-};
+pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
+pub use core::{Biome, BlockType, Chunk, GameItem, SubChunk, Uniforms, Vertex};
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
     AABB, DrawIndexedIndirect, IndirectManager, MeshLoader, SubchunkKey, add_greedy_quad, add_quad,

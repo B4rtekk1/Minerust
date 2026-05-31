@@ -108,46 +108,6 @@ impl State {
                 .ssr_depth_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            // ── Shadow mask texture (screen-space, R32Float) ─────────────── //
-            self.shadow_mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Shadow Mask Texture"),
-                size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R32Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            self.shadow_mask_view = self
-                .shadow_mask_texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            self.shadow_history_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Temporal Shadow History Texture"),
-                size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            self.shadow_history_view = self
-                .shadow_history_texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            self.shadow_history_valid = false;
-
             // Nearest-neighbor sampler for SSR lookups; bilinear filtering
             // would blur the reflected image and produce incorrect depth reads.
             self.ssr_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -164,7 +124,7 @@ impl State {
             // ── Water bind group ──────────────────────────────────────────── //
             // The water shader's bind group contains direct references to the
             // SSR texture views, so it must be recreated whenever those views
-            // change.  All other bindings (uniforms, atlas, shadow map) are
+            // change.  All other bindings (uniforms, atlas, flow map) are
             // resolution-independent and are simply re-bound from their
             // existing handles.
             self.water_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -181,26 +141,6 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&self.texture_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[2]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_cascade_views[3]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
@@ -250,64 +190,6 @@ impl State {
                         wgpu::BindGroupEntry {
                             binding: 2,
                             resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
-                        },
-                    ],
-                });
-
-            // ── Shadow-mask compute bind groups + sampling bind group ─────── //
-            self.terrain_gbuffer_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("terrain_gbuffer_bind_group"),
-                    layout: &self.shadow_mask_pipeline.get_bind_group_layout(1),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
-                    }],
-                });
-            self.terrain_shadow_output_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("terrain_shadow_output_bind_group"),
-                    layout: &self.render_pipeline.get_bind_group_layout(2),
-                    entries: &[],
-                });
-            self.shadow_mask_input_bind_group = self.terrain_gbuffer_bind_group.clone();
-            self.shadow_mask_output_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("shadow_mask_output_bind_group"),
-                    layout: &self.shadow_mask_pipeline.get_bind_group_layout(2),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.shadow_mask_view),
-                    }],
-                });
-
-            self.shadow_mask_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("shadow_mask_bind_group"),
-                    layout: &self.render_pipeline.get_bind_group_layout(3),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.shadow_mask_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.ssr_sampler),
-                        },
-                    ],
-                });
-            self.temporal_shadow_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("temporal_shadow_bind_group"),
-                    layout: &self.shadow_mask_pipeline.get_bind_group_layout(3),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.shadow_history_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.temporal_shadow_buffer.as_entire_binding(),
                         },
                     ],
                 });

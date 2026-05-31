@@ -8,24 +8,25 @@ const FOG_NEAR: f32 = 0.0;
 const FOG_FAR:  f32 = 180.0;
 
 struct Uniforms {
-    view_proj:           mat4x4<f32>,
-    inv_view_proj:       mat4x4<f32>,
-    csm_view_proj:       array<mat4x4<f32>, 4>,
-    csm_split_distances: vec4<f32>,
-    camera_pos:          vec3<f32>,
-    time:                f32,
-    sun_position:        vec3<f32>,
-    is_underwater:       f32,
-    screen_size:         vec2<f32>,
-    water_level:         f32,
-    reflection_mode:     f32,
-    moon_position:       vec3<f32>,
-    moon_intensity:      f32,
-    wind_dir:            vec2<f32>,
-    wind_speed:          f32,
-    _pad:                f32,
-    rain_factor:         f32,
-    shadows_enabled:     f32,
+    view_proj:      mat4x4<f32>,
+    inv_view_proj:  mat4x4<f32>,
+    camera_pos:     vec3<f32>,
+    time:           f32,
+    sun_position:   vec3<f32>,
+    is_underwater:  f32,
+    screen_size:    vec2<f32>,
+    water_level:    f32,
+    reflection_mode: f32,
+    moon_position:  vec3<f32>,
+    _pad1_moon:     f32,
+    moon_intensity: f32,
+    wind_dir_x:     f32,
+    wind_dir_z:     f32,
+    wind_speed:     f32,
+    rain_factor:    f32,
+    sky_visibility: f32,
+    menu_blur:      f32,
+    _pad_uniforms:  f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -53,7 +54,7 @@ fn face_normal(index: u32) -> vec3<f32> {
 }
 
 fn cheap_water_normal(world_xz: vec2<f32>, time: f32) -> vec3<f32> {
-    let wind = normalize(uniforms.wind_dir + vec2<f32>(0.001, 0.001));
+    let wind = normalize(vec2<f32>(uniforms.wind_dir_x, uniforms.wind_dir_z) + vec2<f32>(0.001, 0.001));
     let cross_wind = vec2<f32>(-wind.y, wind.x);
     let speed = max(uniforms.wind_speed, 0.15);
 

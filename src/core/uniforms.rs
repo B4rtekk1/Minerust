@@ -20,17 +20,6 @@ pub struct Uniforms {
     /// positions from NDC (e.g. in deferred or post-process passes).
     pub inv_view_proj: [[f32; 4]; 4],
 
-    /// Shadow view-projection matrices.
-    ///
-    /// Slot 0 transforms world-space into light-space clip space for the active
-    /// shadow map. Remaining slots are kept for shader layout compatibility.
-    pub csm_view_proj: [[[f32; 4]; 4]; 4],
-
-    /// Linear camera-view shadow draw distances.
-    ///
-    /// `csm_split_distances[0]` is the active single-map shadow distance.
-    pub csm_split_distances: [f32; 4],
-
     /// World-space camera position `[x, y, z]`.
     ///
     /// Packed with [`Self::time`] to fill a `vec4` alignment slot.
@@ -86,17 +75,12 @@ pub struct Uniforms {
     pub wind_dir: [f32; 2],
     /// Multiplier applied to the water wave phase speed.
     pub wind_speed: f32,
-    /// Explicit padding to keep the struct 16-byte aligned.
-    pub _pad: f32,
 
     /// Rain intensity in the range `[0.0, 1.0]`.
     ///
     /// Used by the sky shader to desaturate the atmosphere and dim the sun
     /// / cloud response under overcast conditions.
     pub rain_factor: f32,
-
-    /// Non-zero when runtime shadow rendering is enabled.
-    pub shadows_enabled: f32,
 
     /// Approximate fraction of open sky visible above the camera.
     ///
@@ -108,43 +92,5 @@ pub struct Uniforms {
     pub menu_blur: f32,
 
     /// Explicit padding so the uniform block remains 16-byte aligned.
-    pub _pad_menu: [f32; 3],
-}
-
-/// Small shadow-specific configuration uploaded separately from the main
-/// per-frame uniform block.
-///
-/// This keeps shadow quality knobs isolated from the large `Uniforms` struct
-/// and matches the `ShadowConfig` block used by `terrain.wgsl`.
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct ShadowConfig {
-    /// Shadow map resolutions in texels. Slot 0 is the active map size.
-    pub shadow_map_sizes: [f32; 4],
-    /// Number of PCF taps used when filtering the shadow map.
-    pub pcf_samples: u32,
-    /// Number of shadow maps rendered and sampled this frame.
-    pub active_cascades: u32,
-    /// Explicit padding so the buffer remains 16-byte aligned.
-    pub _pad: [u32; 2],
-}
-
-/// Per-frame temporal shadow reprojection state.
-///
-/// The shadow-mask compute pass uses this to project the current pixel's
-/// reconstructed world position into the previous frame and blend the current
-/// shadow result with the previous screen-space shadow mask.
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct TemporalShadowUniforms {
-    /// Previous frame's camera view-projection matrix.
-    pub prev_view_proj: [[f32; 4]; 4],
-    /// Previous frame's camera position.
-    pub prev_camera_pos: [f32; 3],
-    /// Blend weight for valid history samples.
-    pub history_weight: f32,
-    /// Previous frame's sun direction.
-    pub prev_sun_position: [f32; 3],
-    /// Non-zero when the previous shadow history texture contains valid data.
-    pub history_valid: f32,
+    pub _pad_uniforms: f32,
 }

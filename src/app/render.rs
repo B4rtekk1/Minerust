@@ -3,9 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, CSM_PCF_SAMPLES, CSM_SHADOW_MAP_SIZES, DEFAULT_FOV, RENDER_DISTANCE,
-    SEA_LEVEL, ShadowConfig, TemporalShadowUniforms, Uniforms, Vertex, World, build_block_outline,
-    build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
+    build_block_outline, build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -73,26 +72,23 @@ impl State {
     /// 1. **Player model update** – re-builds the combined vertex/index buffers
     ///    for all visible remote players if any exist.
     /// 2. **Uniform upload** – computes the camera matrices, advances the day
-    ///    cycle, updates the light-space shadow matrix, and uploads the
-    ///    `Uniforms` struct.
-    /// 3. **Shadow cull + shadow pass** – runs GPU culling followed by a
-    ///    depth-only draw into the shadow map.
-    /// 4. **Mesh request** – walks the visible chunk grid, queues dirty sub-chunk
+    ///    cycle, and uploads the `Uniforms` struct.
+    /// 3. **Mesh request** – walks the visible chunk grid, queues dirty sub-chunk
     ///    meshes for background rebuild, and tallies rendered counts.
-    /// 5. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
+    /// 4. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
     ///    the opaque terrain and water indirect managers.
-    /// 6. **Opaque pass** – sky dome → terrain → remote player models → sun/moon.
+    /// 5. **Opaque pass** – sky dome -> terrain -> remote player models -> sun/moon.
     ///    Resolves MSAA into `ssr_color_view` for later water reflections.
-    /// 7. **Depth resolve compute** – resolves the multisampled depth buffer
+    /// 6. **Depth resolve compute** – resolves the multisampled depth buffer
     ///    into `ssr_depth_view` (for water refraction) and the first Hi-Z mip
     ///    level (for next-frame occlusion culling).
-    /// 8. **Hi-Z generation** (compute) – downsamples the depth mip chain.
-    /// 9. **Transparent pass** – water surfaces, alpha-blended on top of the
+    /// 7. **Hi-Z generation** (compute) – downsamples the depth mip chain.
+    /// 8. **Transparent pass** – water surfaces, alpha-blended on top of the
     ///    opaque result.  Resolves MSAA into `scene_color_view`.
-    /// 10. **Composite pass** – post-processing blit from `scene_color_view`
+    /// 9. **Composite pass** – post-processing blit from `scene_color_view`
     ///     to the swap-chain surface (underwater fog, vignette, etc.).
-    /// 11. **UI pass** – crosshair, coordinate debug overlay, hotbar.
-    /// 12. **Progress bar pass** – block-breaking progress indicator (only
+    /// 10. **UI pass** – crosshair, coordinate debug overlay, hotbar.
+    /// 11. **Progress bar pass** – block-breaking progress indicator (only
     ///     when the player is actively mining).
     /// 13. **Menu / HUD** – either the main-menu overlay or remote-player
     ///     name labels, depending on `game_state`.
@@ -231,27 +227,6 @@ impl State {
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
         self.rebuild_visible_chunk_cache(player_cx, player_cz);
 
-        // ── Shadow map update ────────────────────────────────────────────── //
-        // `CsmManager::update` stores the active light-space matrix in slot 0.
-        let csm = &mut self.csm;
-        let fov_y = DEFAULT_FOV;
-        csm.update(&view_mat, sun_dir, 0.1, 300.0, aspect, fov_y);
-
-        // Pack light-space matrices into the uniform struct format.
-        let csm_view_proj: [[[f32; 4]; 4]; 4] = [
-            csm.cascades[0].view_proj.to_cols_array_2d(),
-            csm.cascades[1].view_proj.to_cols_array_2d(),
-            csm.cascades[2].view_proj.to_cols_array_2d(),
-            csm.cascades[3].view_proj.to_cols_array_2d(),
-        ];
-        // The first split is the single shadow draw distance.
-        let csm_split_distances: [f32; 4] = [
-            csm.cascades[0].split_distance,
-            csm.cascades[1].split_distance,
-            csm.cascades[2].split_distance,
-            csm.cascades[3].split_distance,
-        ];
-
         // Inverse view-projection is used by the composite / water shaders to
         // reconstruct world-space positions from screen-space depth samples.
         let inv_view_proj = view_proj.inverse();
@@ -267,8 +242,6 @@ impl State {
             bytemuck::cast_slice(&[Uniforms {
                 view_proj: view_proj_array,
                 inv_view_proj: inv_view_proj_array,
-                csm_view_proj,
-                csm_split_distances,
                 camera_pos: eye_pos.to_array(),
                 time,
                 sun_position: [sun_x, sun_y, sun_z],
@@ -281,48 +254,10 @@ impl State {
                 moon_intensity,
                 wind_dir: [0.8, 0.6],
                 wind_speed: 1.0,
-                _pad: 0.0,
                 rain_factor: 0.0,
-                shadows_enabled: if self.shadows_enabled { 1.0 } else { 0.0 },
                 sky_visibility: self.sky_visibility,
                 menu_blur: if menu_visible { 1.0 } else { 0.0 },
-                _pad_menu: [0.0; 3],
-            }]),
-        );
-        self.queue.write_buffer(
-            &self.shadow_config_buffer,
-            0,
-            bytemuck::cast_slice(&[ShadowConfig {
-                shadow_map_sizes: CSM_SHADOW_MAP_SIZES.map(|size| size as f32),
-                pcf_samples: if self.shadows_enabled {
-                    CSM_PCF_SAMPLES
-                } else {
-                    0
-                },
-                active_cascades: minerust::get_active_cascade_count(RENDER_DISTANCE) as u32,
-                _pad: [0; 2],
-            }]),
-        );
-        let temporal_history_valid =
-            self.shadow_history_valid && self.shadows_enabled && render_world_scene;
-        let camera_motion = Vec3::from_array(self.prev_camera_pos).distance(eye_pos);
-        let sun_motion = Vec3::from_array(self.prev_sun_position).distance(sun_dir);
-        let camera_history_factor = (1.0 - camera_motion * 0.12).clamp(0.35, 1.0);
-        let sun_history_factor = (1.0 - sun_motion * 64.0).clamp(0.50, 1.0);
-        let history_weight = if temporal_history_valid {
-            0.86 * camera_history_factor * sun_history_factor
-        } else {
-            0.0
-        };
-        self.queue.write_buffer(
-            &self.temporal_shadow_buffer,
-            0,
-            bytemuck::cast_slice(&[TemporalShadowUniforms {
-                prev_view_proj: self.prev_view_proj,
-                prev_camera_pos: self.prev_camera_pos,
-                history_weight,
-                prev_sun_position: self.prev_sun_position,
-                history_valid: if temporal_history_valid { 1.0 } else { 0.0 },
+                _pad_uniforms: 0.0,
             }]),
         );
 
@@ -330,110 +265,6 @@ impl State {
         // Six half-space planes derived from the combined view-projection
         // matrix, used both for CPU-side mesh gating and the GPU cull shader.
         let frustum_planes = extract_frustum_planes(&view_proj);
-
-        // Kept centralized with the split/shadow-map constants.
-        let active_cascades = minerust::get_active_cascade_count(RENDER_DISTANCE);
-
-        // ── Shadow matrix buffer upload + shadow cull ────────────────────── //
-        let mut shadow_frustum_arrays = [[[0f32; 4]; 6]; 4];
-        if self.shadows_enabled {
-            for i in 0..active_cascades {
-                // Pack the light-space matrix into a 256-byte aligned uniform slot.
-                let cascade_matrix: [[f32; 4]; 4] = csm.cascades[i].view_proj.to_cols_array_2d();
-                let mut shadow_uniform_data = [0f32; 64]; // 64 × 4 bytes = 256 bytes
-                shadow_uniform_data[0..16].copy_from_slice(cascade_matrix.as_flattened());
-
-                self.queue.write_buffer(
-                    &self.shadow_cascade_buffer,
-                    (i * 256) as u64,
-                    bytemuck::cast_slice(&shadow_uniform_data),
-                );
-
-                // Extract the light-space frustum planes so the GPU can cull
-                // chunks outside the shadow projection.
-                let cascade_view_proj = csm.cascades[i].view_proj;
-                let shadow_frustum = extract_frustum_planes(&cascade_view_proj);
-                shadow_frustum_arrays[i] = frustum_planes_to_array(&shadow_frustum);
-            }
-
-            // Dispatch shadow frustum culling for opaque terrain only. Water is
-            // not drawn in the shadow pass, so culling it here would only fill
-            // command buffers that are never consumed.
-            for i in 0..active_cascades {
-                self.indirect_manager.dispatch_shadow_culling(
-                    &mut encoder,
-                    &self.queue,
-                    i,
-                    &shadow_frustum_arrays[i],
-                );
-            }
-        }
-
-        // ── Shadow depth pass ────────────────────────────────────────────── //
-        // Renders opaque terrain into the single shadow map. The fragment
-        // shader is absent; only depth values are written.
-        let shadow_pass_count = if self.shadows_enabled {
-            active_cascades
-        } else {
-            0
-        };
-        for i in 0..shadow_pass_count {
-            let offset = (i * 256) as u32;
-            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow Pass"),
-                color_attachments: &[], // depth-only pass, no color output
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_cascade_views[i],
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0), // clear to max depth
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            if self.shadows_enabled && i < active_cascades {
-                shadow_pass.set_pipeline(&self.shadow_pipeline);
-                // Dynamic offset selects the light-space matrix slot.
-                shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[offset]);
-                shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
-                shadow_pass.set_index_buffer(
-                    self.indirect_manager.index_buffer().slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                // Use count-based indirect if supported so only GPU-visible chunks
-                // are drawn; fall back to a fixed count otherwise.
-                if self.supports_indirect_count {
-                    shadow_pass.multi_draw_indexed_indirect_count(
-                        self.indirect_manager.shadow_draw_commands(i),
-                        0,
-                        self.indirect_manager.shadow_visible_count_buffer(i),
-                        0,
-                        self.indirect_manager.active_count(),
-                    );
-                } else {
-                    shadow_pass.multi_draw_indexed_indirect(
-                        self.indirect_manager.shadow_draw_commands(i),
-                        0,
-                        self.indirect_manager.active_count(),
-                    );
-                }
-
-                if self.player_model_num_indices > 0 {
-                    if let (Some(vb), Some(ib)) = (
-                        &self.player_model_vertex_buffer,
-                        &self.player_model_index_buffer,
-                    ) {
-                        shadow_pass.set_vertex_buffer(0, vb.slice(..));
-                        shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                        shadow_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
-                    }
-                }
-            }
-        }
 
         // ── Mesh rebuild requests ─────────────────────────────────────────── //
         // Walk all chunks within RENDER_DISTANCE.  For each sub-chunk whose
@@ -524,8 +355,7 @@ impl State {
         );
 
         // ── Terrain depth prepass ─────────────────────────────────────────── //
-        // Fill the MSAA depth buffer first so we can resolve it and compute a
-        // screen-space shadow mask before shading the terrain.
+        // Fill the MSAA depth buffer first so we can resolve it for Hi-Z.
         if render_world_scene {
             let mut depth_prepass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Terrain Depth Prepass"),
@@ -542,9 +372,6 @@ impl State {
             });
             depth_prepass.set_pipeline(&self.terrain_depth_pipeline);
             depth_prepass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            depth_prepass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            depth_prepass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            depth_prepass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             depth_prepass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
             depth_prepass.set_index_buffer(
                 self.indirect_manager.index_buffer().slice(..),
@@ -578,8 +405,7 @@ impl State {
         }
 
         // ── Depth resolve compute pass ───────────────────────────────────── //
-        // Resolve MSAA depth early (from the prepass) so the shadow-mask compute
-        // can reconstruct world positions.
+        // Resolve MSAA depth early (from the prepass) so Hi-Z can be rebuilt.
         if render_world_scene {
             let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Depth Resolve Compute Pass (Prepass)"),
@@ -592,54 +418,6 @@ impl State {
                 (self.config.height + 15) / 16,
                 1,
             );
-        }
-
-        // ── Shadow mask compute ──────────────────────────────────────────── //
-        if render_world_scene {
-            let mut shadow_mask_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Shadow Mask Compute Pass"),
-                timestamp_writes: None,
-            });
-            shadow_mask_pass.set_pipeline(&self.shadow_mask_pipeline);
-            shadow_mask_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            shadow_mask_pass.set_bind_group(1, &self.shadow_mask_input_bind_group, &[]);
-            shadow_mask_pass.set_bind_group(2, &self.shadow_mask_output_bind_group, &[]);
-            shadow_mask_pass.set_bind_group(3, &self.temporal_shadow_bind_group, &[]);
-            shadow_mask_pass.dispatch_workgroups(
-                (self.config.width + 7) / 8,
-                (self.config.height + 7) / 8,
-                1,
-            );
-        }
-        if render_world_scene {
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.shadow_mask_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.shadow_history_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            self.prev_view_proj = view_proj_array;
-            self.prev_camera_pos = eye_pos.to_array();
-            self.prev_sun_position = [sun_x, sun_y, sun_z];
-            self.shadow_history_valid = self.shadows_enabled;
-        } else {
-            self.prev_view_proj = view_proj_array;
-            self.prev_camera_pos = eye_pos.to_array();
-            self.prev_sun_position = [sun_x, sun_y, sun_z];
-            self.shadow_history_valid = false;
         }
 
         // ── Hi-Z mip chain generation (compute) ───────────────────────────── //
@@ -685,7 +463,7 @@ impl State {
                     view: &self.depth_texture,
                     depth_ops: Some(wgpu::Operations {
                         // Re-clear for the color pass; prepass depth is only
-                        // used earlier for shadow-mask and Hi-Z compute.
+                        // used earlier for Hi-Z compute.
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
                     }),
@@ -699,9 +477,6 @@ impl State {
             // being clipped, and the same quad geometry as the sun billboard.
             opaque_pass.set_pipeline(&self.sky_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
             opaque_pass
                 .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -712,9 +487,6 @@ impl State {
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
             opaque_pass.set_index_buffer(
                 self.indirect_manager.index_buffer().slice(..),
@@ -737,8 +509,8 @@ impl State {
             }
 
             // --- Remote player models ---
-            // Drawn with the terrain pipeline so they receive shadow and fog
-            // effects consistent with the surrounding world geometry.
+            // Drawn with the terrain pipeline so lighting and fog stay
+            // consistent with the surrounding world geometry.
             if self.player_model_num_indices > 0 {
                 if let (Some(vb), Some(ib)) = (
                     &self.player_model_vertex_buffer,
@@ -746,9 +518,6 @@ impl State {
                 ) {
                     opaque_pass.set_pipeline(&self.render_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-                    opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-                    opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     opaque_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
@@ -760,9 +529,6 @@ impl State {
             // terrain on the horizon.
             opaque_pass.set_pipeline(&self.sun_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            opaque_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            opaque_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
             opaque_pass
                 .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -873,9 +639,6 @@ impl State {
                             });
                     outline_pass.set_pipeline(&self.outline_pipeline);
                     outline_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    outline_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-                    outline_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-                    outline_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
                     outline_pass.set_vertex_buffer(0, outline_vb.slice(..));
                     outline_pass.set_index_buffer(outline_ib.slice(..), wgpu::IndexFormat::Uint32);
                     outline_pass.draw_indexed(0..outline_indices.len() as u32, 0, 0..1);
@@ -938,9 +701,6 @@ impl State {
             if !menu_visible {
                 ui_pass.set_pipeline(&self.crosshair_pipeline);
                 ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                ui_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-                ui_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-                ui_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
 
                 // --- Crosshair ---
                 if self.show_crosshair {
@@ -1106,9 +866,6 @@ impl State {
             });
             progress_pass.set_pipeline(&self.crosshair_pipeline);
             progress_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            progress_pass.set_bind_group(1, &self.terrain_gbuffer_bind_group, &[]);
-            progress_pass.set_bind_group(2, &self.terrain_shadow_output_bind_group, &[]);
-            progress_pass.set_bind_group(3, &self.shadow_mask_bind_group, &[]);
             progress_pass.set_vertex_buffer(0, progress_vb.slice(..));
             progress_pass.set_index_buffer(progress_ib.slice(..), wgpu::IndexFormat::Uint32);
             progress_pass.draw_indexed(0..12, 0, 0..1);

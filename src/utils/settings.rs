@@ -82,9 +82,6 @@ pub struct GraphicsSettings {
     /// Horizontal field of view in degrees. Defaults to `90.0`.
     #[serde(default)]
     pub fov: f32,
-    /// Shadow map configuration. Defaults silently on load if absent.
-    #[serde(default)]
-    pub shadows: ShadowSettings,
     /// Tone-mapping and ambient occlusion settings. Defaults silently on load if absent.
     #[serde(default)]
     pub lighting: LightingSettings,
@@ -105,56 +102,10 @@ impl Default for GraphicsSettings {
             fullscreen: false,
             max_fps: 999,
             fov: 90.0,
-            shadows: ShadowSettings::default(),
             lighting: LightingSettings::default(),
             water: WaterSettings::default(),
         }
     }
-}
-
-/// Shadow map configuration.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ShadowSettings {
-    /// Whether shadow casting is enabled at all.
-    pub enabled: bool,
-    /// Shadow map texture resolution in pixels (per cascade). Higher values
-    /// give sharper shadows at the cost of VRAM and fill rate.
-    pub resolution: u32,
-    /// Number of cascaded shadow map splits. More cascades improve shadow
-    /// quality at distance but increase draw calls.
-    pub cascades: u32,
-    /// Maximum distance in world units at which shadows are rendered.
-    pub distance: f32,
-    /// Filtering algorithm used for shadow edge softening.
-    pub quality: ShadowQuality,
-}
-
-impl Default for ShadowSettings {
-    /// Returns high-quality defaults: enabled, 2048 px resolution,
-    /// 4 cascades, 150-unit distance, PCSS filtering.
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            resolution: 2048,
-            cascades: 4,
-            distance: 150.0,
-            quality: ShadowQuality::Pcss,
-        }
-    }
-}
-
-/// Shadow edge filtering quality.
-///
-/// Higher tiers are more expensive but produce softer, more realistic penumbra.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
-pub enum ShadowQuality {
-    /// No filtering — aliased hard shadow edges. Cheapest option.
-    Hard,
-    /// Percentage-closer filtering — slightly blurred edges at low cost.
-    Pcf,
-    /// Percentage-closer soft shadows — variable penumbra based on blocker
-    /// distance. Most realistic but most expensive.
-    Pcss,
 }
 
 /// Tone-mapping and ambient lighting settings.

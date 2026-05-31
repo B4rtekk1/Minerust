@@ -1,25 +1,23 @@
 struct Uniforms {
-    view_proj:          mat4x4<f32>,
-    inv_view_proj:      mat4x4<f32>,
-    csm_view_proj:      array<mat4x4<f32>, 4>,
-    csm_split_distances: vec4<f32>,
-    camera_pos:         vec3<f32>,
-    time:               f32,
-    sun_position:       vec3<f32>,
-    is_underwater:      f32,
-    _screen_size:       vec2<f32>,
-    _water_level:       f32,
-    _pad_water:         f32,
-    moon_position:      vec3<f32>,
-    _pad1_moon:         f32,
-    moon_intensity:     f32,
-    wind_dir_x:         f32,
-    wind_dir_z:         f32,
-    wind_speed:         f32,
-    _pad:               f32,
-    rain_factor:        f32,
-    shadows_enabled:    f32,
-    sky_visibility:     f32,
+    view_proj:      mat4x4<f32>,
+    inv_view_proj:  mat4x4<f32>,
+    camera_pos:     vec3<f32>,
+    time:           f32,
+    sun_position:   vec3<f32>,
+    is_underwater:  f32,
+    _screen_size:   vec2<f32>,
+    _water_level:   f32,
+    reflection_mode: f32,
+    moon_position:  vec3<f32>,
+    _pad1_moon:     f32,
+    moon_intensity: f32,
+    wind_dir_x:     f32,
+    wind_dir_z:     f32,
+    wind_speed:     f32,
+    rain_factor:    f32,
+    sky_visibility: f32,
+    menu_blur:      f32,
+    _pad_uniforms:  f32,
 };
 
 @group(0) @binding(0)
@@ -239,11 +237,11 @@ fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
     let sun_light    = pow(max(dot(view_dir, ap.sun_dir), 0.0), 12.0) * 0.30;
     let horizon_warm = vec3<f32>(1.0, 0.74, 0.50);
     let cloud_day    = vec3<f32>(0.90, 0.93, 0.97);
-    let cloud_shadow = vec3<f32>(0.48, 0.54, 0.65);
+    let cloud_dim = vec3<f32>(0.48, 0.54, 0.65);
     let cloud_night  = vec3<f32>(0.06, 0.08, 0.14);  // oświetlenie księżycowe
     let dusk_tint    = mix(vec3<f32>(1.0, 0.64, 0.42), vec3<f32>(0.78, 0.36, 0.48), lat);
 
-    var tint  = mix(cloud_shadow, cloud_day, ap.day);
+    var tint  = mix(cloud_dim, cloud_day, ap.day);
     tint      = mix(tint, cloud_night, ap.night * 0.85);
     tint      = mix(tint, dusk_tint,  ap.dusk * 0.75);
     tint     += horizon_warm * (1.0 - smoothstep(0.0, 0.20, abs(view_dir.y))) * ap.dusk * 0.16;
