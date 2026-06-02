@@ -93,6 +93,8 @@ pub struct State {
     /// Depth-only prepass pipeline for terrain. Fills the depth buffer before
     /// Hi-Z compute passes.
     pub terrain_depth_pipeline: wgpu::RenderPipeline,
+    /// Depth-only directional shadow pass from the moving sun.
+    pub shadow_pipeline: wgpu::RenderPipeline,
 
     // -------------------------------------------------------------------------
     // Static geometry buffers
@@ -115,8 +117,14 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Uniform buffer containing per-frame data (view-proj, sun direction, etc.).
     pub uniform_buffer: wgpu::Buffer,
+    /// Uniform buffer containing the current sun light-space transform.
+    pub shadow_uniform_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
+    /// Bind group exposing the sun shadow map to the terrain shader.
+    pub shadow_bind_group: wgpu::BindGroup,
+    /// Uniform-only bind group used while rendering into the shadow map.
+    pub shadow_pass_bind_group: wgpu::BindGroup,
     /// Bind group for the water pass (SSR color/depth textures + sampler).
     pub water_bind_group: wgpu::BindGroup,
     /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
@@ -134,6 +142,14 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Non-linear (sRGB) depth buffer view used by the main render pass.
     pub depth_texture: wgpu::TextureView,
+    /// Fixed-resolution directional shadow map depth texture.
+    #[allow(dead_code)]
+    pub shadow_texture: wgpu::Texture,
+    /// View into `shadow_texture` used for both rendering and sampling.
+    pub shadow_view: wgpu::TextureView,
+    /// Comparison sampler used for hardware shadow-map depth tests.
+    #[allow(dead_code)]
+    pub shadow_sampler: wgpu::Sampler,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
     /// Intermediate scene color texture rendered into before compositing.

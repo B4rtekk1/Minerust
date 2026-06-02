@@ -94,3 +94,15 @@ pub struct Uniforms {
     /// Explicit padding so the uniform block remains 16-byte aligned.
     pub _pad_uniforms: f32,
 }
+
+/// Uniform data shared by the sun-shadow depth pass and the terrain shader.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ShadowUniforms {
+    /// Orthographic light-space matrix following the moving sun direction.
+    pub light_view_proj: [[f32; 4]; 4],
+
+    /// Shadow sampling controls:
+    /// `[texel_size, strength, min_depth_bias, slope_depth_bias]`.
+    pub params: [f32; 4],
+}

@@ -28,6 +28,13 @@ pub const TEX_DEAD_BUSH: f32 = 15.0;
 pub const TEXTURE_SIZE: u32 = 256;
 pub const ATLAS_SIZE: u32 = 4;
 
+pub const SHADOW_MAP_SIZE: u32 = 1024;
+pub const SHADOW_ORTHO_EXTENT: f32 = 96.0;
+pub const SHADOW_DEPTH_RANGE: f32 = 512.0;
+pub const SHADOW_STRENGTH: f32 = 0.88;
+pub const SHADOW_MIN_BIAS: f32 = 0.00038;
+pub const SHADOW_SLOPE_BIAS: f32 = 0.00115;
+
 pub const MAX_CHUNKS_PER_FRAME: usize = 8;
 pub const MAX_MESH_BUILDS_PER_FRAME: usize = 8;
 pub const ASYNC_WORKER_COUNT: usize = 4;

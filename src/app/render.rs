@@ -3,8 +3,10 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
-    build_block_outline, build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, SHADOW_DEPTH_RANGE,
+    SHADOW_MAP_SIZE, SHADOW_MIN_BIAS, SHADOW_ORTHO_EXTENT, SHADOW_SLOPE_BIAS, SHADOW_STRENGTH,
+    ShadowUniforms, Uniforms, Vertex, World, build_block_outline, build_player_model,
+    extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -32,6 +34,43 @@ fn visible_outline_faces(world: &World, bx: i32, by: i32, bz: i32) -> [bool; 6] 
         block.should_render_face_against(world.get_block(bx, by, bz + 1)),
         block.should_render_face_against(world.get_block(bx, by, bz - 1)),
     ]
+}
+
+fn sun_shadow_view_projection(center: Vec3, sun_dir: Vec3) -> Mat4 {
+    let light_dir = sun_dir.normalize_or_zero();
+    let light_forward = -light_dir;
+    let reference_right = if light_forward.dot(Vec3::X).abs() > 0.95 {
+        Vec3::Z
+    } else {
+        Vec3::X
+    };
+    let light_right =
+        (reference_right - light_forward * reference_right.dot(light_forward)).normalize_or_zero();
+    let light_up = light_right.cross(light_forward).normalize_or_zero();
+
+    let shadow_texel_world_size = (SHADOW_ORTHO_EXTENT * 2.0) / SHADOW_MAP_SIZE as f32;
+    let center_light_x = center.dot(light_right);
+    let center_light_y = center.dot(light_up);
+    let snapped_light_x =
+        (center_light_x / shadow_texel_world_size).round() * shadow_texel_world_size;
+    let snapped_light_y =
+        (center_light_y / shadow_texel_world_size).round() * shadow_texel_world_size;
+    let snapped_center = center
+        + light_right * (snapped_light_x - center_light_x)
+        + light_up * (snapped_light_y - center_light_y);
+
+    let light_eye = snapped_center + light_dir * (SHADOW_DEPTH_RANGE * 0.5);
+    let light_view = Mat4::look_at_rh(light_eye, snapped_center, light_up);
+    let light_proj = Mat4::orthographic_rh(
+        -SHADOW_ORTHO_EXTENT,
+        SHADOW_ORTHO_EXTENT,
+        -SHADOW_ORTHO_EXTENT,
+        SHADOW_ORTHO_EXTENT,
+        0.0,
+        SHADOW_DEPTH_RANGE,
+    );
+
+    light_proj * light_view
 }
 
 impl State {
@@ -77,18 +116,20 @@ impl State {
     ///    meshes for background rebuild, and tallies rendered counts.
     /// 4. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
     ///    the opaque terrain and water indirect managers.
-    /// 5. **Opaque pass** – sky dome -> terrain -> remote player models -> sun/moon.
+    /// 5. **Sun shadow pass** – renders a focused, depth-only shadow map for
+    ///    terrain and remote-player occluders when the sun is above the horizon.
+    /// 6. **Opaque pass** – sky dome -> terrain -> remote player models -> sun/moon.
     ///    Resolves MSAA into `ssr_color_view` for later water reflections.
-    /// 6. **Depth resolve compute** – resolves the multisampled depth buffer
+    /// 7. **Depth resolve compute** – resolves the multisampled depth buffer
     ///    into `ssr_depth_view` (for water refraction) and the first Hi-Z mip
     ///    level (for next-frame occlusion culling).
-    /// 7. **Hi-Z generation** (compute) – downsamples the depth mip chain.
-    /// 8. **Transparent pass** – water surfaces, alpha-blended on top of the
+    /// 8. **Hi-Z generation** (compute) – downsamples the depth mip chain.
+    /// 9. **Transparent pass** – water surfaces, alpha-blended on top of the
     ///    opaque result.  Resolves MSAA into `scene_color_view`.
-    /// 9. **Composite pass** – post-processing blit from `scene_color_view`
+    /// 10. **Composite pass** – post-processing blit from `scene_color_view`
     ///     to the swap-chain surface (underwater fog, vignette, etc.).
-    /// 10. **UI pass** – crosshair, coordinate debug overlay, hotbar.
-    /// 11. **Progress bar pass** – block-breaking progress indicator (only
+    /// 11. **UI pass** – crosshair, coordinate debug overlay, hotbar.
+    /// 12. **Progress bar pass** – block-breaking progress indicator (only
     ///     when the player is actively mining).
     /// 13. **Menu / HUD** – either the main-menu overlay or remote-player
     ///     name labels, depending on `game_state`.
@@ -234,6 +275,22 @@ impl State {
 
         let eye_pos = self.camera.eye_position();
         let is_underwater = self.is_underwater;
+        let light_view_proj = sun_shadow_view_projection(eye_pos, sun_dir);
+        let sun_shadows_active = render_world_scene && sun_dir.y > 0.035;
+
+        self.queue.write_buffer(
+            &self.shadow_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[ShadowUniforms {
+                light_view_proj: light_view_proj.to_cols_array_2d(),
+                params: [
+                    1.0 / SHADOW_MAP_SIZE as f32,
+                    SHADOW_STRENGTH,
+                    SHADOW_MIN_BIAS,
+                    SHADOW_SLOPE_BIAS,
+                ],
+            }]),
+        );
 
         // ── Upload uniforms ───────────────────────────────────────────────── //
         self.queue.write_buffer(
@@ -353,6 +410,68 @@ impl State {
             hiz_size_f,
             [self.config.width as f32, self.config.height as f32],
         );
+        if sun_shadows_active {
+            let light_frustum_planes = extract_frustum_planes(&light_view_proj);
+            let light_frustum_planes_array = frustum_planes_to_array(&light_frustum_planes);
+            self.indirect_manager.dispatch_shadow_culling(
+                &mut encoder,
+                &self.queue,
+                &light_view_proj,
+                &light_frustum_planes_array,
+            );
+        }
+
+        // ── Sun shadow depth pass ─────────────────────────────────────────── //
+        // Build a compact light-space depth map before terrain shading samples it.
+        if sun_shadows_active {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Sun Shadow Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &self.shadow_pass_bind_group, &[]);
+            if self.indirect_manager.active_count() > 0 {
+                shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
+                shadow_pass.set_index_buffer(
+                    self.indirect_manager.index_buffer().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                if self.supports_indirect_count {
+                    shadow_pass.multi_draw_indexed_indirect_count(
+                        self.indirect_manager.shadow_draw_commands(),
+                        0,
+                        self.indirect_manager.shadow_visible_count_buffer(),
+                        0,
+                        self.indirect_manager.active_count(),
+                    );
+                } else {
+                    shadow_pass.multi_draw_indexed_indirect(
+                        self.indirect_manager.shadow_draw_commands(),
+                        0,
+                        self.indirect_manager.active_count(),
+                    );
+                }
+            }
+            if self.player_model_num_indices > 0 {
+                if let (Some(vb), Some(ib)) = (
+                    &self.player_model_vertex_buffer,
+                    &self.player_model_index_buffer,
+                ) {
+                    shadow_pass.set_vertex_buffer(0, vb.slice(..));
+                    shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    shadow_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
+                }
+            }
+        }
 
         // ── Terrain depth prepass ─────────────────────────────────────────── //
         // Fill the MSAA depth buffer first so we can resolve it for Hi-Z.
@@ -487,6 +606,7 @@ impl State {
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
             opaque_pass.set_index_buffer(
                 self.indirect_manager.index_buffer().slice(..),
@@ -518,6 +638,7 @@ impl State {
                 ) {
                     opaque_pass.set_pipeline(&self.render_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     opaque_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
