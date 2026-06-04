@@ -14,6 +14,11 @@ const BLEND_BUF_LEN: usize = BLEND_BUF_SIZE * BLEND_BUF_SIZE;
 const TERRAIN_WARP_FREQ: f32 = 0.005;
 const TERRAIN_WARP_Z_OFFSET: f32 = 200.0;
 const TERRAIN_WARP_AMPLITUDE: f32 = 72.0;
+const RIVER_THRESHOLD_MIN: f32 = 0.875;
+const RIVER_THRESHOLD_MAX: f32 = 0.935;
+const LAKE_THRESHOLD: f32 = -0.69;
+const VALLEY_CUT_DEPTH: f64 = 16.0;
+const PLATEAU_TERRACE_STEP: f64 = 4.0;
 
 static CONTINENTAL_SPLINE: Lazy<TerrainSpline> = Lazy::new(TerrainSpline::continental);
 static EROSION_SPLINE: Lazy<TerrainSpline> = Lazy::new(TerrainSpline::erosion);
@@ -58,6 +63,7 @@ struct TerrainNoiseSample {
     temperature: f32,
     moisture: f32,
     river_value: f32,
+    river_threshold: f32,
     lake: f32,
     island: f32,
     erosion: f64,
@@ -65,6 +71,10 @@ struct TerrainNoiseSample {
     ridged: f64,
     peaks_valleys: f64,
     biome_peaks_valleys: f32,
+    weirdness: f64,
+    plateau: f64,
+    valley: f64,
+    vegetation: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -97,16 +107,21 @@ struct ColumnSample {
 /// | `noise_detail` | Fine surface noise | 0.018 | FBm |
 /// | `noise_temperature` | Biome temperature axis | 0.006 | Simplex |
 /// | `noise_moisture` | Biome moisture axis | 0.008 | Simplex |
-/// | `noise_river` | River channel carving | 0.055 | Simplex |
+/// | `noise_river` | River centerline carving | 0.055 | Simplex |
 /// | `noise_lake` | Lake basin placement | 0.022 | Simplex |
 /// | `noise_trees` | Tree/vegetation density | 0.12 | Simplex |
 /// | `noise_island` | Ocean island elevation | 0.045 | Simplex |
-/// | `noise_cave1/2/3` | 3-D cave volumes | 0.045/0.032/0.038 | 3-D Simplex |
+/// | `noise_cave1/2/3` | 3-D cave volumes | 0.025/0.019/0.013 | 3-D Simplex |
 /// | `noise_erosion` | Erosion multiplier for slopes | 0.004 | FBm |
 /// | `noise_warp_x/z` | Domain warp for terrain/biomes | 0.005 | FBm |
 /// | `noise_ridged` | Ridged mountain peaks | 0.009 | Ridged FBm |
 /// | `noise_pv` | Peaks-and-valleys offset | 0.004 | FBm |
-/// | `noise_decor` | Decoration placement (reserved) | 0.15 | Simplex |
+/// | `noise_weirdness` | Rare regional variation | 0.0035 | FBm |
+/// | `noise_plateau` | Plateaus and terraces | 0.004 | FBm |
+/// | `noise_valley` | Broad valley carving | 0.003 | FBm |
+/// | `noise_river_width` | River width modulation | 0.0025 | FBm |
+/// | `noise_vegetation` | Tree clusters and shrubs | 0.045 | Simplex |
+/// | `noise_decor` | Clearings and small structure placement | 0.13 | Simplex |
 /// | `noise_cave_warp_x/z` | Domain warp inside caves | 0.018 | FBm |
 /// | `noise_surface_entrance` | Surface cave-entrance detection | 0.025 | FBm |
 pub struct ChunkGenerator {
@@ -127,6 +142,11 @@ pub struct ChunkGenerator {
     noise_warp_z: FastNoiseLite,
     noise_ridged: FastNoiseLite,
     noise_pv: FastNoiseLite,
+    noise_weirdness: FastNoiseLite,
+    noise_plateau: FastNoiseLite,
+    noise_valley: FastNoiseLite,
+    noise_river_width: FastNoiseLite,
+    noise_vegetation: FastNoiseLite,
     #[allow(dead_code)]
     noise_decor: FastNoiseLite,
     noise_ore: FastNoiseLite,
@@ -159,6 +179,11 @@ impl ChunkGenerator {
             noise_warp_z: Self::create_fbm_noise(seed.wrapping_add(21), 0.005),
             noise_ridged: Self::create_ridged_noise(seed.wrapping_add(22), 0.006),
             noise_pv: Self::create_fbm_noise(seed.wrapping_add(23), 0.005),
+            noise_weirdness: Self::create_fbm_noise(seed.wrapping_add(26), 0.0035),
+            noise_plateau: Self::create_fbm_noise(seed.wrapping_add(27), 0.004),
+            noise_valley: Self::create_fbm_noise(seed.wrapping_add(28), 0.003),
+            noise_river_width: Self::create_fbm_noise(seed.wrapping_add(29), 0.0025),
+            noise_vegetation: Self::create_noise(seed.wrapping_add(32), 0.045),
             noise_decor: Self::create_noise(seed.wrapping_add(24), 0.13),
             noise_ore: Self::create_3d_noise(seed.wrapping_add(25), 0.065),
             noise_cave_warp_x: Self::create_fbm_noise(seed.wrapping_add(30), 0.0218),
@@ -554,6 +579,14 @@ impl ChunkGenerator {
         let (wx, wz) = self.terrain_warp(x, z);
         let biome_continental = self.noise_continents.get_noise_2d(wx * 0.0018, wz * 0.0018);
         let river_noise = self.noise_river.get_noise_2d(wx * 0.055, wz * 0.055);
+        let river_width = self
+            .noise_river_width
+            .get_noise_2d(wx * 0.0025 + 250.0, wz * 0.0025 - 250.0);
+        let river_threshold = lerp(
+            RIVER_THRESHOLD_MIN as f64,
+            RIVER_THRESHOLD_MAX as f64,
+            ((river_width as f64 + 1.0) * 0.5).clamp(0.0, 1.0),
+        ) as f32;
 
         TerrainNoiseSample {
             wx,
@@ -565,6 +598,7 @@ impl ChunkGenerator {
             temperature: self.noise_temperature.get_noise_2d(wx * 0.006, wz * 0.006),
             moisture: self.noise_moisture.get_noise_2d(wx * 0.008, wz * 0.008),
             river_value: 1.0 - river_noise.abs() * 2.0,
+            river_threshold,
             lake: self.noise_lake.get_noise_2d(wx * 0.022, wz * 0.022),
             island: self.noise_island.get_noise_2d(wx * 0.045, wz * 0.045),
             erosion: self.noise_erosion.get_noise_2d(wx, wz) as f64,
@@ -572,34 +606,53 @@ impl ChunkGenerator {
             ridged: self.noise_ridged.get_noise_2d(wx, wz) as f64,
             peaks_valleys: self.noise_pv.get_noise_2d(wx, wz) as f64,
             biome_peaks_valleys: self.noise_pv.get_noise_2d(wx * 0.004, wz * 0.004),
+            weirdness: self.noise_weirdness.get_noise_2d(wx, wz) as f64,
+            plateau: self.noise_plateau.get_noise_2d(wx, wz) as f64,
+            valley: self.noise_valley.get_noise_2d(wx, wz) as f64,
+            vegetation: self
+                .noise_vegetation
+                .get_noise_2d(wx * 0.045 + 500.0, wz * 0.045 - 500.0),
         }
     }
 
     fn classify_biome(&self, noise: &TerrainNoiseSample) -> Biome {
-        if noise.river_value > 0.90 && noise.biome_continental > -0.25 {
+        if noise.river_value > noise.river_threshold && noise.biome_continental > -0.28 {
             return Biome::River;
         }
 
-        if noise.lake < -0.66 && noise.biome_continental > -0.15 {
+        if noise.lake < LAKE_THRESHOLD
+            && noise.biome_continental > -0.12
+            && noise.biome_erosion > -0.35
+        {
             return Biome::Lake;
         }
 
         if noise.biome_continental < -0.42 {
-            if noise.island > 0.62 {
+            if noise.island > 0.58 && noise.weirdness > -0.45 {
                 return Biome::Island;
             }
             return Biome::Ocean;
         }
 
-        if noise.biome_continental < -0.18 {
+        if noise.biome_continental < -0.18
+            || (noise.biome_continental < -0.08 && noise.weirdness < -0.55)
+        {
             return Biome::Beach;
         }
 
         if noise.biome_peaks_valleys > 0.32
             && noise.biome_erosion < 0.25
-            && noise.biome_continental > 0.0
+            && noise.biome_continental > -0.02
         {
             return Biome::Mountains;
+        }
+
+        if noise.plateau > 0.52 && noise.biome_continental > 0.08 && noise.moisture < 0.05 {
+            return if noise.temperature > 0.18 {
+                Biome::Desert
+            } else {
+                Biome::Plains
+            };
         }
 
         if noise.temperature < -0.3 {
@@ -619,7 +672,7 @@ impl ChunkGenerator {
             return Biome::Swamp;
         }
 
-        if noise.moisture > -0.05 {
+        if noise.moisture > -0.05 || (noise.vegetation > 0.35 && noise.moisture > -0.25) {
             return Biome::Forest;
         }
 
@@ -652,7 +705,7 @@ impl ChunkGenerator {
         let wx = noise.wx;
         let wz = noise.wz;
 
-        match biome {
+        let base_height = match biome {
             Biome::Ocean => {
                 let depth = 20.0 + (noise.continental + 1.0) * 0.5 * 18.0;
                 depth + detail * 2.5
@@ -660,16 +713,20 @@ impl ChunkGenerator {
             Biome::River => {
                 let floodplain =
                     cont_height.max(65.0) + terrain * 4.0 * erosion_mult + detail * 1.5;
-                let channel = ((noise.river_value as f64 - 0.93) / 0.07).clamp(0.0, 1.0);
-                let river_floor = (SEA_LEVEL - 4) as f64 + detail * 1.25;
+                let channel = self.river_channel_strength(noise);
+                let river_floor = (SEA_LEVEL - 5) as f64 + detail * 1.25;
                 lerp(floodplain, river_floor, smoothstep(channel)).min((SEA_LEVEL - 2) as f64)
             }
-            Biome::Lake => (SEA_LEVEL - 5) as f64 + detail * 2.0,
+            Biome::Lake => {
+                let basin = ((LAKE_THRESHOLD as f64 - noise.lake as f64) / 0.22).clamp(0.0, 1.0);
+                (SEA_LEVEL - 3) as f64 - smoothstep(basin) * 8.0 + detail * 1.35
+            }
             Biome::Beach => SEA_LEVEL as f64 + terrain * 3.5 * erosion_mult + detail * 1.5,
             Biome::Island => {
-                let island_h = (noise.island as f64 + 1.0) * 0.5 * 28.0;
-                (SEA_LEVEL as f64 + island_h + terrain * 4.0 * erosion_mult + detail * 3.0)
-                    .max(SEA_LEVEL as f64 - 3.0)
+                let island_core = smoothstep(((noise.island as f64 + 1.0) * 0.5 - 0.55) / 0.35);
+                let island_h = island_core * 36.0;
+                (SEA_LEVEL as f64 - 2.0 + island_h + terrain * 4.0 * erosion_mult + detail * 3.0)
+                    .max(SEA_LEVEL as f64 - 4.0)
             }
             Biome::Plains => {
                 let rolling = self.noise_terrain.get_noise_2d(wx * 0.012, wz * 0.012) as f64;
@@ -677,22 +734,24 @@ impl ChunkGenerator {
             }
             Biome::Forest => {
                 let hills = self.noise_terrain.get_noise_2d(wx * 0.010, wz * 0.010) as f64;
-                cont_height.max(67.0) + terrain * 9.0 * erosion_mult + hills * 7.0 + detail * 4.0
+                cont_height.max(67.0) + terrain * 8.0 * erosion_mult + hills * 6.0 + detail * 3.5
             }
             Biome::Desert => {
                 let dune = self.noise_detail.get_noise_2d(wx * 0.022, wz * 0.022) as f64;
                 let dune_h = (dune + 1.0) * 0.5 * 12.0;
-                62.0 + terrain * 7.0 * erosion_mult + dune_h + detail * 3.0
+                let mesa = self.plateau_strength(noise);
+                62.0 + terrain * 6.0 * erosion_mult + dune_h * (1.0 - mesa * 0.45) + detail * 2.5
             }
             Biome::Tundra => {
                 let frozen = self.noise_terrain.get_noise_2d(wx * 0.009, wz * 0.009) as f64;
-                66.0 + terrain * 9.0 * erosion_mult + frozen * 6.0 + detail * 3.5
+                66.0 + terrain * 7.0 * erosion_mult + frozen * 5.0 + detail * 3.0
             }
             Biome::Mountains => {
                 // ridge_strength is attenuated by erosion so highly-eroded
                 // slopes don't form sheer cliffs at biome boundaries.
-                let ridge_raw = ((noise.ridged + 1.0) * 0.5).powf(1.8) * 80.0;
-                let ridge_strength = ridge_raw * (1.0 - erosion_mult.min(0.8));
+                let ridge_raw = ((noise.ridged + 1.0) * 0.5).powf(1.85) * 92.0;
+                let erosion_flatness = ((noise.biome_erosion as f64 + 1.0) * 0.5).clamp(0.0, 1.0);
+                let ridge_strength = ridge_raw * (1.0 - erosion_flatness * 0.45);
                 let base = cont_height.max(80.0);
                 base + ridge_strength
                     + pv_offset.max(0.0) * 0.6
@@ -703,7 +762,93 @@ impl ChunkGenerator {
                 let lumps = self.noise_detail.get_noise_2d(wx * 0.035, wz * 0.035) as f64;
                 SEA_LEVEL as f64 + 1.5 + terrain * 2.5 * erosion_mult + lumps * 2.5 + detail * 1.0
             }
+        };
+
+        self.apply_landform_modifiers(base_height, biome, noise)
+    }
+
+    fn river_channel_strength(&self, noise: &TerrainNoiseSample) -> f64 {
+        let threshold = noise.river_threshold as f64;
+        ((noise.river_value as f64 - threshold) / (1.0 - threshold).max(0.001)).clamp(0.0, 1.0)
+    }
+
+    fn valley_strength(&self, noise: &TerrainNoiseSample) -> f64 {
+        let raw_valley = ((noise.valley + 1.0) * 0.5).clamp(0.0, 1.0);
+        let land_factor = ((noise.biome_continental as f64 + 0.08) / 0.48).clamp(0.0, 1.0);
+        let mountain_factor =
+            smoothstep((noise.biome_peaks_valleys as f64 - 0.24) / 0.42).clamp(0.0, 1.0);
+
+        smoothstep((raw_valley - 0.54) / 0.30) * land_factor * (1.0 - mountain_factor * 0.45)
+    }
+
+    fn plateau_strength(&self, noise: &TerrainNoiseSample) -> f64 {
+        let raw_plateau = ((noise.plateau + 1.0) * 0.5).clamp(0.0, 1.0);
+        let land_factor = ((noise.biome_continental as f64 + 0.02) / 0.42).clamp(0.0, 1.0);
+        let eroded_flatness = ((noise.biome_erosion as f64 + 1.0) * 0.5).clamp(0.0, 1.0);
+
+        smoothstep((raw_plateau - 0.58) / 0.32)
+            * smoothstep((eroded_flatness - 0.35) / 0.45)
+            * land_factor
+    }
+
+    fn terrace_height(&self, height: f64, step: f64) -> f64 {
+        (height / step).round() * step
+    }
+
+    fn apply_landform_modifiers(
+        &self,
+        height: f64,
+        biome: Biome,
+        noise: &TerrainNoiseSample,
+    ) -> f64 {
+        if matches!(
+            biome,
+            Biome::Ocean | Biome::River | Biome::Lake | Biome::Beach
+        ) {
+            return height;
         }
+
+        let mut adjusted = height;
+        let valley = self.valley_strength(noise);
+        if valley > 0.0 {
+            let biome_cut = match biome {
+                Biome::Mountains => 0.45,
+                Biome::Island => 0.35,
+                Biome::Swamp => 0.25,
+                Biome::Desert => 0.85,
+                _ => 1.0,
+            };
+            adjusted -= valley * VALLEY_CUT_DEPTH * biome_cut;
+        }
+
+        let plateau = self.plateau_strength(noise);
+        if plateau > 0.0 && adjusted > SEA_LEVEL as f64 + 8.0 {
+            let step = if matches!(biome, Biome::Mountains) {
+                PLATEAU_TERRACE_STEP + 2.0
+            } else {
+                PLATEAU_TERRACE_STEP
+            };
+            let terraced = self.terrace_height(adjusted, step);
+            adjusted = lerp(adjusted, terraced, (plateau * 0.68).clamp(0.0, 0.78));
+
+            if matches!(biome, Biome::Desert | Biome::Plains) {
+                adjusted = lerp(
+                    adjusted,
+                    adjusted.max(SEA_LEVEL as f64 + 12.0),
+                    plateau * 0.28,
+                );
+            }
+        }
+
+        if biome == Biome::Swamp {
+            adjusted = lerp(
+                adjusted,
+                adjusted.clamp(SEA_LEVEL as f64 - 1.0, SEA_LEVEL as f64 + 5.0),
+                0.70,
+            );
+        }
+
+        adjusted
     }
 
     // ── Cave system ───────────────────────────────────────────────────────── //
@@ -992,8 +1137,6 @@ impl ChunkGenerator {
                     BlockType::Stone
                 } else if depth_from_surface > 2 {
                     BlockType::Gravel
-                } else if surface_hash % 11 == 0 {
-                    BlockType::Clay
                 } else {
                     BlockType::Sand
                 }
@@ -1006,8 +1149,6 @@ impl ChunkGenerator {
                 } else if y == surface_height - 1 {
                     if underwater_surface {
                         BlockType::Sand
-                    } else if steep_surface && surface_hash % 3 == 0 {
-                        BlockType::Gravel
                     } else if biome == Biome::Island && y > SEA_LEVEL + 2 {
                         BlockType::Grass
                     } else {
@@ -1178,18 +1319,51 @@ impl ChunkGenerator {
                 let biome = biome_map[lx as usize][lz as usize];
                 let height = height_map[lx as usize][lz as usize];
                 let hash = self.position_hash(world_x, world_z);
+                let vegetation = self
+                    .noise_vegetation
+                    .get_noise_2d(world_x as f32 + 1000.0, world_z as f32 - 1000.0);
+                let clearing = self
+                    .noise_decor
+                    .get_noise_2d(world_x as f32 * 0.025 + 2000.0, world_z as f32 * 0.025);
 
                 if height <= SEA_LEVEL || height >= WORLD_HEIGHT - 12 {
                     continue;
+                }
+
+                if matches!(biome, Biome::Mountains | Biome::Tundra)
+                    && height > SEA_LEVEL + 12
+                    && hash % 100 < 5
+                {
+                    let ground = chunk.get_block(lx, height - 1, lz);
+                    if matches!(
+                        ground,
+                        BlockType::Grass | BlockType::Stone | BlockType::Snow
+                    ) {
+                        self.place_boulder(chunk, lx, height, lz, world_x, world_z);
+                    }
+                }
+
+                if matches!(biome, Biome::Forest | Biome::Swamp)
+                    && vegetation > 0.30
+                    && hash % 100 < 3
+                {
+                    let ground = chunk.get_block(lx, height - 1, lz);
+                    if matches!(ground, BlockType::Grass | BlockType::Dirt | BlockType::Clay) {
+                        self.place_fallen_log(chunk, lx, height, lz, world_x, world_z);
+                    }
                 }
 
                 if biome.has_trees() {
                     let tree_noise = self
                         .noise_trees
                         .get_noise_2d(world_x as f32, world_z as f32);
-                    let density_threshold = biome.tree_density() as f32;
+                    let clearing_penalty = clearing.abs() * 0.16;
+                    let density_threshold = (biome.tree_density() as f32 - vegetation * 0.12
+                        + clearing_penalty)
+                        .clamp(0.35, 0.95);
+                    let tree_roll = tree_noise + vegetation * 0.18 - clearing_penalty;
 
-                    if tree_noise > density_threshold {
+                    if tree_roll > density_threshold {
                         if hash % 100 < 18 {
                             let ground = chunk.get_block(lx, height - 1, lz);
                             if matches!(ground, BlockType::Grass | BlockType::Dirt) {
@@ -1205,16 +1379,20 @@ impl ChunkGenerator {
                     }
                 }
 
+                if biome == Biome::Beach && hash % 100 < 4 {
+                    let ground = chunk.get_block(lx, height - 1, lz);
+                    if ground == BlockType::Sand {
+                        if hash % 3 == 0 {
+                            self.place_fallen_log(chunk, lx, height, lz, world_x, world_z);
+                        }
+                    }
+                }
+
                 if biome == Biome::Desert {
                     if hash % 100 < 3 {
                         let ground = chunk.get_block(lx, height - 1, lz);
                         if ground == BlockType::Sand {
                             self.place_cactus(chunk, lx, height, lz, world_x, world_z);
-                        }
-                    } else if hash % 100 < 10 {
-                        let ground = chunk.get_block(lx, height - 1, lz);
-                        if ground == BlockType::Sand && height < WORLD_HEIGHT - 1 {
-                            chunk.set_block_raw(lx, height, lz, BlockType::DeadBush);
                         }
                     }
                 }
@@ -1243,6 +1421,18 @@ impl ChunkGenerator {
         let ground_block = chunk.get_block(lx, y - 1, lz);
         if !matches!(ground_block, BlockType::Grass | BlockType::Dirt) {
             return false;
+        }
+
+        let required_height = if is_large { 9 } else { 7 };
+        for dy in 0..=required_height {
+            let check_y = y + dy;
+            if check_y >= WORLD_HEIGHT {
+                return false;
+            }
+            let block = chunk.get_block(lx, check_y, lz);
+            if !matches!(block, BlockType::Air | BlockType::Leaves) {
+                return false;
+            }
         }
 
         for dx in -1..=1 {
@@ -1280,7 +1470,10 @@ impl ChunkGenerator {
                     if check_y < 0 || check_y >= WORLD_HEIGHT {
                         continue;
                     }
-                    if chunk.get_block(check_x, check_y, check_z) == BlockType::Wood {
+                    if matches!(
+                        chunk.get_block(check_x, check_y, check_z),
+                        BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ
+                    ) {
                         return false;
                     }
                 }
@@ -1382,6 +1575,175 @@ impl ChunkGenerator {
         }
     }
 
+    fn place_boulder(
+        &self,
+        chunk: &mut Chunk,
+        lx: i32,
+        y: i32,
+        lz: i32,
+        world_x: i32,
+        world_z: i32,
+    ) {
+        let hash = self.position_hash(world_x, world_z);
+        let radius = if hash % 5 == 0 { 2 } else { 1 };
+        let radius_sq = (radius * radius) as f32 + 0.35;
+
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                for dy in 0..=radius {
+                    let nx = lx + dx;
+                    let ny = y + dy;
+                    let nz = lz + dz;
+                    if nx < 0 || nx >= CHUNK_SIZE || nz < 0 || nz >= CHUNK_SIZE {
+                        continue;
+                    }
+                    if ny <= 0 || ny >= WORLD_HEIGHT {
+                        continue;
+                    }
+
+                    let dist = (dx * dx + dz * dz) as f32 + (dy as f32 * 1.35).powi(2);
+                    if dist > radius_sq {
+                        continue;
+                    }
+
+                    let existing = chunk.get_block(nx, ny, nz);
+                    if matches!(existing, BlockType::Air | BlockType::Leaves) {
+                        let hash3 = self.position_hash_3d(world_x + dx, ny, world_z + dz);
+                        let block = if hash3 % 7 == 0 {
+                            BlockType::Gravel
+                        } else {
+                            BlockType::Stone
+                        };
+                        chunk.set_block_raw(nx, ny, nz, block);
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_fallen_log(
+        &self,
+        chunk: &mut Chunk,
+        lx: i32,
+        y: i32,
+        lz: i32,
+        world_x: i32,
+        world_z: i32,
+    ) {
+        let hash = self.position_hash(world_x, world_z);
+        let length = 3 + (hash % 3) as i32;
+        let (step_x, step_z) = if hash & 1 == 0 { (1, 0) } else { (0, 1) };
+        let start = -(length / 2);
+
+        if self.fallen_log_collides_with_tree(chunk, lx, y, lz, length, step_x, step_z) {
+            return;
+        }
+
+        for i in 0..length {
+            let offset = start + i;
+            let nx = lx + step_x * offset;
+            let nz = lz + step_z * offset;
+            if nx <= 0 || nx >= CHUNK_SIZE - 1 || nz <= 0 || nz >= CHUNK_SIZE - 1 {
+                return;
+            }
+
+            let ground = chunk.get_block(nx, y - 1, nz);
+            let target = chunk.get_block(nx, y, nz);
+            if !matches!(
+                ground,
+                BlockType::Grass | BlockType::Dirt | BlockType::Clay | BlockType::Sand
+            ) || target != BlockType::Air
+            {
+                return;
+            }
+        }
+
+        for i in 0..length {
+            let offset = start + i;
+            let nx = lx + step_x * offset;
+            let nz = lz + step_z * offset;
+            let log_block = if step_x != 0 {
+                BlockType::WoodLogX
+            } else {
+                BlockType::WoodLogZ
+            };
+            chunk.set_block_raw(nx, y, nz, log_block);
+
+            let ground = chunk.get_block(nx, y - 1, nz);
+            if matches!(ground, BlockType::Grass | BlockType::Dirt | BlockType::Clay)
+                && self.position_hash_3d(world_x + step_x * offset, y, world_z + step_z * offset)
+                    % 3
+                    == 0
+            {
+                let side_x = if step_x == 0 { 1 } else { 0 };
+                let side_z = if step_z == 0 { 1 } else { 0 };
+                for side in [-1, 1] {
+                    let sx = nx + side_x * side;
+                    let sz = nz + side_z * side;
+                    if sx >= 0
+                        && sx < CHUNK_SIZE
+                        && sz >= 0
+                        && sz < CHUNK_SIZE
+                        && chunk.get_block(sx, y, sz) == BlockType::Air
+                    {
+                        chunk.set_block_raw(sx, y, sz, BlockType::Leaves);
+                    }
+                }
+            }
+        }
+    }
+
+    fn fallen_log_collides_with_tree(
+        &self,
+        chunk: &Chunk,
+        lx: i32,
+        y: i32,
+        lz: i32,
+        length: i32,
+        step_x: i32,
+        step_z: i32,
+    ) -> bool {
+        let start = -(length / 2);
+        let side_x = if step_x == 0 { 1 } else { 0 };
+        let side_z = if step_z == 0 { 1 } else { 0 };
+
+        for i in 0..length {
+            let offset = start + i;
+            let nx = lx + step_x * offset;
+            let nz = lz + step_z * offset;
+
+            for side in -2..=2 {
+                for dy in 0..=7 {
+                    let check_x = nx + side_x * side;
+                    let check_y = y + dy;
+                    let check_z = nz + side_z * side;
+
+                    if check_x < 0
+                        || check_x >= CHUNK_SIZE
+                        || check_y < 0
+                        || check_y >= WORLD_HEIGHT
+                        || check_z < 0
+                        || check_z >= CHUNK_SIZE
+                    {
+                        continue;
+                    }
+
+                    if matches!(
+                        chunk.get_block(check_x, check_y, check_z),
+                        BlockType::Wood
+                            | BlockType::WoodLogX
+                            | BlockType::WoodLogZ
+                            | BlockType::Leaves
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     // ── Hash functions ────────────────────────────────────────────────────── //
 
     fn position_hash(&self, x: i32, z: i32) -> u32 {
@@ -1417,4 +1779,181 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 fn smoothstep(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_seed_generates_identical_chunk_blocks() {
+        let first = ChunkGenerator::new(42).generate_chunk(2, -3);
+        let second = ChunkGenerator::new(42).generate_chunk(2, -3);
+
+        for x in 0..CHUNK_SIZE {
+            for y in 0..WORLD_HEIGHT {
+                for z in 0..CHUNK_SIZE {
+                    assert_eq!(first.get_block(x, y, z), second.get_block(x, y, z));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terrain_height_queries_stay_inside_world_bounds() {
+        let generator = ChunkGenerator::new(2026);
+        let points = [(0, 0), (31, -17), (-128, 256), (1024, -1024), (-4096, 2048)];
+
+        for (x, z) in points {
+            let height = generator.get_terrain_height_pub(x, z);
+            assert!((1..=WORLD_HEIGHT - 20).contains(&height));
+        }
+    }
+
+    #[test]
+    fn generated_chunk_metadata_matches_opaque_columns() {
+        let chunk = ChunkGenerator::new(1337).generate_chunk(0, 0);
+
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let expected = (0..WORLD_HEIGHT)
+                    .rev()
+                    .find(|&y| chunk.get_block(x, y, z).is_solid_opaque())
+                    .map(|y| y as i16)
+                    .unwrap_or(-1);
+
+                assert_eq!(chunk.highest_opaque_y(x, z), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn sandy_surfaces_do_not_get_single_gravel_or_clay_speckles() {
+        let generator = ChunkGenerator::new(90_210);
+
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                let chunk = generator.generate_chunk(cx, cz);
+
+                for x in 0..CHUNK_SIZE {
+                    for y in 1..(WORLD_HEIGHT - 1) {
+                        for z in 0..CHUNK_SIZE {
+                            let block = chunk.get_block(x, y, z);
+                            if !matches!(block, BlockType::Gravel | BlockType::Clay) {
+                                continue;
+                            }
+
+                            let below = chunk.get_block(x, y - 1, z);
+                            let above = chunk.get_block(x, y + 1, z);
+                            assert!(
+                                !(below == BlockType::Sand
+                                    && matches!(above, BlockType::Air | BlockType::Water)),
+                                "visible {:?} speckle on sand at chunk ({}, {}), local ({}, {}, {})",
+                                block,
+                                cx,
+                                cz,
+                                x,
+                                y,
+                                z
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decorations_do_not_generate_shrubs() {
+        let generator = ChunkGenerator::new(12);
+
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                let chunk = generator.generate_chunk(cx, cz);
+
+                for x in 0..CHUNK_SIZE {
+                    for y in 0..WORLD_HEIGHT {
+                        for z in 0..CHUNK_SIZE {
+                            assert_ne!(chunk.get_block(x, y, z), BlockType::DeadBush);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fallen_logs_use_axis_specific_blocks_and_textures() {
+        assert_eq!(BlockType::WoodLogX.tex_for_face(0), TEX_WOOD_TOP);
+        assert_eq!(BlockType::WoodLogX.tex_for_face(1), TEX_WOOD_TOP);
+        assert_eq!(BlockType::WoodLogX.tex_for_face(4), TEX_WOOD_SIDE);
+        assert_eq!(BlockType::WoodLogZ.tex_for_face(4), TEX_WOOD_TOP);
+        assert_eq!(BlockType::WoodLogZ.tex_for_face(5), TEX_WOOD_TOP);
+        assert_eq!(BlockType::WoodLogZ.tex_for_face(0), TEX_WOOD_SIDE);
+
+        let generator = ChunkGenerator::new(77);
+        let mut chunk = Chunk::new(0, 0);
+        let y = 70;
+
+        for x in 1..(CHUNK_SIZE - 1) {
+            for z in 1..(CHUNK_SIZE - 1) {
+                chunk.set_block_raw(x, y - 1, z, BlockType::Dirt);
+            }
+        }
+
+        generator.place_fallen_log(&mut chunk, 8, y, 8, 8, 8);
+
+        let expected_log = if generator.position_hash(8, 8) & 1 == 0 {
+            BlockType::WoodLogX
+        } else {
+            BlockType::WoodLogZ
+        };
+        let mut oriented_logs = 0;
+
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                if chunk.get_block(x, y, z) == expected_log {
+                    oriented_logs += 1;
+                }
+                assert_ne!(chunk.get_block(x, y, z), BlockType::Wood);
+            }
+        }
+
+        assert!(oriented_logs >= 3);
+    }
+
+    #[test]
+    fn fallen_logs_do_not_cut_through_existing_trees() {
+        let generator = ChunkGenerator::new(77);
+        let mut chunk = Chunk::new(0, 0);
+        let y = 70;
+
+        for x in 1..(CHUNK_SIZE - 1) {
+            for z in 1..(CHUNK_SIZE - 1) {
+                chunk.set_block_raw(x, y - 1, z, BlockType::Dirt);
+            }
+        }
+
+        for dy in 0..5 {
+            chunk.set_block_raw(8, y + dy, 8, BlockType::Wood);
+        }
+        chunk.set_block_raw(9, y + 3, 8, BlockType::Leaves);
+
+        generator.place_fallen_log(&mut chunk, 8, y, 8, 8, 8);
+
+        let mut fallen_logs = 0;
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                if matches!(
+                    chunk.get_block(x, y, z),
+                    BlockType::WoodLogX | BlockType::WoodLogZ
+                ) {
+                    fallen_logs += 1;
+                }
+            }
+        }
+
+        assert_eq!(fallen_logs, 0);
+        assert_eq!(chunk.get_block(8, y, 8), BlockType::Wood);
+    }
 }

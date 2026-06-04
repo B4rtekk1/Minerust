@@ -11,21 +11,62 @@ use std::collections::BTreeMap;
 /// Maximum number of subchunks that can be tracked simultaneously.
 ///
 /// This follows the chunk unload radius instead of reserving for an arbitrary
-/// world-sized ceiling. With the default render settings this is 35 x 35 chunk
-/// columns x 16 vertical subchunks = 19,600 slots per terrain/water manager.
+/// world-sized ceiling. With the current render settings this is
+/// `(CHUNK_UNLOAD_DISTANCE * 2 + 1)^2` chunk columns times 16 vertical
+/// subchunks per manager.
 const MAX_CHUNK_COLUMNS: usize =
     (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1) * (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1);
 const MAX_SUBCHUNKS: usize = MAX_CHUNK_COLUMNS * NUM_SUBCHUNKS as usize;
 
-/// Geometry budget for the unified buffers.
+/// Default terrain geometry budget for the unified buffers.
 ///
 /// Greedy meshing keeps most subchunks far below these averages. If a pathological
 /// area exceeds the budget, upload_subchunk falls back to the existing cache clear
 /// and retry path instead of overflowing the GPU buffers.
-const VERTICES_PER_SUBCHUNK_BUDGET: usize = 384;
-const INDICES_PER_SUBCHUNK_BUDGET: usize = 768;
-const MAX_VERTICES: usize = MAX_SUBCHUNKS * VERTICES_PER_SUBCHUNK_BUDGET;
-const MAX_INDICES: usize = MAX_SUBCHUNKS * INDICES_PER_SUBCHUNK_BUDGET;
+const TERRAIN_VERTICES_PER_SUBCHUNK_BUDGET: usize = 384;
+const TERRAIN_INDICES_PER_SUBCHUNK_BUDGET: usize = 768;
+
+/// Water is meshed separately from terrain but normally needs far fewer faces
+/// per subchunk. Keeping a smaller water budget avoids duplicating the large
+/// terrain buffers while preserving the same render distance and culling range.
+const WATER_VERTICES_PER_SUBCHUNK_BUDGET: usize = 64;
+const WATER_INDICES_PER_SUBCHUNK_BUDGET: usize = 128;
+
+/// Geometry allocation policy for one [`IndirectManager`].
+#[derive(Clone, Copy, Debug)]
+pub struct IndirectBufferBudget {
+    label: &'static str,
+    vertices_per_subchunk: usize,
+    indices_per_subchunk: usize,
+}
+
+impl IndirectBufferBudget {
+    /// Budget used for opaque terrain geometry.
+    pub const TERRAIN: Self = Self {
+        label: "Terrain",
+        vertices_per_subchunk: TERRAIN_VERTICES_PER_SUBCHUNK_BUDGET,
+        indices_per_subchunk: TERRAIN_INDICES_PER_SUBCHUNK_BUDGET,
+    };
+
+    /// Budget used for water geometry.
+    pub const WATER: Self = Self {
+        label: "Water",
+        vertices_per_subchunk: WATER_VERTICES_PER_SUBCHUNK_BUDGET,
+        indices_per_subchunk: WATER_INDICES_PER_SUBCHUNK_BUDGET,
+    };
+
+    fn max_vertices(&self) -> usize {
+        MAX_SUBCHUNKS * self.vertices_per_subchunk
+    }
+
+    fn max_indices(&self) -> usize {
+        MAX_SUBCHUNKS * self.indices_per_subchunk
+    }
+
+    fn label(&self) -> &'static str {
+        self.label
+    }
+}
 
 /// GPU-side arguments for a single `draw_indexed_indirect` call.
 ///
@@ -178,6 +219,12 @@ pub struct IndirectManager {
     free_vertex_blocks: BTreeMap<u32, Vec<FreeBlock>>,
     /// Counts uploads/removals since the last free-list coalescing pass.
     coalesce_counter: usize,
+    /// Maximum vertex count reserved by this manager.
+    max_vertices: usize,
+    /// Maximum index count reserved by this manager.
+    max_indices: usize,
+    /// Short label used in logs.
+    label: &'static str,
 }
 
 impl IndirectManager {
@@ -186,16 +233,25 @@ impl IndirectManager {
     /// No geometry is uploaded at construction time; call [`upload_subchunk`]
     /// to populate the buffers before rendering.
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_budget(device, IndirectBufferBudget::TERRAIN)
+    }
+
+    /// Creates a new `IndirectManager` with a custom geometry budget.
+    pub fn with_budget(device: &wgpu::Device, budget: IndirectBufferBudget) -> Self {
+        let max_vertices = budget.max_vertices();
+        let max_indices = budget.max_indices();
+        let label = budget.label();
+
         let unified_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Unified Vertex Buffer"),
-            size: (MAX_VERTICES * size_of::<Vertex>()) as u64,
+            label: Some(&format!("{label} Unified Vertex Buffer")),
+            size: (max_vertices * size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let unified_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Unified Index Buffer"),
-            size: (MAX_INDICES * size_of::<u32>()) as u64,
+            label: Some(&format!("{label} Unified Index Buffer")),
+            size: (max_indices * size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -375,6 +431,9 @@ impl IndirectManager {
             cull_uniforms_buffer,
             hiz_sampler,
             coalesce_counter: 0,
+            max_vertices,
+            max_indices,
+            label,
         }
     }
 
@@ -512,12 +571,12 @@ impl IndirectManager {
                 (block.offset, true)
             }
             None => {
-                if self.next_vertex_offset + vertex_count > MAX_VERTICES as u32 {
+                if self.next_vertex_offset + vertex_count > self.max_vertices as u32 {
                     log(
                         LogLevel::Warning,
                         &format!(
-                            "Unified vertex buffer full ({}/{} vertices used), clearing indirect draw cache...",
-                            self.next_vertex_offset, MAX_VERTICES
+                            "{} unified vertex buffer full ({}/{} vertices used), clearing indirect draw cache...",
+                            self.label, self.next_vertex_offset, self.max_vertices
                         ),
                     );
                     self.clear_gpu_data(queue);
@@ -542,12 +601,12 @@ impl IndirectManager {
                 (block.offset, true)
             }
             None => {
-                if self.next_index_offset + index_count > MAX_INDICES as u32 {
+                if self.next_index_offset + index_count > self.max_indices as u32 {
                     log(
                         LogLevel::Warning,
                         &format!(
-                            "Unified index buffer full ({}/{} indices used), clearing indirect draw cache...",
-                            self.next_index_offset, MAX_INDICES
+                            "{} unified index buffer full ({}/{} indices used), clearing indirect draw cache...",
+                            self.label, self.next_index_offset, self.max_indices
                         ),
                     );
                     self.clear_gpu_data(queue);

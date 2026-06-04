@@ -337,8 +337,16 @@ impl State {
                 }
             }
 
-            for (px, py, pz, block_to_place) in write_ops.block_places {
+            for (px, py, pz, block_to_place) in std::mem::take(&mut write_ops.block_places) {
+                let covered_grass = block_to_place != BlockType::Air
+                    && py > 0
+                    && world.get_block(px, py - 1, pz) == BlockType::Grass;
+
                 world.set_block_player(px, py, pz, block_to_place);
+                if covered_grass {
+                    write_ops.mark_dirty.push((px, py - 1, pz));
+                }
+
                 if let Some(tx) = &self.network_tx {
                     let _ = tx.send(crate::multiplayer::protocol::Packet::BlockChange {
                         x: px,
@@ -346,6 +354,15 @@ impl State {
                         z: pz,
                         block_type: block_to_place as u8,
                     });
+
+                    if covered_grass {
+                        let _ = tx.send(crate::multiplayer::protocol::Packet::BlockChange {
+                            x: px,
+                            y: py - 1,
+                            z: pz,
+                            block_type: BlockType::Dirt as u8,
+                        });
+                    }
                 }
             }
 

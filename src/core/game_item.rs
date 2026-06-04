@@ -9,6 +9,8 @@ use std::collections::HashMap;
 /// # Example
 ///
 /// ```rust
+/// use minerust::core::game_item::get_item;
+///
 /// let item = get_item("minerust:stone").unwrap();
 /// assert_eq!(item.name, "Stone");
 /// assert!(item.stackable);
@@ -66,7 +68,7 @@ pub struct GameItem {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```ignore
 /// register_items! {
 ///     "minerust:stone"        => "Stone",        true,  64, None,       1;
 ///     "minerust:iron_pickaxe" => "Iron Pickaxe", false,  1, Some(250), 800;
@@ -108,6 +110,8 @@ macro_rules! register_items {
 /// # Example
 ///
 /// ```rust
+/// use minerust::core::game_item::get_item;
+///
 /// match get_item("minerust:stone") {
 ///     Some(item) => println!("Found: {} ({}g)", item.name, item.weight),
 ///     None       => println!("Unknown item"),
@@ -124,7 +128,7 @@ pub fn get_item(id: &str) -> Option<&'static GameItem> {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```ignore
 /// // Validate item ID from save data before deserialising
 /// if !item_exists(&save.item_id) {
 ///     return Err(SaveError::UnknownItem(save.item_id.clone()));

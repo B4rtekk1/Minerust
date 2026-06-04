@@ -38,7 +38,7 @@ struct SplinePoint {
 /// | [`peaks_valleys`] | `noise_pv` | Height offset added to mountain peaks. |
 ///
 /// # Usage
-/// ```rust
+/// ```ignore
 /// let spline = TerrainSpline::continental();
 /// let height = spline.sample(continent_noise); // → world-space Y
 /// ```
@@ -319,7 +319,7 @@ pub fn blend_heights(h1: f64, h2: f64, blend_factor: f64) -> f64 {
 /// `|noise_value − threshold| / blend_width`, clamped to `[0, 1]`.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// // 20% through the transition zone → weight = 0.2
 /// let w = biome_blend_weight(0.12, 0.10, 0.10); // dist = 0.02, width = 0.10
 /// ```

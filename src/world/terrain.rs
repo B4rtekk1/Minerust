@@ -310,6 +310,10 @@ impl World {
     /// initiated by player interaction (digging, placing).  Use [`set_block`]
     /// for programmatic changes (cave carving, world load restoration) that
     /// should not trigger save inclusion on their own.
+    ///
+    /// Placing any non-air block directly above grass immediately turns that
+    /// grass block into dirt, matching the covered-grass behavior players
+    /// expect from block placement.
     pub fn set_block_player(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
         if y < 0 || y >= WORLD_HEIGHT {
             return;
@@ -330,6 +334,13 @@ impl World {
         if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
             chunk.set_block(lx, y, lz, block);
             chunk.player_modified = true; // flag for save-on-F5
+        }
+
+        if block != BlockType::Air && y > 0 && self.get_block(x, y - 1, z) == BlockType::Grass {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                chunk.set_block(lx, y - 1, lz, BlockType::Dirt);
+                chunk.player_modified = true;
+            }
         }
     }
 
@@ -1086,7 +1097,7 @@ impl World {
                                     [x + 1.0, y_f + 1.0, z],
                                     [0.0, 1.0, 0.0],
                                     block.color(),
-                                    block.tex_top(),
+                                    block.tex_for_face(3),
                                     block.roughness(),
                                     block.metallic(),
                                 );
@@ -1122,11 +1133,7 @@ impl World {
                         let gi_tint = face_gi_tint(face_dir, world_x, y, world_z);
 
                         // Select the atlas texture index by face direction.
-                        let tex_index = match face_dir {
-                            2 => block.tex_bottom(),
-                            3 => block.tex_top(),
-                            _ => block.tex_side(),
-                        };
+                        let tex_index = block.tex_for_face(face_dir);
 
                         let idx = (d1 * dim2_size + d2) as usize;
                         mask[idx] = FaceAttrs {
@@ -1342,5 +1349,34 @@ impl World {
         }
 
         ((vertices, indices), (water_vertices, water_indices))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placing_player_block_on_grass_turns_support_to_dirt() {
+        let mut world = World::new_empty_with_seed(1);
+        world.chunks.insert((0, 0), Chunk::new(0, 0));
+
+        world.set_block(1, 10, 1, BlockType::Grass);
+        world.set_block_player(1, 11, 1, BlockType::Stone);
+
+        assert_eq!(world.get_block(1, 10, 1), BlockType::Dirt);
+        assert_eq!(world.get_block(1, 11, 1), BlockType::Stone);
+    }
+
+    #[test]
+    fn air_player_write_does_not_turn_grass_to_dirt() {
+        let mut world = World::new_empty_with_seed(1);
+        world.chunks.insert((0, 0), Chunk::new(0, 0));
+
+        world.set_block(1, 10, 1, BlockType::Grass);
+        world.set_block_player(1, 11, 1, BlockType::Air);
+
+        assert_eq!(world.get_block(1, 10, 1), BlockType::Grass);
+        assert_eq!(world.get_block(1, 11, 1), BlockType::Air);
     }
 }

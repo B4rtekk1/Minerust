@@ -43,6 +43,10 @@ pub enum BlockType {
     DeadBush,
     /// Wooden stair block. Transparent for culling purposes.
     WoodStairs,
+    /// Horizontal wood log aligned along the X axis.
+    WoodLogX,
+    /// Horizontal wood log aligned along the Z axis.
+    WoodLogZ,
 }
 
 impl BlockType {
@@ -58,7 +62,7 @@ impl BlockType {
             BlockType::Stone => [0.55, 0.55, 0.55],
             BlockType::Sand => [0.89, 0.83, 0.61],
             BlockType::Water => [0.25, 0.46, 0.82],
-            BlockType::Wood => [0.6, 0.4, 0.2],
+            BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => [0.6, 0.4, 0.2],
             BlockType::Leaves => [0.3, 0.6, 0.2],
             BlockType::Bedrock => [0.2, 0.2, 0.2],
             BlockType::Snow => [0.95, 0.95, 0.98],
@@ -171,7 +175,7 @@ impl BlockType {
             BlockType::Stone => 2.5,
             BlockType::Sand => 0.5,
             BlockType::Water => 0.0,
-            BlockType::Wood => 2.0,
+            BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => 2.0,
             BlockType::Leaves => 0.2,
             BlockType::Bedrock => f32::INFINITY,
             BlockType::Snow => 0.2,
@@ -197,6 +201,7 @@ impl BlockType {
             BlockType::Sand => TEX_SAND,
             BlockType::Water => TEX_WATER,
             BlockType::Wood => TEX_WOOD_TOP,
+            BlockType::WoodLogX | BlockType::WoodLogZ => TEX_WOOD_SIDE,
             BlockType::Leaves => TEX_LEAVES,
             BlockType::Bedrock => TEX_BEDROCK,
             BlockType::Snow => TEX_SNOW,
@@ -217,7 +222,7 @@ impl BlockType {
     pub fn tex_side(&self) -> f32 {
         match self {
             BlockType::Grass => TEX_GRASS_SIDE,
-            BlockType::Wood => TEX_WOOD_SIDE,
+            BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => TEX_WOOD_SIDE,
             _ => self.tex_top(),
         }
     }
@@ -231,8 +236,37 @@ impl BlockType {
         match self {
             BlockType::Grass => TEX_DIRT,
             BlockType::Wood => TEX_WOOD_TOP,
+            BlockType::WoodLogX | BlockType::WoodLogZ => TEX_WOOD_SIDE,
             BlockType::WoodStairs => TEX_WOOD_TOP,
             _ => self.tex_top(),
+        }
+    }
+
+    /// Returns the texture atlas index for a world face direction.
+    ///
+    /// Face directions match the terrain mesher: `0/1 = X`, `2/3 = Y`,
+    /// `4/5 = Z`. Horizontal logs use the cut texture only on their end axis.
+    pub fn tex_for_face(&self, face_dir: i32) -> f32 {
+        match self {
+            BlockType::WoodLogX => {
+                if matches!(face_dir, 0 | 1) {
+                    TEX_WOOD_TOP
+                } else {
+                    TEX_WOOD_SIDE
+                }
+            }
+            BlockType::WoodLogZ => {
+                if matches!(face_dir, 4 | 5) {
+                    TEX_WOOD_TOP
+                } else {
+                    TEX_WOOD_SIDE
+                }
+            }
+            _ => match face_dir {
+                2 => self.tex_bottom(),
+                3 => self.tex_top(),
+                _ => self.tex_side(),
+            },
         }
     }
 
@@ -250,7 +284,11 @@ impl BlockType {
             BlockType::Leaves => 0.5,
             BlockType::Snow => 0.8,
             BlockType::Ice | BlockType::Water => 0.1,
-            BlockType::Wood | BlockType::Cactus | BlockType::WoodStairs => 0.6,
+            BlockType::Wood
+            | BlockType::WoodLogX
+            | BlockType::WoodLogZ
+            | BlockType::Cactus
+            | BlockType::WoodStairs => 0.6,
             BlockType::Air => 1.0,
         }
     }
@@ -278,6 +316,7 @@ impl BlockType {
             BlockType::Sand => "Sand",
             BlockType::Water => "Water",
             BlockType::Wood => "Wood",
+            BlockType::WoodLogX | BlockType::WoodLogZ => "Fallen Wood",
             BlockType::Leaves => "Leaves",
             BlockType::Bedrock => "Bedrock",
             BlockType::Snow => "Snow",

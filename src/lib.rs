@@ -61,9 +61,9 @@ pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
 pub use core::{Biome, BlockType, Chunk, GameItem, SubChunk, Uniforms, Vertex};
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
-    AABB, DrawIndexedIndirect, IndirectManager, MeshLoader, SubchunkKey, add_greedy_quad, add_quad,
-    build_block_outline, build_crosshair, build_player_model, extract_frustum_planes,
-    generate_texture_atlas, load_texture_atlas_from_file,
+    AABB, DrawIndexedIndirect, IndirectBufferBudget, IndirectManager, MeshLoader, SubchunkKey,
+    add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_player_model,
+    extract_frustum_planes, generate_texture_atlas, load_texture_atlas_from_file,
 };
 pub use save::{DEFAULT_WORLD_FILE, SavedWorld, load_world, save_world};
 pub use vertex::OutlineVertex;
