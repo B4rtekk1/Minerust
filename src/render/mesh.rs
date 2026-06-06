@@ -27,24 +27,47 @@ pub fn add_quad(
     _roughness: f32,
     _metallic: f32,
 ) {
+    add_quad_with_ao(
+        vertices, indices, v0, v1, v2, v3, normal, color, tex_index, _roughness, _metallic, [3; 4],
+    );
+}
+
+/// Adds a single quad with explicit per-corner voxel ambient occlusion.
+///
+/// `ao` is ordered like the emitted vertices (`v0..v3`) and uses
+/// `0 = darkest`, `3 = fully open`.
+pub fn add_quad_with_ao(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    v3: [f32; 3],
+    normal: [f32; 3],
+    color: [f32; 3],
+    tex_index: f32,
+    _roughness: f32,
+    _metallic: f32,
+    ao: [u8; 4],
+) {
     let n_idx = Vertex::pack_normal(normal);
     let base_idx = vertices.len() as u32;
 
     vertices.push(Vertex {
         position: v0,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 1, 1, 1), // Corner 1 (0, 1)
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 1, 1, 1, ao[0]),
     });
     vertices.push(Vertex {
         position: v1,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 2, 1, 1), // Corner 2 (1, 1)
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 2, 1, 1, ao[1]),
     });
     vertices.push(Vertex {
         position: v2,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 3, 1, 1), // Corner 3 (1, 0)
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 3, 1, 1, ao[2]),
     });
     vertices.push(Vertex {
         position: v3,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 0, 1, 1), // Corner 0 (0, 0)
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 0, 1, 1, ao[3]),
     });
     indices.extend_from_slice(&[
         base_idx,
@@ -87,35 +110,53 @@ pub fn add_greedy_quad(
     width: f32,
     height: f32,
 ) {
+    add_greedy_quad_with_ao(
+        vertices, indices, v0, v1, v2, v3, normal, color, tex_index, _roughness, _metallic, width,
+        height, [3; 4],
+    );
+}
+
+/// Adds a greedy-meshed quad with explicit per-corner voxel ambient occlusion.
+///
+/// `ao` is ordered like the emitted vertices (`v0..v3`) and uses
+/// `0 = darkest`, `3 = fully open`.
+pub fn add_greedy_quad_with_ao(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    v3: [f32; 3],
+    normal: [f32; 3],
+    color: [f32; 3],
+    tex_index: f32,
+    _roughness: f32,
+    _metallic: f32,
+    width: f32,
+    height: f32,
+    ao: [u8; 4],
+) {
     let n_idx = Vertex::pack_normal(normal);
     let base_idx = vertices.len() as u32;
-
-    // For greedy quads, we are still using unit UV corners in the vertex,
-    // but the shader will multiply them by width/height?
-    // Wait, width and height are not in my current 16-byte pack.
-    // I should add them or pass them differently.
-
-    // Actually, I can put width/height into the packed data for greedy quads!
-    // I need to update Vertex::pack to include width/height if it fits.
 
     let w = width as u8;
     let h = height as u8;
 
     vertices.push(Vertex {
         position: v0,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 1, w, h),
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 1, w, h, ao[0]),
     });
     vertices.push(Vertex {
         position: v1,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 2, w, h),
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 2, w, h, ao[1]),
     });
     vertices.push(Vertex {
         position: v2,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 3, w, h),
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 3, w, h, ao[2]),
     });
     vertices.push(Vertex {
         position: v3,
-        packed: Vertex::pack(n_idx, color, tex_index as u8, 0, w, h),
+        packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 0, w, h, ao[3]),
     });
     indices.extend_from_slice(&[
         base_idx,

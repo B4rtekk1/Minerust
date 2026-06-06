@@ -16,7 +16,6 @@ render/
 ├── frustum.rs          ← Frustum culling and AABB structures
 ├── indirect.rs         ← Indirect GPU drawing (instancing)
 └── passes/             ← Individual render passes
-    ├── shadow.rs       ← Shadow map rendering (CSM)
     ├── terrain.rs      ← Main terrain rendering
     ├── water.rs        ← Water rendering with effects
     ├── composite.rs    ← Post-processing and composition
@@ -367,29 +366,9 @@ pub struct DrawIndirectCommand {
 
 ## Render Passes Directory (`passes/`)
 
-### `shadow.rs` - Shadow Mapping
-Renders scene to shadow maps for lighting:
-
-```
-Directional Light (Sun)
-    ↓
-View from light direction
-    ↓
-4 Cascaded Shadow Maps (CSM)
-    - Cascade 0: Close (16m) - 2048x2048
-    - Cascade 1: Medium (48m) - 2048x2048
-    - Cascade 2: Far (128m) - 2048x2048
-    - Cascade 3: Very Far (300m) - 2048x2048
-    ↓
-Percentage-Closer Filtering (PCF)
-    ↓
-Soft shadows in terrain pass
-```
-
 ### `terrain.rs` - Main Terrain Pass
 Renders solid opaque blocks with:
 - Frustum culling
-- Shadow mapping
 - Ambient occlusion
 - Dynamic lighting
 
@@ -450,7 +429,6 @@ render/ ←→ assets/    (Textures, fonts)
 - **Vertex Buffer**: ~560MB for ~10M vertices
 - **Index Buffer**: ~256MB for ~80M indices
 - **Texture Atlas**: 2-4GB depending on quality
-- **Shadow Maps**: ~64MB (4 cascades × 2048²)
 
 ### GPU Draw Efficiency
 - **Visible Subchunks**: 100-500 (depends on render distance)
@@ -474,5 +452,5 @@ render/ ←→ assets/    (Textures, fonts)
 
 ---
 
-**Key Takeaway:** The `render/` module transforms voxel data into stunning GPU-rendered visuals using modern rendering techniques like GPU-driven rendering, frustum culling, and shadow mapping. It's optimized for both visual quality and performance.
+**Key Takeaway:** The `render/` module transforms voxel data into GPU-rendered visuals using modern rendering techniques like GPU-driven rendering and frustum culling. It's optimized for both visual quality and performance.
 

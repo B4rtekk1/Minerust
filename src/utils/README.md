@@ -41,8 +41,6 @@ utils/
 ```yaml
 graphics:
   render_distance: 10
-  shadow_distance: 300
-  shadow_quality: high
   bloom_enabled: true
   vsync_enabled: true
   max_fps: 144
@@ -94,20 +92,10 @@ pub struct Settings {
 
 pub struct GraphicsSettings {
     pub render_distance: i32        // 1-32 chunks
-    pub shadow_distance: f32        // meters
-    pub shadow_quality: ShadowQuality,
     pub bloom_enabled: bool
     pub vsync_enabled: bool
     pub max_fps: u32
     // ... more options
-}
-
-pub enum ShadowQuality {
-    Off,
-    Low,       // 512x512 per cascade
-    Medium,    // 1024x1024 per cascade
-    High,      // 2048x2048 per cascade
-    Ultra,     // 4096x4096 per cascade
 }
 ```
 
@@ -132,7 +120,6 @@ pub fn validate(&self) -> Result<(), ValidationError> {
 # settings_deafult.yaml (typo is in original, could be renamed to settings_default.yaml)
 graphics:
   render_distance: 10
-  shadow_quality: high
   
 gameplay:
   difficulty: normal
@@ -159,7 +146,6 @@ pub struct MemoryBreakdown {
     pub vertex_buffers: u64         // Mesh vertex data
     pub index_buffers: u64          // Mesh index data
     pub textures: u64               // Texture atlases
-    pub shadow_maps: u64            // Shadow map textures
     pub render_targets: u64         // Intermediate buffers
     pub uniform_buffers: u64        // Constant buffers
     pub other: u64                  // Misc allocations
@@ -174,13 +160,12 @@ Usage Breakdown:
 ├── Vertex Buffers:     560 MB (6.8%)  ← Main geometry
 ├── Index Buffers:      256 MB (3.1%)  ← Indices
 ├── Textures:         2048 MB (25.0%)  ← Atlas & block textures
-├── Shadow Maps:        128 MB (1.6%)  ← CSM cascades
 ├── Render Targets:     256 MB (3.1%)  ← HDR, GBuffer, etc.
 ├── Uniform Buffers:     32 MB (0.4%)  ← Camera, lighting
 └── Driver/Other:       512 MB (6.3%)
 
-Used: 3792 MB (46.3%)
-Free: 4400 MB (53.7%)
+Used: 3664 MB (44.7%)
+Free: 4528 MB (55.3%)
 ```
 
 **Performance Analysis:**
@@ -214,13 +199,11 @@ Breakdown:
   Vertex Buffers:  560.0 MB (54.2% of used)
   Index Buffers:   256.0 MB (24.8% of used)
   Textures:      2000.0 MB (19.4% of used)
-  Shadow Maps:     128.0 MB (1.2% of used)
   Other:           166.0 MB (1.6% of used)
 
 Recommendations:
   ✓ Plenty of VRAM available
   ✓ Can increase texture quality
-  ✓ Consider increasing shadow resolution
 ═══════════════════════════════════════════════════════════
 ```
 
@@ -371,7 +354,6 @@ In-game settings menu:
 ├─────────────────────────────────────┤
 │ Graphics:                            │
 │   Render Distance: [12     ] ◄─────┐ │
-│   Shadow Quality: [High   ▼]        │ │
 │   V-Sync: [✓]                       │ │
 │                                     │ │
 │ Gameplay:                            │ │

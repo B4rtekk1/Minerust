@@ -24,7 +24,7 @@ Built on **wgpu** for cross-platform GPU support (Vulkan, DirectX 12, Metal), Mi
 - 🌍 **Infinite Procedural Worlds** - 11 biomes with caves, ore, and structures
 - 🌐 **Multiplayer Architecture** - Authoritative server with client prediction
 - ⚡ **Extreme Performance** - Optimized for high-end rendering loads
-- 🎨 **Advanced Visuals** - CSM shadows, water simulation, atmospheric effects
+- 🎨 **Advanced Visuals** - Water simulation, atmospheric effects, and post-processing
 
 ---
 
@@ -45,7 +45,6 @@ Tested on windows 11, might not work on windows 10. You can clone repo and try c
 | **Graphics API** | [wgpu](https://wgpu.rs/) - Universal GPU abstraction layer |
 | **Rendering Method** | GPU-driven with indirect dispatch and compute culling |
 | **Vertex Buffers** | Unified buffers (560MB capacity) with sub-allocation |
-| **Shadows** | 4-cascade CSM with PCF filtering (up to 2048×2048) |
 | **Effects** | Water physics, bloom, god rays, atmospheric scattering |
 | **Culling** | CPU AABB + GPU frustum culling for optimal performance |
 
@@ -148,8 +147,6 @@ F3               → Debug info
 | `WORLD_HEIGHT` | 256 | Maximum build height |
 | `CHUNK_SIZE` | 16 | Horizontal chunk dimension |
 | `SUBCHUNK_HEIGHT` | 16 | Vertical subchunk size |
-| `CSM_CASCADE_COUNT` | 4 | Shadow cascades |
-| `CSM_SHADOW_MAP_SIZE` | 2048 | Shadow texture resolution |
 | `MAX_CHUNKS_PER_FRAME` | 8 | Mesh uploads/frame limit |
 
 ---
@@ -171,7 +168,7 @@ GPU Buffer Uploads
     ↓
 Frustum Culling (Compute Shader)
     ↓
-[Shadow Pass] → [Terrain Pass] → [Water Pass] → [Composite] → [UI]
+[Depth Prepass] → [Terrain Pass] → [Water Pass] → [Composite] → [UI]
     ↓
 Present to Screen
 ```
@@ -296,7 +293,6 @@ See `Cargo.toml` for complete dependency list.
 - ✅ GPU-driven rendering pipeline
 - ✅ Procedural world generation
 - ✅ Multiplayer networking framework
-- ✅ Shadow mapping system
 
 ### Planned Features
 

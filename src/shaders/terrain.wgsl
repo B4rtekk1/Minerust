@@ -24,14 +24,6 @@ struct Uniforms {
 @group(0) @binding(1) var texture_atlas: texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 
-@group(1) @binding(0) var shadow_mask: texture_2d<f32>;
-@group(1) @binding(1) var shadow_mask_sampler: sampler;
-
-fn sample_shadow_mask(screen_pos: vec4<f32>) -> f32 {
-    let uv = clamp(screen_pos.xy / uniforms.screen_size, vec2<f32>(0.0), vec2<f32>(1.0));
-    return textureSampleLevel(shadow_mask, shadow_mask_sampler, uv, 0.0).r;
-}
-
 fn fast_global_illumination(
     normal:          vec3<f32>,
     sun_dir:         vec3<f32>,
@@ -44,7 +36,7 @@ fn fast_global_illumination(
 
     let sky_day      = vec3<f32>(0.50, 0.62, 0.78);
     let sky_twilight = vec3<f32>(0.96, 0.48, 0.24);
-    let sky_night    = vec3<f32>(0.018, 0.024, 0.052);
+    let sky_night    = vec3<f32>(0.030, 0.030, 0.034);
     let sky_color = mix(
         mix(sky_night, sky_day, day_factor),
         sky_twilight,
@@ -72,7 +64,10 @@ fn fast_global_illumination(
         * day_factor
         * 0.045;
 
-    return sky_light + ground_light + sun_bounce;
+    let ambient = sky_light + ground_light + sun_bounce;
+    let ambient_luma = dot(ambient, vec3<f32>(0.299, 0.587, 0.114));
+    let night_neutralize = (1.0 - day_factor) * (1.0 - twilight_factor) * 0.72;
+    return mix(ambient, vec3<f32>(ambient_luma), vec3<f32>(night_neutralize));
 }
 
 struct VertexInput {
@@ -87,6 +82,7 @@ struct VertexOutput {
     @location(2) color:     vec3<f32>,
     @location(3) uv:        vec2<f32>,
     @location(4) tex_index: f32,
+    @location(5) ambient_occlusion: f32,
 };
 
 struct DepthVertexOutput {
@@ -100,8 +96,9 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     let uv_idx  = (model.packed >> 11u) & 0x3u;
     let w_raw   = (model.packed >> 13u) & 0xFu;
     let h_raw   = (model.packed >> 17u) & 0xFu;
-    let r       = f32((model.packed >> 21u) & 0xFu) / 15.0;
-    let g       = f32((model.packed >> 25u) & 0xFu) / 15.0;
+    let ao_raw  = (model.packed >> 21u) & 0x3u;
+    let r       = f32((model.packed >> 23u) & 0x7u) / 7.0;
+    let g       = f32((model.packed >> 26u) & 0x7u) / 7.0;
     let b       = f32((model.packed >> 29u) & 0x7u) / 7.0;
 
     let width  = f32(w_raw + 1u);
@@ -128,6 +125,7 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.uv = vec2<f32>(raw_uv.x * width, raw_uv.y * height);
 
     out.tex_index = f32(t_idx);
+    out.ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
     return out;
 }
 
@@ -157,7 +155,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
     let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * day_factor;
-    let shadow_visibility = sample_shadow_mask(in.clip_position);
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
     let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor;
 
@@ -167,12 +164,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     else                        { face_shade = 0.8; }
 
     let face_contrast = mix(0.82, 1.0, face_shade);
+    let ambient_occlusion = in.ambient_occlusion;
     let total_light =
-        (indirect_light
-            + sun_color * sun_diff * shadow_visibility
-            + vec3<f32>(0.58, 0.68, 0.82) * fill_diff)
+        (indirect_light * ambient_occlusion
+            + sun_color * sun_diff
+            + vec3<f32>(0.58, 0.68, 0.82) * fill_diff * mix(0.70, 1.0, ambient_occlusion))
         * face_contrast;
-    var lit = tex.rgb * total_light * in.color;
+    let light_luma = dot(total_light, vec3<f32>(0.299, 0.587, 0.114));
+    let tint_luma = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
+    let dark_tint_neutralize = smoothstep(0.16, 0.035, light_luma) * 0.65;
+    let local_tint = mix(in.color, vec3<f32>(tint_luma), vec3<f32>(dark_tint_neutralize));
+    var lit = tex.rgb * total_light * local_tint;
 
     let sunset_factor = 1.0 - abs(sun_dir.y);
     if sunset_factor > 0.3 && sun_dir.y > -0.2 {

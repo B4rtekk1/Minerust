@@ -246,19 +246,17 @@ pub struct LightingUniforms {
     pub sun_direction: [f32; 3]
     pub sun_color: [f32; 3]
     pub ambient_light: [f32; 3]
-    pub shadow_matrices: [[[f32; 4]; 4]; 4]  // CSM cascades
 }
 ```
 
 **Usage:**
 - Passed to shaders as bind group
 - Updated once per frame
-- Used for camera, lighting, shadows
+- Used for camera and lighting
 
 **Update Frequency:**
 - Camera uniforms: Every frame
 - Lighting uniforms: Every frame or less
-- Shadow matrices: With sun movement
 
 ## Data Relationships
 
@@ -287,7 +285,6 @@ Uniforms (GPU constants)
     ↓
     ├→ Camera data
     ├→ Lighting data
-    ├→ Shadow matrices
 ```
 
 ## Performance Considerations

@@ -40,7 +40,7 @@ src/
 ├── core/                         # Core world systems
 ├── player/                       # Player mechanics
 ├── render/                       # Rendering pipeline
-├── render_core/                  # Rendering utilities (CSM, etc.)
+├── render_core/                  # Rendering utilities
 ├── multiplayer/                  # Networking and multiplayer
 ├── ui/                           # User interface
 ├── utils/                        # Utility functions and helpers
@@ -132,12 +132,12 @@ src/
 - **`texture.rs`** - Texture loading and GPU texture binding
 - **`frustum.rs`** - View frustum and AABB definitions for culling
 - **`indirect.rs`** - Indirect GPU drawing (indirect buffers for instancing)
-- **`passes/`** - Individual render passes (shadows, terrain, water, UI, etc.)
+- **`passes/`** - Individual render passes (terrain, water, UI, etc.)
 
 **Key Responsibilities:**
 - GPU buffer management (vertex, index, indirect buffers)
 - Texture atlas coordination
-- Render passes orchestration (shadow pass, terrain pass, composite pass)
+- Render passes orchestration (depth prepass, terrain pass, composite pass)
 - Frustum culling and visibility determination
 - Mesh building from voxel data
 
@@ -151,16 +151,14 @@ src/
 
 ### 6. **src/render_core/** - Rendering Utilities
 
-**Purpose:** Advanced rendering techniques and utilities.
+**Purpose:** Shared rendering helpers and utility types.
 
 **Files:**
 - **`mod.rs`** - Module root
-- **`csm.rs`** - Cascaded Shadow Maps (4-cascade shadow system with PCF)
 
 **Key Responsibilities:**
-- Shadow map management (4 cascades, up to 2048x2048 per cascade)
-- Shadow matrix calculations
-- Percentage-Closer Filtering (PCF) implementation
+- Common rendering math and helper types
+- Shared GPU utility code
 
 ---
 
@@ -266,7 +264,7 @@ src/
 - **`settings.yaml`** - Runtime configuration (graphics, gameplay, networking)
 
 **Contains:**
-- Graphics settings (render distance, shadow quality, etc.)
+- Graphics settings (render distance, texture quality, etc.)
 - Gameplay settings (difficulty, player speed, etc.)
 - Networking settings (server address, port, etc.)
 
@@ -366,7 +364,7 @@ target/
 ### Rendering Pipeline
 ```
 Input → Update → Generate Chunks → Build Meshes → 
-  Upload to GPU → Culling Pass → Shadow Pass → 
+  Upload to GPU → Culling Pass → Depth Prepass →
   Terrain Pass → Water Pass → Composite Pass → UI Pass → Present
 ```
 

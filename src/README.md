@@ -24,7 +24,6 @@ Global constants used throughout the project:
 - **Optimization constants**: Max chunks per frame, worker count
 - **Player constants**: Height, movement speed, jump power
 - **Camera constants**: Field of view, near/far planes
-- **CSM (Shadow) constants**: Cascade count, shadow map resolution
 
 ### `save.rs`
 World save/load functionality. Handles serialization and deserialization of world data to disk.
@@ -37,7 +36,7 @@ src/
 ├── core/          ← World data structures (blocks, chunks)
 ├── player/        ← Player character & camera
 ├── render/        ← Rendering pipeline & mesh management
-├── render_core/   ← Advanced rendering (shadows, CSM)
+├── render_core/   ← Advanced rendering utilities
 ├── multiplayer/   ← Networking & multiplayer
 ├── ui/            ← User interface & menus
 ├── world/         ← World generation & terrain

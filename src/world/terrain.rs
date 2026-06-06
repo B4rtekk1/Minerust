@@ -3,7 +3,7 @@ use crate::core::biome::Biome;
 use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
 use crate::core::vertex::Vertex;
-use crate::render::mesh::{add_greedy_quad, add_quad};
+use crate::render::mesh::{add_greedy_quad_with_ao, add_quad};
 use crate::world::generator::ChunkGenerator;
 use parking_lot::RwLock;
 use rand::random;
@@ -542,9 +542,9 @@ impl World {
     /// the sky and how open the nearby voxel neighborhood is. Texture color
     /// still comes from the atlas.
     ///
-    /// GI colors are quantized to 6 bits per channel (`& 0xFC`) before storage
-    /// in `FaceAttrs` so that floating-point rounding noise doesn't prevent
-    /// adjacent faces from being merged.
+    /// GI colors are quantized to the packed vertex color precision before
+    /// storage in `FaceAttrs` so that hidden floating-point differences do not
+    /// prevent adjacent faces from being merged.
     ///
     /// # Parameters
     /// - `chunk_x`   – Chunk column X coordinate.
@@ -805,6 +805,90 @@ impl World {
             ]
         };
 
+        let occludes_ao = |wx: i32, wy: i32, wz: i32| -> bool {
+            get_block_world_safe(wx, wy, wz).is_solid_opaque()
+        };
+
+        let vertex_ao = |side_a: bool, side_b: bool, diagonal: bool| -> u8 {
+            if side_a && side_b {
+                0
+            } else {
+                3u8 - side_a as u8 - side_b as u8 - diagonal as u8
+            }
+        };
+
+        let face_corner_ao = |face_dir: i32, wx: i32, wy: i32, wz: i32| -> [u8; 4] {
+            match face_dir {
+                0 => {
+                    let ox = wx - 1;
+                    let sample = |sy: i32, sz: i32| {
+                        vertex_ao(
+                            occludes_ao(ox, wy + sy, wz),
+                            occludes_ao(ox, wy, wz + sz),
+                            occludes_ao(ox, wy + sy, wz + sz),
+                        )
+                    };
+                    [sample(-1, -1), sample(-1, 1), sample(1, 1), sample(1, -1)]
+                }
+                1 => {
+                    let ox = wx + 1;
+                    let sample = |sy: i32, sz: i32| {
+                        vertex_ao(
+                            occludes_ao(ox, wy + sy, wz),
+                            occludes_ao(ox, wy, wz + sz),
+                            occludes_ao(ox, wy + sy, wz + sz),
+                        )
+                    };
+                    [sample(-1, 1), sample(-1, -1), sample(1, -1), sample(1, 1)]
+                }
+                2 => {
+                    let oy = wy - 1;
+                    let sample = |sx: i32, sz: i32| {
+                        vertex_ao(
+                            occludes_ao(wx + sx, oy, wz),
+                            occludes_ao(wx, oy, wz + sz),
+                            occludes_ao(wx + sx, oy, wz + sz),
+                        )
+                    };
+                    [sample(-1, 1), sample(-1, -1), sample(1, -1), sample(1, 1)]
+                }
+                3 => {
+                    let oy = wy + 1;
+                    let sample = |sx: i32, sz: i32| {
+                        vertex_ao(
+                            occludes_ao(wx + sx, oy, wz),
+                            occludes_ao(wx, oy, wz + sz),
+                            occludes_ao(wx + sx, oy, wz + sz),
+                        )
+                    };
+                    [sample(-1, -1), sample(-1, 1), sample(1, 1), sample(1, -1)]
+                }
+                4 => {
+                    let oz = wz - 1;
+                    let sample = |sx: i32, sy: i32| {
+                        vertex_ao(
+                            occludes_ao(wx + sx, wy, oz),
+                            occludes_ao(wx, wy + sy, oz),
+                            occludes_ao(wx + sx, wy + sy, oz),
+                        )
+                    };
+                    [sample(1, -1), sample(-1, -1), sample(-1, 1), sample(1, 1)]
+                }
+                5 => {
+                    let oz = wz + 1;
+                    let sample = |sx: i32, sy: i32| {
+                        vertex_ao(
+                            occludes_ao(wx + sx, wy, oz),
+                            occludes_ao(wx, wy + sy, oz),
+                            occludes_ao(wx + sx, wy + sy, oz),
+                        )
+                    };
+                    [sample(-1, -1), sample(1, -1), sample(1, 1), sample(-1, 1)]
+                }
+                _ => unreachable!(),
+            }
+        };
+
         // ── FaceAttrs: per-cell data stored in the greedy mask ────────────── //
         // Two faces can be merged only when all fields are equal, so local GI
         // tints are pre-quantized (see `quantize_color`) to suppress
@@ -813,6 +897,7 @@ impl World {
         struct FaceAttrs {
             block: BlockType,
             color: [u8; 3],
+            ao: [u8; 4],
             tex_index: u8,
             is_active: bool,
         }
@@ -822,21 +907,20 @@ impl World {
                 FaceAttrs {
                     block: BlockType::Air,
                     color: [0, 0, 0],
+                    ao: [3; 4],
                     tex_index: 0,
                     is_active: false,
                 }
             }
         }
 
-        // Quantize a linear RGB float color to 6 bits per channel.
-        // Masking with 0xFC rounds the low 2 bits to zero so that minor
-        // floating-point differences between adjacent face color queries
-        // don't prevent greedy merging.
+        // Quantize to the same 3-bit precision used by the packed vertex.
+        // This keeps greedy merging aligned with what the shader can display.
         let quantize_color = |c: [f32; 3]| -> [u8; 3] {
             [
-                ((c[0] * 255.0) as u8) & 0xFC,
-                ((c[1] * 255.0) as u8) & 0xFC,
-                ((c[2] * 255.0) as u8) & 0xFC,
+                (c[0].clamp(0.0, 1.0) * 7.0) as u8,
+                (c[1].clamp(0.0, 1.0) * 7.0) as u8,
+                (c[2].clamp(0.0, 1.0) * 7.0) as u8,
             ]
         };
         let empty_face = FaceAttrs::default();
@@ -1131,6 +1215,11 @@ impl World {
                         }
 
                         let gi_tint = face_gi_tint(face_dir, world_x, y, world_z);
+                        let ao = if block == BlockType::Water {
+                            [3; 4]
+                        } else {
+                            face_corner_ao(face_dir, world_x, y, world_z)
+                        };
 
                         // Select the atlas texture index by face direction.
                         let tex_index = block.tex_for_face(face_dir);
@@ -1139,6 +1228,7 @@ impl World {
                         mask[idx] = FaceAttrs {
                             block,
                             color: quantize_color(gi_tint),
+                            ao,
                             tex_index: tex_index as u8,
                             is_active: true,
                         };
@@ -1190,10 +1280,11 @@ impl World {
                         }
 
                         let color = [
-                            face.color[0] as f32 / 255.0,
-                            face.color[1] as f32 / 255.0,
-                            face.color[2] as f32 / 255.0,
+                            face.color[0] as f32 / 7.0,
+                            face.color[1] as f32 / 7.0,
+                            face.color[2] as f32 / 7.0,
                         ];
+                        let ao = face.ao;
                         let tex_index = face.tex_index as f32;
                         let roughness = face.block.roughness();
                         let metallic = face.block.metallic();
@@ -1246,10 +1337,10 @@ impl World {
                         };
 
                         // Emit the merged quad with outward-facing winding.
-                        // `add_greedy_quad` takes explicit width/height so the
+                        // `add_greedy_quad_with_ao` takes explicit width/height so the
                         // UV coordinates tile correctly across the merged surface.
                         match face_dir {
-                            0 => add_greedy_quad(
+                            0 => add_greedy_quad_with_ao(
                                 target_verts,
                                 target_inds,
                                 [x0, y0, z0],
@@ -1263,8 +1354,9 @@ impl World {
                                 metallic,
                                 width as f32,
                                 height as f32,
+                                ao,
                             ),
-                            1 => add_greedy_quad(
+                            1 => add_greedy_quad_with_ao(
                                 target_verts,
                                 target_inds,
                                 [x1, y0, z1],
@@ -1278,8 +1370,9 @@ impl World {
                                 metallic,
                                 width as f32,
                                 height as f32,
+                                ao,
                             ),
-                            2 => add_greedy_quad(
+                            2 => add_greedy_quad_with_ao(
                                 target_verts,
                                 target_inds,
                                 [x0, y0, z1],
@@ -1293,8 +1386,9 @@ impl World {
                                 metallic,
                                 width as f32,
                                 height as f32,
+                                ao,
                             ),
-                            3 => add_greedy_quad(
+                            3 => add_greedy_quad_with_ao(
                                 target_verts,
                                 target_inds,
                                 [x0, y1, z0],
@@ -1308,8 +1402,9 @@ impl World {
                                 metallic,
                                 width as f32,
                                 height as f32,
+                                ao,
                             ),
-                            4 => add_greedy_quad(
+                            4 => add_greedy_quad_with_ao(
                                 target_verts,
                                 target_inds,
                                 [x1, y0, z0],
@@ -1323,8 +1418,9 @@ impl World {
                                 metallic,
                                 height as f32,
                                 width as f32,
+                                ao,
                             ),
-                            5 => add_greedy_quad(
+                            5 => add_greedy_quad_with_ao(
                                 target_verts,
                                 target_inds,
                                 [x0, y0, z1],
@@ -1338,6 +1434,7 @@ impl World {
                                 metallic,
                                 height as f32,
                                 width as f32,
+                                ao,
                             ),
                             _ => {}
                         }

@@ -1,7 +1,5 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::constants::SHADOW_CASCADE_COUNT;
-
 /// Per-frame uniform data uploaded to the GPU at the start of each render pass.
 ///
 /// All matrices are stored in column-major order to match WGSL/GLSL conventions.
@@ -95,31 +93,4 @@ pub struct Uniforms {
 
     /// Explicit padding so the uniform block remains 16-byte aligned.
     pub _pad_uniforms: f32,
-}
-
-/// Main shadow data sampled by lit fragment shaders.
-///
-/// Kept separate from [`Uniforms`] so UI, sky, water, and post-process shaders
-/// do not need to mirror the CSM layout.
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct ShadowUniforms {
-    /// Light-space view-projection matrix for every cascade.
-    pub light_view_proj: [[[f32; 4]; 4]; SHADOW_CASCADE_COUNT],
-    /// View-space split distances for cascades 0..3.
-    pub cascade_splits: [f32; 4],
-    /// Camera look direction, used to compute stable view-space depth in WGSL.
-    pub camera_forward: [f32; 3],
-    /// Overall shadow strength, faded out near sunrise/sunset and at night.
-    pub shadow_strength: f32,
-    /// `[shadow_map_size, cascade_count, pcf_radius_texels, shadow_distance]`.
-    pub params: [f32; 4],
-}
-
-/// Small per-pass uniform used by the depth-only shadow map pipeline.
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct ShadowCascadeUniform {
-    /// Active cascade light-space view-projection matrix.
-    pub light_view_proj: [[f32; 4]; 4],
 }

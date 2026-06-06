@@ -774,7 +774,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         // First click in-game captures the cursor so subsequent
                         // mouse motion is routed to camera rotation.
                         // `Confined` is tried first (keeps cursor inside the
-                        // window), falling back to `Locked` (OS-level cursor
+                        // window), falling back to `Locked  (OS-level cursor
                         // lock) on platforms that don't support `Confined`.
                         state.mouse_captured = true;
                         let _ = state

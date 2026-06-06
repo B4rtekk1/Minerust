@@ -137,12 +137,11 @@ F11           → Fullscreen
 **Purpose:** Orchestrates the rendering pipeline.
 
 **Render Passes (in order):**
-1. **Shadow Pass** - Render to shadow maps for CSM
-2. **Depth Prepass** - Early depth rejection
-3. **Terrain Pass** - Render solid blocks
-4. **Water Pass** - Render water with special effects
-5. **Composite Pass** - Combine passes, apply post-effects
-6. **UI Pass** - Render text, buttons, HUD
+1. **Depth Prepass** - Early depth rejection
+2. **Terrain Pass** - Render solid blocks
+3. **Water Pass** - Render water with special effects
+4. **Composite Pass** - Combine passes, apply post-effects
+5. **UI Pass** - Render text, buttons, HUD
 
 **Responsibilities:**
 - Set up render passes
@@ -295,7 +294,7 @@ To add new features to the app module:
 ## Performance Characteristics
 
 - **Frame Time Budget** - 16ms for 60 FPS, 33ms for 30 FPS
-- **GPU Memory** - ~2GB typical (chunks + textures + shadows)
+- **GPU Memory** - ~2GB typical (chunks + textures + render targets)
 - **CPU Usage** - Scales with chunk generation distance
 - **Network Bandwidth** - Depends on player movement and world changes
 

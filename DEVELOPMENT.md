@@ -166,31 +166,28 @@ constants.rs        - Global constants
    ├─ Chunk loading
    └─ Entity updates
 
-3. Shadow Pass
-   └─ Render to shadow maps (CSM)
-
-4. Depth Prepass (Optional)
+3. Depth Prepass (Optional)
    └─ Early Z rejection
 
-5. Terrain Pass
+4. Terrain Pass
    ├─ Frustum culling
    ├─ Indirect draw commands
    └─ Main geometry
 
-6. Water Pass
+5. Water Pass
    └─ Special water effects
 
-7. Composite/Post-Process
+6. Composite/Post-Process
    ├─ Bloom
    ├─ Tone mapping
    └─ Color correction
 
-8. UI Pass
+7. UI Pass
    ├─ Text rendering
    ├─ HUD elements
    └─ Menus (if open)
 
-9. Present
+8. Present
    └─ Display to monitor
 ```
 

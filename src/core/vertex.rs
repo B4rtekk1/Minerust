@@ -1,12 +1,10 @@
 use bytemuck::{Pod, Zeroable};
 
-/// A GPU-ready vertex with position, normal, color, UV coordinates, and texture index.
+/// A GPU-ready packed vertex for voxel, terrain, and simple UI geometry.
 ///
-/// The layout is tightly packed to 32 bytes and matches the wgpu attribute layout
+/// The layout is tightly packed to 16 bytes and matches the wgpu attribute layout
 /// returned by [`Vertex::desc`]. Implements [`Pod`] and [`Zeroable`] for safe
 /// direct casting to/from byte slices.
-///
-/// A high-performance, packed 16-byte vertex for voxel rendering.
 ///
 /// This format reduces memory bandwidth and VRAM usage by packing normals,
 /// colors, and UV metadata into a single 32-bit field.
@@ -23,10 +21,12 @@ use bytemuck::{Pod, Zeroable};
 /// | 0-2   | Normal Index   | 0-5 (cardinal)|
 /// | 3-10  | Texture Index  | 0-255         |
 /// | 11-12 | UV Corner      | 0-3           |
-/// | 13-18 | Color R (6-bit)| 0-63          |
-/// | 19-24 | Color G (6-bit)| 0-63          |
-/// | 25-30 | Color B (6-bit)| 0-63          |
-/// | 31    | Reserved       | -             |
+/// | 13-16 | Width - 1      | 0-15          |
+/// | 17-20 | Height - 1     | 0-15          |
+/// | 21-22 | Voxel AO       | 0-3           |
+/// | 23-25 | Color R (3-bit)| 0-7           |
+/// | 26-28 | Color G (3-bit)| 0-7           |
+/// | 29-31 | Color B (3-bit)| 0-7           |
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex {
@@ -36,45 +36,74 @@ pub struct Vertex {
 
 impl Vertex {
     /// Packs normal, color, texture, corner, and dimensions into the 32-bit `packed` field.
+    ///
+    /// Terrain vertices default to fully open voxel AO (`3`). Use
+    /// [`Self::pack_with_ao`] when building world meshes with per-corner AO.
     pub fn pack(
         normal_idx: u8,  // 0-5 (3 bits)
-        color: [f32; 3], // 0.0-1.0 (11 bits: 4R, 4G, 3B)
+        color: [f32; 3], // 0.0-1.0 (9 bits: 3R, 3G, 3B)
         tex_index: u8,   // 0-255 (8 bits)
         corner_idx: u8,  // 0-3 (2 bits)
         width: u8,       // 1-16 (4 bits)
         height: u8,      // 1-16 (4 bits)
+    ) -> u32 {
+        Self::pack_with_ao(normal_idx, color, tex_index, corner_idx, width, height, 3)
+    }
+
+    /// Packs a terrain/world vertex with explicit 2-bit voxel ambient occlusion.
+    ///
+    /// `ao` uses `0 = darkest` and `3 = fully open`.
+    pub fn pack_with_ao(
+        normal_idx: u8,  // 0-5 (3 bits)
+        color: [f32; 3], // 0.0-1.0 (9 bits: 3R, 3G, 3B)
+        tex_index: u8,   // 0-255 (8 bits)
+        corner_idx: u8,  // 0-3 (2 bits)
+        width: u8,       // 1-16 (4 bits)
+        height: u8,      // 1-16 (4 bits)
+        ao: u8,          // 0-3 (2 bits)
     ) -> u32 {
         let n = (normal_idx as u32) & 0x7;
         let t = (tex_index as u32) & 0xFF;
         let uv = (corner_idx as u32) & 0x3;
         let w = ((width.saturating_sub(1)) as u32) & 0xF;
         let h = ((height.saturating_sub(1)) as u32) & 0xF;
+        let ao = (ao.min(3) as u32) & 0x3;
 
-        // 11-bit color: 4 bits Red, 4 bits Green, 3 bits Blue
-        let r = ((color[0].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
-        let g = ((color[1].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
+        // 9-bit color is enough for the coarse GI tint and leaves room for AO.
+        let r = ((color[0].clamp(0.0, 1.0) * 7.0) as u32) & 0x7;
+        let g = ((color[1].clamp(0.0, 1.0) * 7.0) as u32) & 0x7;
         let b = ((color[2].clamp(0.0, 1.0) * 7.0) as u32) & 0x7;
 
-        n | (t << 3) | (uv << 11) | (w << 13) | (h << 17) | (r << 21) | (g << 25) | (b << 29)
+        n | (t << 3)
+            | (uv << 11)
+            | (w << 13)
+            | (h << 17)
+            | (ao << 21)
+            | (r << 23)
+            | (g << 26)
+            | (b << 29)
     }
 
     /// Packs a screen-space/UI vertex and stores alpha in the width/height bits.
     ///
-    /// Those 8 bits are ignored by the world-space shaders but are available in
-    /// `ui.wgsl`, which makes them a compact place to carry per-vertex alpha for
-    /// menu panels, the crosshair, HUD quads, and similar overlays.
+    /// UI uses its own shader-specific layout for color so terrain AO packing
+    /// does not reduce HUD color precision.
     pub fn pack_ui(normal_idx: u8, color: [f32; 4], tex_index: u8, corner_idx: u8) -> u32 {
         let alpha = ((color[3].clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
-        let width = ((alpha & 0x0F) as u8) + 1;
-        let height = (((alpha >> 4) & 0x0F) as u8) + 1;
-        Self::pack(
-            normal_idx,
-            [color[0], color[1], color[2]],
-            tex_index,
-            corner_idx,
-            width,
-            height,
-        )
+        let n = (normal_idx as u32) & 0x7;
+        let t = (tex_index as u32) & 0xFF;
+        let uv = (corner_idx as u32) & 0x3;
+        let r = ((color[0].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
+        let g = ((color[1].clamp(0.0, 1.0) * 15.0) as u32) & 0xF;
+        let b = ((color[2].clamp(0.0, 1.0) * 7.0) as u32) & 0x7;
+
+        n | (t << 3)
+            | (uv << 11)
+            | ((alpha & 0x0F) << 13)
+            | (((alpha >> 4) & 0x0F) << 17)
+            | (r << 21)
+            | (g << 25)
+            | (b << 29)
     }
 
     /// Legacy pack helpers (unused but kept for compatibility during refactor if needed)

@@ -189,7 +189,6 @@ pub struct Panel {
 ║ Graphics:                         ║
 ║   Render Distance: [10    ]       ║
 ║   Draw Distance:   [300   ]       ║
-║   Shadow Quality:  [High  ▼]      ║
 ║                                  ║
 ║ Audio:                            ║
 ║   Master Volume:   [████████░]    ║
