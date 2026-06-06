@@ -50,8 +50,12 @@ pub struct MenuState {
     pub server_address: String,
     /// Text entered in the username field. Capped at 16 characters.
     pub username: String,
+    /// Whether the server-address input should be drawn next to "MULTIPLAYER".
+    pub server_address_input_visible: bool,
     /// The field that currently receives keyboard input.
     pub selected_field: MenuField,
+    /// `true` when the whole active text field is selected via Ctrl+A.
+    pub selected_all: bool,
     /// An error message to display to the player (e.g. connection refused).
     /// `None` when no error is active. Cleared by [`MenuState::clear_error`].
     pub error_message: Option<String>,
@@ -68,7 +72,9 @@ impl Default for MenuState {
         Self {
             server_address: "127.0.0.1:25565".to_string(),
             username: "Player".to_string(),
+            server_address_input_visible: false,
             selected_field: MenuField::None,
+            selected_all: false,
             error_message: None,
             status_message: None,
         }
@@ -92,25 +98,42 @@ impl MenuState {
     /// - Username: 16 characters.
     pub fn handle_char(&mut self, ch: char) {
         if !ch.is_ascii_control() {
+            let replace_selection = self.selected_all;
             match self.selected_field {
                 MenuField::ServerAddress => {
+                    if replace_selection {
+                        self.server_address.clear();
+                    }
                     if self.server_address.len() < 50 {
                         self.server_address.push(ch);
                     }
                 }
                 MenuField::Username => {
+                    if replace_selection {
+                        self.username.clear();
+                    }
                     if self.username.len() < 16 {
                         self.username.push(ch);
                     }
                 }
                 MenuField::None => {}
             }
+            self.selected_all = false;
         }
     }
 
     /// Appends pasted text to the focused field using the same filtering and
     /// length limits as normal typed input.
     pub fn handle_paste(&mut self, text: &str) {
+        if self.selected_all {
+            match self.selected_field {
+                MenuField::ServerAddress => self.server_address.clear(),
+                MenuField::Username => self.username.clear(),
+                MenuField::None => {}
+            }
+            self.selected_all = false;
+        }
+
         for ch in text.chars() {
             self.handle_char(ch);
         }
@@ -120,6 +143,16 @@ impl MenuState {
     ///
     /// No-op when [`MenuField::None`] is selected or the field is already empty.
     pub fn handle_backspace(&mut self) {
+        if self.selected_all {
+            match self.selected_field {
+                MenuField::ServerAddress => self.server_address.clear(),
+                MenuField::Username => self.username.clear(),
+                MenuField::None => {}
+            }
+            self.selected_all = false;
+            return;
+        }
+
         match self.selected_field {
             MenuField::ServerAddress => {
                 self.server_address.pop();
@@ -140,6 +173,7 @@ impl MenuState {
             MenuField::ServerAddress => MenuField::Username,
             MenuField::Username => MenuField::None,
         };
+        self.selected_all = false;
     }
 
     /// Directly sets keyboard focus to `field`.
@@ -147,6 +181,35 @@ impl MenuState {
     /// Pass [`MenuField::None`] to remove focus from all fields.
     pub fn select_field(&mut self, field: MenuField) {
         self.selected_field = field;
+        self.selected_all = false;
+    }
+
+    /// Shows and focuses the server-address input box.
+    pub fn show_server_address_input(&mut self) {
+        self.server_address_input_visible = true;
+        self.select_field(MenuField::ServerAddress);
+    }
+
+    /// Selects the entire active field, matching Ctrl+A behavior in text boxes.
+    pub fn select_all_current_field(&mut self) {
+        self.selected_all = match self.selected_field {
+            MenuField::ServerAddress => !self.server_address.is_empty(),
+            MenuField::Username => !self.username.is_empty(),
+            MenuField::None => false,
+        };
+    }
+
+    /// Returns the active selected text for clipboard copy operations.
+    pub fn selected_text(&self) -> Option<&str> {
+        if !self.selected_all {
+            return None;
+        }
+
+        match self.selected_field {
+            MenuField::ServerAddress => Some(&self.server_address),
+            MenuField::Username => Some(&self.username),
+            MenuField::None => None,
+        }
     }
 
     /// Clears any active error message, hiding the error display in the UI.
@@ -225,6 +288,8 @@ pub struct MenuLayout {
     pub new_world_text: Rect,
     /// Clickable bounds for the "multiplayer" label.
     pub multiplayer_text: Rect,
+    /// Bounds for the server-address input shown next to "multiplayer".
+    pub server_address_input: Rect,
 }
 
 impl MenuLayout {
@@ -248,6 +313,26 @@ impl MenuLayout {
         let x = (w * 0.045).clamp(20.0, 72.0);
         let bottom_margin = (h * 0.14).clamp(48.0, 120.0);
         let y = (h - total_h - bottom_margin).max(24.0);
+        let multiplayer_y = y + hit_h + gap;
+
+        let input_gap = 18.0;
+        let right_margin = x;
+        let input_x = x + hit_w + input_gap;
+        let desired_input_w = (w * 0.36).clamp(220.0, 420.0);
+        let min_input_w = 140.0_f32.min((w - x * 2.0).max(96.0));
+        let available_input_w = w - input_x - right_margin;
+        let (input_x, input_y, input_w) = if available_input_w >= min_input_w {
+            (
+                input_x,
+                multiplayer_y + 2.0,
+                available_input_w.min(desired_input_w),
+            )
+        } else {
+            let below_y = (multiplayer_y + hit_h + 8.0)
+                .min(h - hit_h - 16.0)
+                .max(16.0);
+            (x, below_y, (w - x * 2.0).clamp(96.0, desired_input_w))
+        };
 
         Self {
             new_world_text: Rect {
@@ -258,9 +343,15 @@ impl MenuLayout {
             },
             multiplayer_text: Rect {
                 x,
-                y: y + hit_h + gap,
+                y: multiplayer_y,
                 w: hit_w,
                 h: hit_h,
+            },
+            server_address_input: Rect {
+                x: input_x,
+                y: input_y,
+                w: input_w,
+                h: hit_h - 4.0,
             },
         }
     }

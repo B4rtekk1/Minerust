@@ -84,7 +84,7 @@ impl Biome {
     pub fn tree_density(&self) -> f64 {
         match self {
             Biome::Plains => 0.75,
-            Biome::Forest => 0.45,
+            Biome::Forest => 0.35,
             Biome::Desert => 1.0,
             Biome::Tundra => 0.85,
             Biome::Mountains => 0.80,

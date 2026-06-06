@@ -24,6 +24,14 @@ struct Uniforms {
 @group(0) @binding(1) var texture_atlas: texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 
+@group(1) @binding(0) var shadow_mask: texture_2d<f32>;
+@group(1) @binding(1) var shadow_mask_sampler: sampler;
+
+fn sample_shadow_mask(screen_pos: vec4<f32>) -> f32 {
+    let uv = clamp(screen_pos.xy / uniforms.screen_size, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleLevel(shadow_mask, shadow_mask_sampler, uv, 0.0).r;
+}
+
 fn fast_global_illumination(
     normal:          vec3<f32>,
     sun_dir:         vec3<f32>,
@@ -149,6 +157,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
     let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * day_factor;
+    let shadow_visibility = sample_shadow_mask(in.clip_position);
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
     let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor;
 
@@ -160,7 +169,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let face_contrast = mix(0.82, 1.0, face_shade);
     let total_light =
         (indirect_light
-            + sun_color * sun_diff
+            + sun_color * sun_diff * shadow_visibility
             + vec3<f32>(0.58, 0.68, 0.82) * fill_diff)
         * face_contrast;
     var lit = tex.rgb * total_light * in.color;

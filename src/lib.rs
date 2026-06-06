@@ -58,11 +58,15 @@ mod shader_utils;
 
 pub use constants::*;
 pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
-pub use core::{Biome, BlockType, Chunk, GameItem, SubChunk, Uniforms, Vertex};
+pub use core::{
+    Biome, BlockType, Chunk, GameItem, ShadowCascadeUniform, ShadowUniforms, SubChunk, Uniforms,
+    Vertex,
+};
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
     AABB, DrawIndexedIndirect, IndirectBufferBudget, IndirectManager, MeshLoader, SubchunkKey,
     add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_player_model,
+    build_shadow_frame_data, create_shadow_mask_texture, create_shadow_texture,
     extract_frustum_planes, generate_texture_atlas, load_texture_atlas_from_file,
 };
 pub use save::{DEFAULT_WORLD_FILE, SavedWorld, load_world, save_world};

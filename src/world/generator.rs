@@ -1364,7 +1364,8 @@ impl ChunkGenerator {
                     let tree_roll = tree_noise + vegetation * 0.18 - clearing_penalty;
 
                     if tree_roll > density_threshold {
-                        if hash % 100 < 18 {
+                        let tree_spawn_chance = if biome == Biome::Forest { 28 } else { 18 };
+                        if hash % 100 < tree_spawn_chance {
                             let ground = chunk.get_block(lx, height - 1, lz);
                             if matches!(ground, BlockType::Grass | BlockType::Dirt) {
                                 let is_large =

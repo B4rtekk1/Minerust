@@ -93,6 +93,10 @@ pub struct State {
     /// Depth-only prepass pipeline for terrain. Fills the depth buffer before
     /// Hi-Z compute passes.
     pub terrain_depth_pipeline: wgpu::RenderPipeline,
+    /// Depth-only directional-light pass used to fill cascaded shadow maps.
+    pub shadow_pipeline: wgpu::RenderPipeline,
+    /// Full-screen pass that evaluates CSM visibility into a half-resolution mask.
+    pub shadow_mask_pipeline: wgpu::RenderPipeline,
 
     // -------------------------------------------------------------------------
     // Static geometry buffers
@@ -128,6 +132,16 @@ pub struct State {
     pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
+    /// Per-frame CSM data sampled by the half-resolution shadow mask shader.
+    pub shadow_uniform_buffer: wgpu::Buffer,
+    /// Bind group exposing the upscaled shadow mask to the terrain shader.
+    pub shadow_bind_group: wgpu::BindGroup,
+    /// Bind group used by `shadow_mask_pipeline` to read depth and CSM data.
+    pub shadow_mask_source_bind_group: wgpu::BindGroup,
+    /// One small matrix uniform per shadow cascade render pass.
+    pub shadow_cascade_uniform_buffers: Vec<wgpu::Buffer>,
+    /// Bind groups for the depth-only shadow pass, one per cascade.
+    pub shadow_cascade_bind_groups: Vec<wgpu::BindGroup>,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
@@ -175,6 +189,25 @@ pub struct State {
     pub flow_map_view: wgpu::TextureView,
     /// Sampler used when reading the flow-map texture in the water shader.
     pub flow_sampler: wgpu::Sampler,
+    /// Depth texture array holding all cascaded shadow maps.
+    #[allow(dead_code)]
+    pub shadow_texture: wgpu::Texture,
+    /// View of `shadow_texture` as a `texture_depth_2d_array`.
+    #[allow(dead_code)]
+    pub shadow_view: wgpu::TextureView,
+    /// Per-layer views used as render attachments during shadow passes.
+    pub shadow_cascade_views: Vec<wgpu::TextureView>,
+    /// Comparison sampler used by Poisson PCF in the shadow mask shader.
+    #[allow(dead_code)]
+    pub shadow_sampler: wgpu::Sampler,
+    /// Half-resolution screen-space shadow visibility texture.
+    pub shadow_mask_texture: wgpu::Texture,
+    /// View of `shadow_mask_texture` sampled by the terrain shader.
+    pub shadow_mask_view: wgpu::TextureView,
+    /// Linear sampler used to upscale `shadow_mask_texture` to screen size.
+    pub shadow_mask_sampler: wgpu::Sampler,
+    /// Pixel dimensions of the half-resolution shadow mask `[width, height]`.
+    pub shadow_mask_size: [u32; 2],
 
     // -------------------------------------------------------------------------
     // Hi-Z (hierarchical depth) occlusion culling
@@ -339,6 +372,8 @@ pub struct State {
     pub menu_connect_button_buffer: glyphon::Buffer,
     /// "new world" menu label.
     pub menu_singleplayer_button_buffer: glyphon::Buffer,
+    /// Server-address input text shown after clicking "multiplayer".
+    pub menu_server_address_input_buffer: glyphon::Buffer,
 
     // In-game HUD text buffers.
     /// Item name label shown above the hotbar when the slot changes.

@@ -117,6 +117,86 @@ fn read_clipboard_text() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "windows")]
+fn write_clipboard_text(text: &str) -> bool {
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        #[link_name = "OpenClipboard"]
+        fn open_clipboard(hwnd_new_owner: *mut c_void) -> i32;
+        #[link_name = "CloseClipboard"]
+        fn close_clipboard() -> i32;
+        #[link_name = "EmptyClipboard"]
+        fn empty_clipboard() -> i32;
+        #[link_name = "SetClipboardData"]
+        fn set_clipboard_data(format: u32, mem: *mut c_void) -> *mut c_void;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GlobalAlloc"]
+        fn global_alloc(flags: u32, bytes: usize) -> *mut c_void;
+        #[link_name = "GlobalFree"]
+        fn global_free(mem: *mut c_void) -> *mut c_void;
+        #[link_name = "GlobalLock"]
+        fn global_lock(mem: *mut c_void) -> *mut c_void;
+        #[link_name = "GlobalUnlock"]
+        fn global_unlock(mem: *mut c_void) -> i32;
+    }
+
+    struct ClipboardGuard;
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                close_clipboard();
+            }
+        }
+    }
+
+    let wide = text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let byte_len = wide.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        if open_clipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        let _clipboard_guard = ClipboardGuard;
+
+        if empty_clipboard() == 0 {
+            return false;
+        }
+
+        let handle = global_alloc(GMEM_MOVEABLE, byte_len);
+        if handle.is_null() {
+            return false;
+        }
+
+        let ptr = global_lock(handle) as *mut u16;
+        if ptr.is_null() {
+            global_free(handle);
+            return false;
+        }
+
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        global_unlock(handle);
+
+        if set_clipboard_data(CF_UNICODETEXT, handle).is_null() {
+            global_free(handle);
+            return false;
+        }
+
+        true
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_clipboard_text(_text: &str) -> bool {
+    false
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +251,8 @@ fn read_clipboard_text() -> Option<String> {
 /// | Enter | Attempt to connect to the server. |
 /// | Escape | Resume play after entering a world; no-op on the initial menu. |
 /// | Backspace | Delete the last character in the active field. |
+/// | Ctrl+A | Select all text in the active field. |
+/// | Ctrl+C | Copy selected text from the active field. |
 /// | Ctrl+V | Paste clipboard text into the active field. |
 /// | F11 | Toggle borderless fullscreen. |
 /// | Any printable character | Appended to the active text field. |
@@ -333,11 +415,12 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                 } => {
                     state.last_input_time = Instant::now();
                     let pressed = key_state == ElementState::Pressed;
-                    let menu_control_v = state.game_state == GameState::Menu
+                    let menu_control_shortcut = state.game_state == GameState::Menu
                         && pressed
-                        && key == KeyCode::KeyV
                         && state.modifiers.control_key();
-                    let menu_paste_shortcut = menu_control_v && !repeat;
+                    let menu_edit_shortcut = menu_control_shortcut
+                        && matches!(key, KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyV);
+                    let menu_edit_shortcut_once = menu_edit_shortcut && !repeat;
 
                     // ---- Menu text-field input --------------------------------
                     // `text` carries the OS-processed character (respecting the
@@ -346,7 +429,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     // and IME input transparently.
                     if state.game_state == GameState::Menu
                         && pressed
-                        && !menu_control_v
+                        && !menu_edit_shortcut
                         && state.menu_state.is_editing()
                     {
                         if let Some(ref txt) = text {
@@ -360,7 +443,15 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         // ---- Menu navigation hotkeys -------------------------
                         if pressed {
                             match key {
-                                KeyCode::KeyV if menu_paste_shortcut => {
+                                KeyCode::KeyA if menu_edit_shortcut_once => {
+                                    state.menu_state.select_all_current_field();
+                                }
+                                KeyCode::KeyC if menu_edit_shortcut_once => {
+                                    if let Some(text) = state.menu_state.selected_text() {
+                                        write_clipboard_text(text);
+                                    }
+                                }
+                                KeyCode::KeyV if menu_edit_shortcut_once => {
                                     if let Some(text) = read_clipboard_text() {
                                         state.menu_state.handle_paste(&text);
                                     }

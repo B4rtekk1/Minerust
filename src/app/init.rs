@@ -16,7 +16,9 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
     Camera, DiggingState, IndirectBufferBudget, IndirectManager, InputState, OutlineVertex,
-    SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
+    SEA_LEVEL, SHADOW_CASCADE_COUNT, SHADOW_DISTANCE, SHADOW_MAP_SIZE, SHADOW_PCF_RADIUS_TEXELS,
+    ShadowCascadeUniform, ShadowUniforms, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
+    create_shadow_mask_texture, create_shadow_texture,
 };
 
 use super::state::State;
@@ -300,6 +302,14 @@ impl State {
             // Main opaque geometry pass: texture atlas lookup and lighting.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("CSM Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
+        });
+        let shadow_mask_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shadow Mask Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow_mask.wgsl").into()),
+        });
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
             // Translucent water pass: SSR reflection, refraction, foam edge
@@ -363,6 +373,35 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let identity_shadow_matrices = [Mat4::IDENTITY.to_cols_array_2d(); SHADOW_CASCADE_COUNT];
+        let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Shadow Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[ShadowUniforms {
+                light_view_proj: identity_shadow_matrices,
+                cascade_splits: [0.0; 4],
+                camera_forward: [1.0, 0.0, 0.0],
+                shadow_strength: 0.0,
+                params: [
+                    SHADOW_MAP_SIZE as f32,
+                    SHADOW_CASCADE_COUNT as f32,
+                    SHADOW_PCF_RADIUS_TEXELS,
+                    SHADOW_DISTANCE,
+                ],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shadow_cascade_uniform_buffers = (0..SHADOW_CASCADE_COUNT)
+            .map(|cascade| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("Shadow Cascade Uniform Buffer {}", cascade)),
+                    contents: bytemuck::cast_slice(&[ShadowCascadeUniform {
+                        light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                    }]),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                })
+            })
+            .collect::<Vec<_>>();
+
         // ------------------------------------------------------------------ //
         // Texture atlas
         // ------------------------------------------------------------------ //
@@ -384,6 +423,21 @@ impl State {
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             anisotropy_clamp: 16,
+            ..Default::default()
+        });
+
+        let (shadow_texture, shadow_view, shadow_cascade_views, shadow_sampler) =
+            create_shadow_texture(&device);
+        let (shadow_mask_texture, shadow_mask_view, shadow_mask_size) =
+            create_shadow_mask_texture(&device, config.width, config.height);
+        let shadow_mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Mask Upscale Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -429,6 +483,97 @@ impl State {
                         count: None,
                     },
                 ],
+            });
+
+        let shadow_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow_mask_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let shadow_mask_source_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow_mask_source_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
+            });
+
+        let shadow_cascade_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow_cascade_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
             });
 
         // ------------------------------------------------------------------ //
@@ -677,6 +822,63 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow_bind_group"),
+            layout: &shadow_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_mask_sampler),
+                },
+            ],
+        });
+
+        let shadow_mask_source_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow_mask_source_bind_group"),
+            layout: &shadow_mask_source_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shadow_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
+
+        let shadow_cascade_bind_groups = shadow_cascade_uniform_buffers
+            .iter()
+            .enumerate()
+            .map(|(cascade, buffer)| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("shadow_cascade_bind_group_{}", cascade)),
+                    layout: &shadow_cascade_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
+            })
+            .collect::<Vec<_>>();
+
         // ------------------------------------------------------------------ //
         // Pipeline layouts
         // ------------------------------------------------------------------ //
@@ -687,6 +889,27 @@ impl State {
             bind_group_layouts: &[&uniform_bind_group_layout],
             immediate_size: 0,
         });
+
+        let terrain_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Terrain Pipeline Layout"),
+                bind_group_layouts: &[&uniform_bind_group_layout, &shadow_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Shadow Pipeline Layout"),
+                bind_group_layouts: &[&shadow_cascade_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let shadow_mask_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Shadow Mask Pipeline Layout"),
+                bind_group_layouts: &[&shadow_mask_source_bind_group_layout],
+                immediate_size: 0,
+            });
 
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -703,7 +926,7 @@ impl State {
         // Back-face culled, depth write enabled, 4× MSAA.
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&terrain_pipeline_layout),
             cache: None,
             vertex: wgpu::VertexState {
                 module: &terrain_shader,
@@ -776,6 +999,71 @@ impl State {
                 },
                 multiview_mask: None,
             });
+
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("CSM Shadow Pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[Vertex::desc()],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+        });
+
+        let shadow_mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Half Resolution Shadow Mask Pipeline"),
+            layout: Some(&shadow_mask_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &shadow_mask_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_mask_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+        });
 
         // --- Water (translucent, alpha-blended) ---
         // No back-face culling so water surfaces are visible from below.
@@ -1123,6 +1411,8 @@ impl State {
             glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
         let menu_singleplayer_button_buffer =
             glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
+        let menu_server_address_input_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
 
         // Hotbar slot name (e.g., "Stone Sword") displayed above the hotbar.
         let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
@@ -1515,6 +1805,8 @@ impl State {
             uniform_buffer,
             uniform_bind_group,
             terrain_depth_pipeline,
+            shadow_pipeline,
+            shadow_mask_pipeline,
             depth_texture,
             msaa_texture_view,
             world,
@@ -1579,6 +1871,14 @@ impl State {
             flow_map_texture,
             flow_map_view,
             flow_sampler,
+            shadow_texture,
+            shadow_view,
+            shadow_cascade_views,
+            shadow_sampler,
+            shadow_mask_texture,
+            shadow_mask_view,
+            shadow_mask_sampler,
+            shadow_mask_size,
             water_bind_group,
             water_bind_group_layout,
             surface_format,
@@ -1591,6 +1891,7 @@ impl State {
             show_debug_overlay: true,
             menu_connect_button_buffer,
             menu_singleplayer_button_buffer,
+            menu_server_address_input_buffer,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,
             last_hotbar_slot: usize::MAX,
@@ -1613,6 +1914,11 @@ impl State {
             hiz_size,
             depth_resolve_pipeline,
             depth_resolve_bind_group,
+            shadow_uniform_buffer,
+            shadow_bind_group,
+            shadow_mask_source_bind_group,
+            shadow_cascade_uniform_buffers,
+            shadow_cascade_bind_groups,
             supports_indirect_count,
             hotbar_slot: 0,
             hotbar_vertex_buffer: None,

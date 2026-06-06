@@ -12,5 +12,5 @@ pub use biome::Biome;
 pub use block::BlockType;
 pub use chunk::{Chunk, SubChunk};
 pub use game_item::GameItem;
-pub use uniforms::Uniforms;
+pub use uniforms::{ShadowCascadeUniform, ShadowUniforms, Uniforms};
 pub use vertex::Vertex;

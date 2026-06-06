@@ -3,13 +3,14 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
-    build_block_outline, build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, SHADOW_CASCADE_COUNT, Uniforms,
+    Vertex, World, build_block_outline, build_player_model, build_shadow_frame_data,
+    extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
 use crate::multiplayer::player::queue_remote_players_labels;
-use crate::ui::menu::{GameState, MenuHit, MenuLayout};
+use crate::ui::menu::{GameState, MenuField, MenuHit, MenuLayout};
 
 use super::init::frustum_planes_to_array;
 use super::state::State;
@@ -32,6 +33,72 @@ fn visible_outline_faces(world: &World, bx: i32, by: i32, bz: i32) -> [bool; 6] 
         block.should_render_face_against(world.get_block(bx, by, bz + 1)),
         block.should_render_face_against(world.get_block(bx, by, bz - 1)),
     ]
+}
+
+fn append_ui_quad(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: [f32; 4],
+) {
+    let base = vertices.len() as u32;
+    let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+
+    for (i, (x, y)) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        .into_iter()
+        .enumerate()
+    {
+        vertices.push(Vertex {
+            position: [x, y, 0.0],
+            packed: Vertex::pack_ui(normal, color, 0, i as u8),
+        });
+    }
+
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn build_menu_input_box(
+    rect: crate::ui::menu::Rect,
+    screen_width: f32,
+    screen_height: f32,
+    focused: bool,
+    selected: bool,
+) -> (Vec<Vertex>, Vec<u32>) {
+    let x0 = rect.x / screen_width * 2.0 - 1.0;
+    let x1 = (rect.x + rect.w) / screen_width * 2.0 - 1.0;
+    let y0 = 1.0 - (rect.y + rect.h) / screen_height * 2.0;
+    let y1 = 1.0 - rect.y / screen_height * 2.0;
+
+    let border_x = 4.0 / screen_width;
+    let border_y = 4.0 / screen_height;
+    let border_color = if focused {
+        [0.78, 0.92, 1.0, 0.95]
+    } else {
+        [0.38, 0.50, 0.58, 0.85]
+    };
+    let inner_color = if selected {
+        [0.20, 0.38, 0.60, 0.86]
+    } else {
+        [0.10, 0.14, 0.18, 0.78]
+    };
+
+    let mut vertices = Vec::with_capacity(8);
+    let mut indices = Vec::with_capacity(12);
+    append_ui_quad(&mut vertices, &mut indices, x0, y0, x1, y1, border_color);
+    append_ui_quad(
+        &mut vertices,
+        &mut indices,
+        x0 + border_x,
+        y0 + border_y,
+        x1 - border_x,
+        y1 - border_y,
+        inner_color,
+    );
+
+    (vertices, indices)
 }
 
 impl State {
@@ -221,6 +288,14 @@ impl State {
 
         // The moon is always opposite the sun direction.
         let moon_position = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
+        let shadow_frame = build_shadow_frame_data(
+            view_mat,
+            aspect,
+            0.1,
+            far_plane,
+            self.camera.look_direction(),
+            sun_dir,
+        );
 
         // Chunk coordinates of the camera, used to center the render window.
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
@@ -260,6 +335,18 @@ impl State {
                 _pad_uniforms: 0.0,
             }]),
         );
+        self.queue.write_buffer(
+            &self.shadow_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&shadow_frame.uniforms),
+        );
+        for cascade in 0..SHADOW_CASCADE_COUNT {
+            self.queue.write_buffer(
+                &self.shadow_cascade_uniform_buffers[cascade],
+                0,
+                bytemuck::bytes_of(&shadow_frame.cascade_uniforms[cascade]),
+            );
+        }
 
         // ── Frustum planes (main camera) ──────────────────────────────────── //
         // Six half-space planes derived from the combined view-projection
@@ -354,6 +441,60 @@ impl State {
             [self.config.width as f32, self.config.height as f32],
         );
 
+        // ── Cascaded shadow map pass ──────────────────────────────────────── //
+        // Render one depth-only layer per cascade. The pass reuses the camera
+        // visible indirect list to avoid a second per-light culling pipeline.
+        if render_world_scene && shadow_frame.uniforms.shadow_strength > 0.001 {
+            for cascade in 0..SHADOW_CASCADE_COUNT {
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("CSM Shadow Cascade Pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_cascade_views[cascade],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                shadow_pass.set_pipeline(&self.shadow_pipeline);
+                shadow_pass.set_bind_group(0, &self.shadow_cascade_bind_groups[cascade], &[]);
+                shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
+                shadow_pass.set_index_buffer(
+                    self.indirect_manager.index_buffer().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                if self.supports_indirect_count {
+                    shadow_pass.multi_draw_indexed_indirect_count(
+                        self.indirect_manager.draw_commands(),
+                        0,
+                        self.indirect_manager.visible_count_buffer(),
+                        0,
+                        self.indirect_manager.active_count(),
+                    );
+                } else {
+                    shadow_pass.multi_draw_indexed_indirect(
+                        self.indirect_manager.draw_commands(),
+                        0,
+                        self.indirect_manager.active_count(),
+                    );
+                }
+
+                if self.player_model_num_indices > 0 {
+                    if let (Some(vb), Some(ib)) = (
+                        &self.player_model_vertex_buffer,
+                        &self.player_model_index_buffer,
+                    ) {
+                        shadow_pass.set_vertex_buffer(0, vb.slice(..));
+                        shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
+                    }
+                }
+            }
+        }
+
         // ── Terrain depth prepass ─────────────────────────────────────────── //
         // Fill the MSAA depth buffer first so we can resolve it for Hi-Z.
         if render_world_scene {
@@ -418,6 +559,33 @@ impl State {
                 (self.config.height + 15) / 16,
                 1,
             );
+        }
+
+        // ── Half-resolution shadow mask pass ─────────────────────────────── //
+        // Evaluate the expensive PCF CSM lookup once per half-resolution pixel.
+        // Terrain shading samples this mask with linear filtering, effectively
+        // upscaling it back to the full screen.
+        if render_world_scene {
+            let mut shadow_mask_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Half Resolution Shadow Mask Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.shadow_mask_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            if shadow_frame.uniforms.shadow_strength > 0.001 {
+                shadow_mask_pass.set_pipeline(&self.shadow_mask_pipeline);
+                shadow_mask_pass.set_bind_group(0, &self.shadow_mask_source_bind_group, &[]);
+                shadow_mask_pass.draw(0..3, 0..1);
+            }
         }
 
         // ── Hi-Z mip chain generation (compute) ───────────────────────────── //
@@ -487,6 +655,7 @@ impl State {
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
             opaque_pass.set_index_buffer(
                 self.indirect_manager.index_buffer().slice(..),
@@ -518,6 +687,7 @@ impl State {
                 ) {
                     opaque_pass.set_pipeline(&self.render_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     opaque_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
@@ -698,10 +868,41 @@ impl State {
                 ..Default::default()
             });
 
-            if !menu_visible {
-                ui_pass.set_pipeline(&self.crosshair_pipeline);
-                ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            ui_pass.set_pipeline(&self.crosshair_pipeline);
+            ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
 
+            if menu_visible {
+                if self.menu_state.server_address_input_visible {
+                    let layout = MenuLayout::new(self.config.width, self.config.height);
+                    let focused = self.menu_state.selected_field == MenuField::ServerAddress;
+                    let selected = focused && self.menu_state.selected_all;
+                    let (vertices, indices) = build_menu_input_box(
+                        layout.server_address_input,
+                        self.config.width as f32,
+                        self.config.height as f32,
+                        focused,
+                        selected,
+                    );
+                    let input_vb =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Menu Server Address Input VB"),
+                                contents: bytemuck::cast_slice(&vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
+                    let input_ib =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Menu Server Address Input IB"),
+                                contents: bytemuck::cast_slice(&indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            });
+
+                    ui_pass.set_vertex_buffer(0, input_vb.slice(..));
+                    ui_pass.set_index_buffer(input_ib.slice(..), wgpu::IndexFormat::Uint32);
+                    ui_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                }
+            } else {
                 // --- Crosshair ---
                 if self.show_crosshair {
                     ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
@@ -1049,6 +1250,30 @@ impl State {
                     default_color: multiplayer_color,
                     custom_glyphs: &[],
                 });
+                if self.menu_state.server_address_input_visible {
+                    let input = layout.server_address_input;
+                    let input_focused = self.menu_state.selected_field == MenuField::ServerAddress;
+                    let input_text_color = if input_focused {
+                        Color::rgb(255, 255, 255)
+                    } else {
+                        Color::rgb(215, 230, 238)
+                    };
+
+                    text_areas.push(TextArea {
+                        buffer: &self.menu_server_address_input_buffer,
+                        left: input.x + 12.0,
+                        top: input.y + 8.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: input.x as i32,
+                            top: input.y as i32,
+                            right: (input.x + input.w) as i32,
+                            bottom: (input.y + input.h) as i32,
+                        },
+                        default_color: input_text_color,
+                        custom_glyphs: &[],
+                    });
+                }
             } else {
                 // ---- In-game HUD text ----
 
@@ -1138,8 +1363,10 @@ impl State {
         Ok(())
     }
 
-    /// Updates the two clickable main-menu labels.
+    /// Updates the main-menu labels and the optional server-address input.
     pub fn prepare_menu_text(&mut self) {
+        let layout = MenuLayout::new(self.config.width, self.config.height);
+
         self.menu_connect_button_buffer.set_text(
             &mut self.font_system,
             "MULTIPLAYER",
@@ -1164,6 +1391,26 @@ impl State {
             &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.config.height as f32),
+        );
+
+        let show_cursor = self.menu_state.selected_field == MenuField::ServerAddress
+            && !self.menu_state.selected_all;
+        let server_address_text = if show_cursor {
+            format!("{}_", self.menu_state.server_address)
+        } else {
+            self.menu_state.server_address.clone()
+        };
+        self.menu_server_address_input_buffer.set_text(
+            &mut self.font_system,
+            &server_address_text,
+            &Attrs::new().family(Family::Name("Google Sans")),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_server_address_input_buffer.set_size(
+            &mut self.font_system,
+            Some((layout.server_address_input.w - 24.0).max(32.0)),
+            Some(layout.server_address_input.h),
         );
     }
 

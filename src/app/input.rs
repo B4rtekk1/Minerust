@@ -4,7 +4,7 @@ use winit::event::MouseButton;
 use winit::window::CursorGrabMode;
 
 use crate::logger::{LogLevel, log};
-use crate::ui::menu::{MenuHit, MenuLayout};
+use crate::ui::menu::{MenuField, MenuHit, MenuLayout};
 use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
@@ -24,7 +24,7 @@ impl State {
     /// | `MenuHit` variant       | Effect                                                  |
     /// |-------------------------|---------------------------------------------------------|
     /// | `NewWorld`              | Transitions directly to `GameState::Playing`.           |
-    /// | `Multiplayer`           | Initiates a multiplayer connection attempt.             |
+    /// | `Multiplayer`           | Shows and focuses the server-address input box.         |
     /// | `None` (missed all UI)  | Clears the active field so keyboard input is ignored.   |
     ///
     /// # Parameters
@@ -33,10 +33,17 @@ impl State {
     pub fn handle_menu_click(&mut self, x: f32, y: f32) {
         let layout = MenuLayout::new(self.config.width, self.config.height);
 
+        if self.menu_state.server_address_input_visible
+            && layout.server_address_input.contains(x, y)
+        {
+            self.menu_state.select_field(MenuField::ServerAddress);
+            return;
+        }
+
         match layout.hit_test(x, y) {
             Some(MenuHit::NewWorld) => self.start_new_world(),
-            Some(MenuHit::Multiplayer) => self.connect_to_server(),
-            None => {}
+            Some(MenuHit::Multiplayer) => self.menu_state.show_server_address_input(),
+            None => self.menu_state.select_field(MenuField::None),
         }
     }
 
