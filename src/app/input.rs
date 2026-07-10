@@ -41,10 +41,22 @@ impl State {
         }
 
         match layout.hit_test(x, y) {
+            Some(MenuHit::RenderMode) => self.toggle_present_mode(),
             Some(MenuHit::NewWorld) => self.start_new_world(),
             Some(MenuHit::Multiplayer) => self.menu_state.show_server_address_input(),
             None => self.menu_state.select_field(MenuField::None),
         }
+    }
+
+    /// Switches immediately between uncapped presentation and display-synced
+    /// presentation. Both modes are supported by the active surface because
+    /// the initial configuration uses `Immediate` and `Fifo` is mandatory.
+    fn toggle_present_mode(&mut self) {
+        self.config.present_mode = match self.config.present_mode {
+            wgpu::PresentMode::Fifo => wgpu::PresentMode::Immediate,
+            _ => wgpu::PresentMode::Fifo,
+        };
+        self.surface.configure(&self.device, &self.config);
     }
 
     fn start_new_world(&mut self) {

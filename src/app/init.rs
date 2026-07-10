@@ -238,25 +238,14 @@ impl State {
             // `Immediate` disables vsync so the frame rate is uncapped.
             // Switch to `Fifo` (vsync) to reduce GPU power consumption.
             present_mode: wgpu::PresentMode::Immediate,
+            // A game window must never expose the desktop through its
+            // swap-chain. Prefer an opaque compositor surface; premultiplied
+            // alpha occasionally makes the whole window translucent on Windows.
             alpha_mode: surface_caps
                 .alpha_modes
                 .iter()
                 .copied()
-                .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::PreMultiplied))
-                .or_else(|| {
-                    surface_caps
-                        .alpha_modes
-                        .iter()
-                        .copied()
-                        .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::PostMultiplied))
-                })
-                .or_else(|| {
-                    surface_caps
-                        .alpha_modes
-                        .iter()
-                        .copied()
-                        .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::Inherit))
-                })
+                .find(|mode| matches!(mode, wgpu::CompositeAlphaMode::Opaque))
                 .unwrap_or(surface_caps.alpha_modes[0]),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -749,41 +738,6 @@ impl State {
             multiview_mask: None,
         });
 
-        // --- Terrain depth prepass (depth-only) ---
-        // Fills the MSAA depth buffer so it can be resolved for Hi-Z and water.
-        let terrain_depth_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Terrain Depth Pipeline"),
-                layout: Some(&pipeline_layout),
-                cache: None,
-                vertex: wgpu::VertexState {
-                    module: &terrain_shader,
-                    entry_point: Some("vs_depth"),
-                    compilation_options: Default::default(),
-                    buffers: &[Vertex::desc()],
-                },
-                fragment: None,
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: msaa_sample_count,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-            });
-
         // --- Water (translucent, alpha-blended) ---
         // No back-face culling so water surfaces are visible from below.
         // Depth writes are disabled: water contributes to color but must not
@@ -1130,6 +1084,8 @@ impl State {
             glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
         let menu_singleplayer_button_buffer =
             glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
+        let menu_render_mode_button_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
         let menu_server_address_input_buffer =
             glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
 
@@ -1523,7 +1479,6 @@ impl State {
             show_crosshair: true,
             uniform_buffer,
             uniform_bind_group,
-            terrain_depth_pipeline,
             depth_texture,
             msaa_texture_view,
             world,
@@ -1600,6 +1555,7 @@ impl State {
             show_debug_overlay: true,
             menu_connect_button_buffer,
             menu_singleplayer_button_buffer,
+            menu_render_mode_button_buffer,
             menu_server_address_input_buffer,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,

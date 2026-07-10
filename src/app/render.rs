@@ -420,87 +420,6 @@ impl State {
             [self.config.width as f32, self.config.height as f32],
         );
 
-        // ── Terrain depth prepass ─────────────────────────────────────────── //
-        // Fill the MSAA depth buffer first so we can resolve it for Hi-Z.
-        if render_world_scene {
-            let mut depth_prepass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Terrain Depth Prepass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            depth_prepass.set_pipeline(&self.terrain_depth_pipeline);
-            depth_prepass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            depth_prepass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
-            depth_prepass.set_index_buffer(
-                self.indirect_manager.index_buffer().slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            if self.supports_indirect_count {
-                depth_prepass.multi_draw_indexed_indirect_count(
-                    self.indirect_manager.draw_commands(),
-                    0,
-                    self.indirect_manager.visible_count_buffer(),
-                    0,
-                    self.indirect_manager.active_count(),
-                );
-            } else {
-                depth_prepass.multi_draw_indexed_indirect(
-                    self.indirect_manager.draw_commands(),
-                    0,
-                    self.indirect_manager.active_count(),
-                );
-            }
-            if self.player_model_num_indices > 0 {
-                if let (Some(vb), Some(ib)) = (
-                    &self.player_model_vertex_buffer,
-                    &self.player_model_index_buffer,
-                ) {
-                    depth_prepass.set_vertex_buffer(0, vb.slice(..));
-                    depth_prepass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    depth_prepass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);
-                }
-            }
-        }
-
-        // ── Depth resolve compute pass ───────────────────────────────────── //
-        // Resolve MSAA depth early (from the prepass) so Hi-Z can be rebuilt.
-        if render_world_scene {
-            let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Depth Resolve Compute Pass (Prepass)"),
-                timestamp_writes: None,
-            });
-            depth_resolve_pass.set_pipeline(&self.depth_resolve_pipeline);
-            depth_resolve_pass.set_bind_group(0, &self.depth_resolve_bind_group, &[]);
-            depth_resolve_pass.dispatch_workgroups(
-                (self.config.width + 15) / 16,
-                (self.config.height + 15) / 16,
-                1,
-            );
-        }
-
-        // ── Hi-Z mip chain generation (compute) ───────────────────────────── //
-        // Downsample the resolved depth (seeded above) into the Hi-Z pyramid.
-        for i in 0..self.hiz_bind_groups.len() {
-            let mut hiz_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Hi-Z Generation Pass Level"),
-                timestamp_writes: None,
-            });
-            hiz_pass.set_pipeline(&self.hiz_pipeline);
-            hiz_pass.set_bind_group(0, &self.hiz_bind_groups[i], &[]);
-            let div = 1 << (i + 1);
-            let mip_width = (self.hiz_size[0] / div).max(1);
-            let mip_height = (self.hiz_size[1] / div).max(1);
-            hiz_pass.dispatch_workgroups((mip_width + 15) / 16, (mip_height + 15) / 16, 1);
-        }
-
         // ── Opaque pass ───────────────────────────────────────────────────── //
         // Renders: sky dome → terrain chunks → remote player models → sun/moon.
         // Writes to the 4× MSAA color target which is resolved simultaneously
@@ -528,8 +447,8 @@ impl State {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_texture,
                     depth_ops: Some(wgpu::Operations {
-                        // Re-clear for the color pass; prepass depth is only
-                        // used earlier for Hi-Z compute.
+                        // This is the only terrain rasterization. Its depth is
+                        // resolved into Hi-Z after the pass for next-frame culling.
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
                     }),
@@ -599,6 +518,38 @@ impl State {
             opaque_pass
                 .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             opaque_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        // ── Depth resolve + Hi-Z generation ───────────────────────────────── //
+        // The opaque pass above produced the depth buffer, eliminating the
+        // former terrain depth prepass. Culling at the start of this frame reads
+        // the previous pyramid; this freshly built pyramid is consumed next frame.
+        if render_world_scene {
+            let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Depth Resolve Compute Pass"),
+                timestamp_writes: None,
+            });
+            depth_resolve_pass.set_pipeline(&self.depth_resolve_pipeline);
+            depth_resolve_pass.set_bind_group(0, &self.depth_resolve_bind_group, &[]);
+            depth_resolve_pass.dispatch_workgroups(
+                (self.config.width + 15) / 16,
+                (self.config.height + 15) / 16,
+                1,
+            );
+            drop(depth_resolve_pass);
+
+            for i in 0..self.hiz_bind_groups.len() {
+                let mut hiz_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Hi-Z Generation Pass Level"),
+                    timestamp_writes: None,
+                });
+                hiz_pass.set_pipeline(&self.hiz_pipeline);
+                hiz_pass.set_bind_group(0, &self.hiz_bind_groups[i], &[]);
+                let div = 1 << (i + 1);
+                let mip_width = (self.hiz_size[0] / div).max(1);
+                let mip_height = (self.hiz_size[1] / div).max(1);
+                hiz_pass.dispatch_workgroups((mip_width + 15) / 16, (mip_height + 15) / 16, 1);
+            }
         }
 
         // ── Transparent (water) pass ──────────────────────────────────────── //
@@ -1109,6 +1060,7 @@ impl State {
                     .and_then(|(x, y)| layout.hit_test(x, y));
                 let new_world_hovered = matches!(hovered, Some(MenuHit::NewWorld));
                 let multiplayer_hovered = matches!(hovered, Some(MenuHit::Multiplayer));
+                let render_mode_hovered = matches!(hovered, Some(MenuHit::RenderMode));
                 let hover_text_color = Color::rgb(255, 255, 255);
                 let menu_text_top_offset = 3.0;
                 let menu_text_bounds = TextBounds {
@@ -1127,6 +1079,21 @@ impl State {
                 } else {
                     Color::rgb(211, 226, 238)
                 };
+                let render_mode_color = if render_mode_hovered {
+                    hover_text_color
+                } else {
+                    Color::rgb(184, 205, 220)
+                };
+
+                text_areas.push(TextArea {
+                    buffer: &self.menu_render_mode_button_buffer,
+                    left: layout.render_mode_text.x,
+                    top: layout.render_mode_text.y + menu_text_top_offset,
+                    scale: 1.0,
+                    bounds: menu_text_bounds,
+                    default_color: render_mode_color,
+                    custom_glyphs: &[],
+                });
 
                 text_areas.push(TextArea {
                     buffer: &self.menu_singleplayer_button_buffer,
@@ -1284,6 +1251,23 @@ impl State {
             None,
         );
         self.menu_singleplayer_button_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        let render_mode_text = match self.config.present_mode {
+            wgpu::PresentMode::Fifo => "RENDER MODE: VSYNC",
+            _ => "RENDER MODE: INSTANT",
+        };
+        self.menu_render_mode_button_buffer.set_text(
+            &mut self.font_system,
+            render_mode_text,
+            &Attrs::new().family(Family::Name("Google Sans")),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_render_mode_button_buffer.set_size(
             &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.config.height as f32),

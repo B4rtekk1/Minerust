@@ -69,14 +69,7 @@ pub fn add_quad_with_ao(
         position: v3,
         packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 0, 1, 1, ao[3]),
     });
-    indices.extend_from_slice(&[
-        base_idx,
-        base_idx + 1,
-        base_idx + 2,
-        base_idx,
-        base_idx + 2,
-        base_idx + 3,
-    ]);
+    append_ao_quad_indices(indices, base_idx, ao);
 }
 
 /// Adds a greedy-meshed quad to the vertex and index buffers.
@@ -158,14 +151,53 @@ pub fn add_greedy_quad_with_ao(
         position: v3,
         packed: Vertex::pack_with_ao(n_idx, color, tex_index as u8, 0, w, h, ao[3]),
     });
-    indices.extend_from_slice(&[
-        base_idx,
-        base_idx + 1,
-        base_idx + 2,
-        base_idx,
-        base_idx + 2,
-        base_idx + 3,
-    ]);
+    append_ao_quad_indices(indices, base_idx, ao);
+}
+
+/// Triangulates a quad along the diagonal that produces the smoothest AO
+/// interpolation. A fixed diagonal creates a visible triangular seam whenever
+/// the corner occlusion differs.
+fn append_ao_quad_indices(indices: &mut Vec<u32>, base_idx: u32, ao: [u8; 4]) {
+    if u16::from(ao[0]) + u16::from(ao[2]) > u16::from(ao[1]) + u16::from(ao[3]) {
+        indices.extend_from_slice(&[
+            base_idx,
+            base_idx + 1,
+            base_idx + 3,
+            base_idx + 1,
+            base_idx + 2,
+            base_idx + 3,
+        ]);
+    } else {
+        indices.extend_from_slice(&[
+            base_idx,
+            base_idx + 1,
+            base_idx + 2,
+            base_idx,
+            base_idx + 2,
+            base_idx + 3,
+        ]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_ao_quad_indices;
+
+    #[test]
+    fn ao_selects_the_alternate_diagonal_when_it_is_smoother() {
+        let mut indices = Vec::new();
+        append_ao_quad_indices(&mut indices, 10, [3, 0, 3, 0]);
+
+        assert_eq!(indices, vec![10, 11, 13, 11, 12, 13]);
+    }
+
+    #[test]
+    fn uniform_ao_keeps_the_default_diagonal() {
+        let mut indices = Vec::new();
+        append_ao_quad_indices(&mut indices, 0, [3; 4]);
+
+        assert_eq!(indices, vec![0, 1, 2, 0, 2, 3]);
+    }
 }
 
 /// Builds the geometry for a screen-space crosshair overlay.

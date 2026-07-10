@@ -90,9 +90,6 @@ pub struct State {
     /// Compute pipeline that resolves the MSAA depth buffer into Hi-Z seed
     /// level 0 and the single-sampled SSR depth texture.
     pub depth_resolve_pipeline: wgpu::ComputePipeline,
-    /// Depth-only prepass pipeline for terrain. Fills the depth buffer before
-    /// Hi-Z compute passes.
-    pub terrain_depth_pipeline: wgpu::RenderPipeline,
 
     // -------------------------------------------------------------------------
     // Static geometry buffers
@@ -339,6 +336,8 @@ pub struct State {
     pub menu_connect_button_buffer: glyphon::Buffer,
     /// "new world" menu label.
     pub menu_singleplayer_button_buffer: glyphon::Buffer,
+    /// Render presentation mode toggle shown in the main menu.
+    pub menu_render_mode_button_buffer: glyphon::Buffer,
     /// Server-address input text shown after clicking "multiplayer".
     pub menu_server_address_input_buffer: glyphon::Buffer,
 

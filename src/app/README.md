@@ -137,8 +137,8 @@ F11           → Fullscreen
 **Purpose:** Orchestrates the rendering pipeline.
 
 **Render Passes (in order):**
-1. **Depth Prepass** - Early depth rejection
-2. **Terrain Pass** - Render solid blocks
+1. **Terrain Pass** - Render solid blocks and write depth
+2. **Depth Resolve + Hi-Z** - Build next-frame occlusion data from opaque depth
 3. **Water Pass** - Render water with special effects
 4. **Composite Pass** - Combine passes, apply post-effects
 5. **UI Pass** - Render text, buttons, HUD

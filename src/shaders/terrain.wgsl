@@ -30,7 +30,12 @@ fn fast_global_illumination(
     day_factor:      f32,
     twilight_factor: f32,
 ) -> vec3<f32> {
-    let sky_visibility    = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    let face_sky_visibility = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    // `sky_visibility` is sampled above the camera on the CPU. Without it,
+    // every terrain fragment receives outdoor sky and sunlight, including
+    // fragments in a cave below a solid ceiling.
+    let area_sky_visibility = clamp(uniforms.sky_visibility, 0.0, 1.0);
+    let cave_ambient = mix(0.08, 1.0, area_sky_visibility);
     let ground_visibility = clamp(0.5 - normal.y * 0.5, 0.0, 1.0);
     let side_visibility   = 1.0 - abs(normal.y);
 
@@ -51,10 +56,11 @@ fn fast_global_illumination(
     let sky_energy    = mix(0.035, 0.27, day_factor) + twilight_factor * 0.08;
     let ground_energy = mix(0.010, 0.070, day_factor) + twilight_factor * 0.020;
 
-    let sky_light    = sky_color * sky_energy * (0.35 + 0.65 * sky_visibility);
+    let sky_light    = sky_color * sky_energy * (0.35 + 0.65 * face_sky_visibility) * cave_ambient;
     let ground_light = ground_color
         * ground_energy
-        * (ground_visibility + side_visibility * 0.35);
+        * (ground_visibility + side_visibility * 0.35)
+        * mix(0.35, 1.0, area_sky_visibility);
 
     let bounce_dir = normalize(vec3<f32>(-sun_dir.x, 0.32, -sun_dir.z));
     let wrap_bounce = pow(clamp(dot(normal, bounce_dir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
@@ -62,6 +68,7 @@ fn fast_global_illumination(
         * wrap_bounce
         * side_visibility
         * day_factor
+        * area_sky_visibility
         * 0.045;
 
     let ambient = sky_light + ground_light + sun_bounce;
@@ -154,9 +161,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
 
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
-    let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * day_factor;
+    // Direct sunlight and sky fill cannot reach an area with a solid ceiling.
+    let sun_exposure = smoothstep(0.0, 0.20, uniforms.sky_visibility);
+    let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * day_factor * sun_exposure;
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
-    let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor;
+    let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor * sun_exposure;
 
     var face_shade: f32;
     if      abs(normal.y) > 0.5 { face_shade = select(0.5, 1.0, normal.y > 0.0); }

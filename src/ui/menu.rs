@@ -247,6 +247,8 @@ impl MenuState {
 /// appropriate action without needing to know the layout geometry directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuHit {
+    /// The render presentation mode toggle was clicked.
+    RenderMode,
     /// The "new world" menu label was clicked.
     NewWorld,
     /// The "multiplayer" menu label was clicked.
@@ -284,6 +286,8 @@ impl Rect {
 /// with the origin at the top-left of the window.
 #[derive(Debug, Clone, Copy)]
 pub struct MenuLayout {
+    /// Clickable bounds for the render mode toggle.
+    pub render_mode_text: Rect,
     /// Clickable bounds for the "new world" label.
     pub new_world_text: Rect,
     /// Clickable bounds for the "multiplayer" label.
@@ -309,11 +313,12 @@ impl MenuLayout {
         let hit_w = (w * 0.22).clamp(180.0, 300.0).min((w - 32.0).max(160.0));
         let hit_h = 48.0;
         let gap = 14.0;
-        let total_h = hit_h * 2.0 + gap;
+        let total_h = hit_h * 3.0 + gap * 2.0;
         let x = (w * 0.045).clamp(20.0, 72.0);
         let bottom_margin = (h * 0.14).clamp(48.0, 120.0);
         let y = (h - total_h - bottom_margin).max(24.0);
-        let multiplayer_y = y + hit_h + gap;
+        let new_world_y = y + hit_h + gap;
+        let multiplayer_y = new_world_y + hit_h + gap;
 
         let input_gap = 18.0;
         let right_margin = x;
@@ -335,9 +340,15 @@ impl MenuLayout {
         };
 
         Self {
-            new_world_text: Rect {
+            render_mode_text: Rect {
                 x,
                 y,
+                w: hit_w,
+                h: hit_h,
+            },
+            new_world_text: Rect {
+                x,
+                y: new_world_y,
                 w: hit_w,
                 h: hit_h,
             },
@@ -367,6 +378,9 @@ impl MenuLayout {
     /// * `px` - Cursor X position in pixels from the left edge of the window.
     /// * `py` - Cursor Y position in pixels from the top edge of the window.
     pub fn hit_test(&self, px: f32, py: f32) -> Option<MenuHit> {
+        if self.render_mode_text.contains(px, py) {
+            return Some(MenuHit::RenderMode);
+        }
         if self.new_world_text.contains(px, py) {
             return Some(MenuHit::NewWorld);
         }
