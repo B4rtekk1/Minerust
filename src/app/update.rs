@@ -392,7 +392,6 @@ impl State {
         for &(bx, by, bz) in &player_dirty_blocks {
             self.mark_chunk_dirty(bx, by, bz);
         }
-        self.rebuild_player_dirty_meshes_now(&player_dirty_blocks);
 
         // Update the underwater post-process uniform.
         self.is_underwater = if snapshot.eye_block == BlockType::Water {
@@ -478,52 +477,6 @@ impl State {
                     subchunk.mark_mesh_dirty();
                 }
             }
-        }
-    }
-
-    fn rebuild_player_dirty_meshes_now(&mut self, dirty_blocks: &[(i32, i32, i32)]) {
-        if dirty_blocks.is_empty() {
-            return;
-        }
-
-        let mut subchunks = Vec::with_capacity(dirty_blocks.len() * 7);
-        for &(x, y, z) in dirty_blocks {
-            Self::collect_affected_subchunk_keys(x, y, z, &mut subchunks);
-        }
-        subchunks.sort_unstable();
-        subchunks.dedup();
-
-        let seed = self.world.read().seed;
-        let generator = minerust::ChunkGenerator::new(seed);
-
-        for (cx, cz, sy) in subchunks {
-            let snapshot = {
-                let world = self.world.read();
-                let Some(chunk) = world.chunks.get(&(cx, cz)) else {
-                    continue;
-                };
-                let Some(subchunk) = chunk.subchunks.get(sy as usize) else {
-                    continue;
-                };
-                if !subchunk.mesh_dirty {
-                    continue;
-                }
-                world.snapshot_subchunk_mesh(cx, cz, sy)
-            };
-
-            let Some(snapshot) = snapshot else {
-                continue;
-            };
-
-            let meshes = minerust::World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
-            self.update_subchunk_mesh(minerust::mesh_loader::MeshResult {
-                cx,
-                cz,
-                sy,
-                mesh_version: snapshot.mesh_version,
-                terrain: meshes.0,
-                water: meshes.1,
-            });
         }
     }
 
