@@ -96,6 +96,8 @@ impl State {
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
                 chunk.subchunks[sy as usize].mesh_dirty = true;
             }
+            drop(world);
+            self.enqueue_dirty_subchunk(cx, cz, sy);
         }
     }
 
@@ -439,18 +441,26 @@ impl State {
     /// Marks the inserted chunk column and its four horizontal neighbors dirty
     /// with a single world write lock.
     fn mark_chunk_column_and_neighbors_dirty(&mut self, cx: i32, cz: i32) {
+        let mut queued_subchunks = Vec::with_capacity(NUM_SUBCHUNKS as usize * 5);
         let mut world = self.world.write();
 
         for sy in 0..NUM_SUBCHUNKS as usize {
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
                 chunk.subchunks[sy].mark_mesh_dirty();
+                queued_subchunks.push((cx, cz, sy as i32));
             }
 
             for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
                 if let Some(chunk) = world.chunks.get_mut(&(nx, nz)) {
                     chunk.subchunks[sy].mark_mesh_dirty();
+                    queued_subchunks.push((nx, nz, sy as i32));
                 }
             }
+        }
+        drop(world);
+
+        for (cx, cz, sy) in queued_subchunks {
+            self.enqueue_dirty_subchunk(cx, cz, sy);
         }
     }
 
@@ -471,12 +481,49 @@ impl State {
         Self::collect_affected_subchunk_keys(x, y, z, &mut affected_subchunks);
 
         let mut world = self.world.write();
-        for (cx, cz, sy) in affected_subchunks {
+        let mut queued_subchunks = Vec::with_capacity(affected_subchunks.len());
+        for &(cx, cz, sy) in &affected_subchunks {
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
                 if let Some(subchunk) = chunk.subchunks.get_mut(sy as usize) {
                     subchunk.mark_mesh_dirty();
+                    queued_subchunks.push((cx, cz, sy));
                 }
             }
+        }
+        drop(world);
+
+        for (cx, cz, sy) in queued_subchunks {
+            self.enqueue_dirty_subchunk(cx, cz, sy);
+        }
+    }
+
+    pub fn enqueue_dirty_subchunk(&mut self, cx: i32, cz: i32, sy: i32) {
+        let key = (cx, cz, sy);
+        if self.dirty_mesh_queued.insert(key) {
+            self.dirty_mesh_queue.push_back(key);
+        }
+    }
+
+    pub fn clear_dirty_mesh_queue(&mut self) {
+        self.dirty_mesh_queue.clear();
+        self.dirty_mesh_queued.clear();
+    }
+
+    pub fn enqueue_all_dirty_subchunks(&mut self) {
+        let mut dirty_subchunks = Vec::new();
+        {
+            let world = self.world.read();
+            for (&(cx, cz), chunk) in &world.chunks {
+                for (sy, subchunk) in chunk.subchunks.iter().enumerate() {
+                    if subchunk.mesh_dirty {
+                        dirty_subchunks.push((cx, cz, sy as i32));
+                    }
+                }
+            }
+        }
+
+        for (cx, cz, sy) in dirty_subchunks {
+            self.enqueue_dirty_subchunk(cx, cz, sy);
         }
     }
 
@@ -559,6 +606,7 @@ impl State {
             );
             self.indirect_manager.clear_gpu_data(&self.queue);
             self.water_indirect_manager.clear_gpu_data(&self.queue);
+            self.clear_dirty_mesh_queue();
             self.visible_chunk_columns.clear();
             self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
             self.visible_chunk_columns_dirty = true;

@@ -1483,6 +1483,8 @@ impl State {
             msaa_texture_view,
             world,
             mesh_loader,
+            dirty_mesh_queue: std::collections::VecDeque::new(),
+            dirty_mesh_queued: std::collections::HashSet::new(),
             camera,
             highlighted_block: None,
             input: InputState::default(),

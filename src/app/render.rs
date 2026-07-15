@@ -14,6 +14,9 @@ use crate::ui::menu::{GameState, MenuField, MenuHit, MenuLayout};
 use super::init::frustum_planes_to_array;
 use super::state::State;
 
+const MAX_DIRTY_MESH_REQUESTS_PER_FRAME: usize = 128;
+const MAX_DIRTY_MESH_QUEUE_INSPECTIONS_PER_FRAME: usize = 1024;
+
 /// Computes which faces of the highlighted block should be outlined.
 ///
 /// The outline follows the same face-visibility rules as block meshing so the
@@ -109,15 +112,25 @@ impl State {
         }
 
         self.visible_chunk_columns.clear();
+        let mut dirty_visible_subchunks = Vec::new();
         {
             let world = self.world.read();
             for cx in (player_cx - RENDER_DISTANCE)..=(player_cx + RENDER_DISTANCE) {
                 for cz in (player_cz - RENDER_DISTANCE)..=(player_cz + RENDER_DISTANCE) {
-                    if world.chunks.contains_key(&(cx, cz)) {
+                    if let Some(chunk) = world.chunks.get(&(cx, cz)) {
                         self.visible_chunk_columns.push((cx, cz));
+                        for (sy, subchunk) in chunk.subchunks.iter().enumerate() {
+                            if subchunk.mesh_dirty {
+                                dirty_visible_subchunks.push((cx, cz, sy as i32));
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        for (cx, cz, sy) in dirty_visible_subchunks {
+            self.enqueue_dirty_subchunk(cx, cz, sy);
         }
 
         self.visible_chunk_columns.sort_by_key(|&(cx, cz)| {
@@ -127,6 +140,56 @@ impl State {
         });
         self.visible_chunk_cache_center = (player_cx, player_cz);
         self.visible_chunk_columns_dirty = false;
+    }
+
+    fn request_dirty_meshes(&mut self, player_cx: i32, player_cz: i32) {
+        let mut inspected = 0usize;
+        let mut requested = 0usize;
+        let queue_len = self.dirty_mesh_queue.len();
+        let max_inspections = queue_len.min(MAX_DIRTY_MESH_QUEUE_INSPECTIONS_PER_FRAME);
+
+        while inspected < max_inspections && requested < MAX_DIRTY_MESH_REQUESTS_PER_FRAME {
+            let Some((cx, cz, sy)) = self.dirty_mesh_queue.pop_front() else {
+                break;
+            };
+            self.dirty_mesh_queued.remove(&(cx, cz, sy));
+            inspected += 1;
+
+            if (cx - player_cx).abs() > RENDER_DISTANCE || (cz - player_cz).abs() > RENDER_DISTANCE
+            {
+                self.enqueue_dirty_subchunk(cx, cz, sy);
+                continue;
+            }
+
+            let key = minerust::render::indirect::SubchunkKey {
+                chunk_x: cx,
+                chunk_z: cz,
+                subchunk_y: sy,
+            };
+            let has_gpu_mesh = self.indirect_manager.has_subchunk(&key)
+                || self.water_indirect_manager.has_subchunk(&key);
+            let should_request = {
+                let world = self.world.read();
+                world
+                    .chunks
+                    .get(&(cx, cz))
+                    .and_then(|chunk| chunk.subchunks.get(sy as usize))
+                    .is_some_and(|subchunk| {
+                        subchunk.mesh_dirty && (!subchunk.is_empty || has_gpu_mesh)
+                    })
+            };
+
+            if !should_request {
+                continue;
+            }
+
+            if self.mesh_loader.request_mesh(cx, cz, sy) {
+                requested += 1;
+            } else {
+                self.enqueue_dirty_subchunk(cx, cz, sy);
+                break;
+            }
+        }
     }
 
     /// Produces one complete frame and presents it to the OS window.
@@ -333,40 +396,7 @@ impl State {
         let frustum_planes = extract_frustum_planes(&view_proj);
 
         // ── Mesh rebuild requests ─────────────────────────────────────────── //
-        // Walk all chunks within RENDER_DISTANCE.  For each sub-chunk whose
-        // mesh is stale and not already being rebuilt on a worker thread,
-        // queue a rebuild request.  Requests are sorted nearest-first so the
-        // closest geometry always appears first.
-        let mut meshes_to_request: Vec<(i32, i32, i32)> = Vec::new();
-        let mut chunks_rendered = 0u32;
-        let mut subchunks_rendered = 0u32;
-
-        {
-            let world = self.world.read();
-            for &(cx, cz) in &self.visible_chunk_columns {
-                if let Some(chunk) = world.chunks.get(&(cx, cz)) {
-                    let mut chunk_has_visible = false;
-                    for (sy, subchunk) in chunk.subchunks.iter().enumerate() {
-                        if subchunk.is_empty {
-                            continue; // skip fully empty sub-chunks early
-                        }
-                        if subchunk.mesh_dirty && !self.mesh_loader.is_pending(cx, cz, sy as i32) {
-                            meshes_to_request.push((cx, cz, sy as i32));
-                        }
-                        if subchunk.num_indices > 0 || subchunk.num_water_indices > 0 {
-                            subchunks_rendered += 1;
-                            chunk_has_visible = true;
-                        }
-                    }
-                    if chunk_has_visible {
-                        chunks_rendered += 1;
-                    }
-                }
-            }
-        }
-        for (cx, cz, sy) in &meshes_to_request {
-            self.mesh_loader.request_mesh(*cx, *cz, *sy);
-        }
+        self.request_dirty_meshes(player_cx, player_cz);
 
         // ── Sky color interpolation ──────────────────────────────────────── //
         // Three anchor colors (day, sunset, night) are blended based on the
@@ -392,8 +422,11 @@ impl State {
             + night_sky.2 * night_factor)
             .min(1.0);
 
-        self.chunks_rendered = chunks_rendered;
-        self.subchunks_rendered = subchunks_rendered;
+        self.chunks_rendered = self.visible_chunk_columns.len() as u32;
+        self.subchunks_rendered = self
+            .indirect_manager
+            .active_count()
+            .max(self.water_indirect_manager.active_count());
 
         // ── Main camera GPU cull dispatch ─────────────────────────────────── //
         // The indirect manager's compute shader reads the Hi-Z texture and

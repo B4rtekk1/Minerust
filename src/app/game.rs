@@ -668,6 +668,8 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    state.clear_dirty_mesh_queue();
+                                    state.enqueue_all_dirty_subchunks();
                                     log(
                                         LogLevel::Info,
                                         &format!(

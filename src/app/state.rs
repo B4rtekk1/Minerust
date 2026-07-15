@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -256,6 +256,10 @@ pub struct State {
     pub last_gen_player_cz: i32,
     /// Submits subchunk mesh-build requests to background threads and collects results.
     pub mesh_loader: minerust::MeshLoader,
+    /// FIFO of subchunks whose CPU block data changed and need async remeshing.
+    pub dirty_mesh_queue: VecDeque<(i32, i32, i32)>,
+    /// Deduplication set for `dirty_mesh_queue`.
+    pub dirty_mesh_queued: HashSet<(i32, i32, i32)>,
     /// Cached list of currently loaded chunk columns inside the render radius.
     pub visible_chunk_columns: Vec<(i32, i32)>,
     /// Player chunk coordinate at which `visible_chunk_columns` was last rebuilt.

@@ -84,6 +84,8 @@ impl State {
             minerust::MeshLoader::new(self.world.clone(), minerust::get_mesh_worker_count());
         self.indirect_manager.clear();
         self.water_indirect_manager.clear();
+        self.clear_dirty_mesh_queue();
+        self.enqueue_all_dirty_subchunks();
         self.visible_chunk_columns.clear();
         self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
         self.visible_chunk_columns_dirty = true;
