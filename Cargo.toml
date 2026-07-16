@@ -15,7 +15,7 @@ directories = "6.0.0"
 wgpu = "28.0.0"
 winit = "0.29"
 inventory = "0.3.22"
-pollster = "0.4"
+pollster = "1.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 glam = { version = "0.32.1", features = ["bytemuck", "serde"] }
 chrono = "0.4.45"
