@@ -2,6 +2,7 @@ use crate::constants::*;
 use crate::core::biome::Biome;
 use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
+use crate::core::quad::PackedQuad;
 use crate::core::vertex::Vertex;
 use crate::render::mesh::{add_greedy_quad_with_ao, add_quad};
 use crate::world::generator::ChunkGenerator;
@@ -653,10 +654,10 @@ impl World {
         chunk_x: i32,
         chunk_z: i32,
         subchunk_y: i32,
-    ) -> ((Vec<Vertex>, Vec<u32>), (Vec<Vertex>, Vec<u32>)) {
+    ) -> (Vec<PackedQuad>, Vec<PackedQuad>) {
         let snapshot = match self.snapshot_subchunk_mesh(chunk_x, chunk_z, subchunk_y) {
             Some(snapshot) => snapshot,
-            None => return ((Vec::new(), Vec::new()), (Vec::new(), Vec::new())),
+            None => return (Vec::new(), Vec::new()),
         };
 
         Self::build_subchunk_mesh_from_snapshot(&self.generator, &snapshot)
@@ -665,14 +666,14 @@ impl World {
     pub fn build_subchunk_mesh_from_snapshot(
         _generator: &ChunkGenerator,
         snapshot: &SubchunkMeshSnapshot,
-    ) -> ((Vec<Vertex>, Vec<u32>), (Vec<Vertex>, Vec<u32>)) {
+    ) -> (Vec<PackedQuad>, Vec<PackedQuad>) {
         let mut vertices = Vec::with_capacity(4096);
         let mut indices = Vec::with_capacity(2048);
         let mut water_vertices = Vec::with_capacity(1024);
         let mut water_indices = Vec::with_capacity(512);
 
         if !snapshot.has_blocks {
-            return ((vertices, indices), (water_vertices, water_indices));
+            return (Vec::new(), Vec::new());
         }
 
         let chunk_x = snapshot.chunk_x;
@@ -1451,7 +1452,14 @@ impl World {
             }
         }
 
-        ((vertices, indices), (water_vertices, water_indices))
+        let subchunk_origin = [base_x, base_y, base_z];
+        let pack_quads = |vertices: Vec<Vertex>| {
+            vertices
+                .chunks_exact(4)
+                .map(|quad| PackedQuad::from_vertices(quad, subchunk_origin))
+                .collect()
+        };
+        (pack_quads(vertices), pack_quads(water_vertices))
     }
 }
 

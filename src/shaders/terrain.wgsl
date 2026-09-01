@@ -34,6 +34,11 @@ struct ShadowUniforms {
 @group(1) @binding(1) var sun_shadow_sampler: sampler_comparison;
 @group(1) @binding(2) var<uniform> shadow_uniforms: ShadowUniforms;
 
+struct PackedQuad { origin_and_face: u32, size_material_ao: u32, color_flags: u32, _reserved: u32, }
+struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, draw_data: vec4<u32>, }
+@group(2) @binding(0) var<storage, read> quads: array<PackedQuad>;
+@group(2) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
+
 const TERRAIN_FOG_NEAR: f32 = 180.0;
 const TERRAIN_FOG_FAR:  f32 = 620.0;
 
@@ -147,11 +152,6 @@ fn fast_global_illumination(
     return mix(ambient, vec3<f32>(ambient_luma), vec3<f32>(night_neutralize));
 }
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) packed:   u32,
-};
-
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
@@ -166,20 +166,39 @@ struct DepthVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 };
 
-@vertex
-fn vs_main(model: VertexInput) -> VertexOutput {
-    let n_idx   = model.packed & 0x7u;
-    let t_idx   = (model.packed >> 3u) & 0xFFu;
-    let uv_idx  = (model.packed >> 11u) & 0x3u;
-    let w_raw   = (model.packed >> 13u) & 0xFu;
-    let h_raw   = (model.packed >> 17u) & 0xFu;
-    let ao_raw  = (model.packed >> 21u) & 0x3u;
-    let r       = f32((model.packed >> 23u) & 0x7u) / 7.0;
-    let g       = f32((model.packed >> 26u) & 0x7u) / 7.0;
-    let b       = f32((model.packed >> 29u) & 0x7u) / 7.0;
+fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
+    let origin = vec3<f32>(f32(quad.origin_and_face & 0x1fu), f32((quad.origin_and_face >> 5u) & 0x1fu), f32((quad.origin_and_face >> 10u) & 0x1fu)) * 0.5;
+    let face = (quad.origin_and_face >> 15u) & 0x7u;
+    let width = f32((quad.size_material_ao & 0x1fu) + 1u) * 0.5;
+    let height = f32(((quad.size_material_ao >> 5u) & 0x1fu) + 1u) * 0.5;
+    let default_corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    let alternate_corners = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
+    let i = select(default_corners[corner], alternate_corners[corner], ((quad.color_flags >> 9u) & 1u) != 0u);
+    var p = origin;
+    if face == 0u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(0,0,width),vec3(0,height,width),vec3(0,height,0))[i]; }
+    if face == 1u { p += array<vec3<f32>, 4>(vec3(0,0,width),vec3(0,0,0),vec3(0,height,0),vec3(0,height,width))[i]; }
+    if face == 2u { p += array<vec3<f32>, 4>(vec3(0,0,width),vec3(0,0,0),vec3(height,0,0),vec3(height,0,width))[i]; }
+    if face == 3u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(0,0,width),vec3(height,0,width),vec3(height,0,0))[i]; }
+    if face == 4u { p += array<vec3<f32>, 4>(vec3(width,0,0),vec3(0,0,0),vec3(0,height,0),vec3(width,height,0))[i]; }
+    if face == 5u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(width,0,0),vec3(width,height,0),vec3(0,height,0))[i]; }
+    return subchunks[subchunk_id].aabb_min.xyz + p;
+}
 
-    let width  = f32(w_raw + 1u);
-    let height = f32(h_raw + 1u);
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
+    let quad = quads[vertex_id / 6u];
+    let corner = vertex_id % 6u;
+    let n_idx = (quad.origin_and_face >> 15u) & 0x7u;
+    let t_idx = (quad.size_material_ao >> 10u) & 0xffu;
+    let default_corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    let alternate_corners = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
+    let corner_idx = select(default_corners[corner], alternate_corners[corner], ((quad.color_flags >> 9u) & 1u) != 0u);
+    let ao_raw = (quad.size_material_ao >> (18u + corner_idx * 2u)) & 0x3u;
+    let width = f32((quad.size_material_ao & 0x1fu) + 1u) * 0.5;
+    let height = f32(((quad.size_material_ao >> 5u) & 0x1fu) + 1u) * 0.5;
+    let r = f32(quad.color_flags & 0x7u) / 7.0;
+    let g = f32((quad.color_flags >> 3u) & 0x7u) / 7.0;
+    let b = f32((quad.color_flags >> 6u) & 0x7u) / 7.0;
 
     let normals = array<vec3<f32>, 6>(
         vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
@@ -193,12 +212,13 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(model.position, 1.0);
-    out.world_pos     = model.position;
+    let position = quad_position(quad, corner, subchunk_id);
+    out.clip_position = uniforms.view_proj * vec4<f32>(position, 1.0);
+    out.world_pos     = position;
     out.normal        = normals[n_idx % 6u];
     out.color         = vec3<f32>(r, g, b);
 
-    let raw_uv = uvs[uv_idx % 4u];
+    let raw_uv = uvs[corner_idx];
     out.uv = vec2<f32>(raw_uv.x * width, raw_uv.y * height);
 
     out.tex_index = f32(t_idx);
@@ -207,16 +227,10 @@ fn vs_main(model: VertexInput) -> VertexOutput {
 }
 
 @vertex
-fn vs_depth(model: VertexInput) -> DepthVertexOutput {
+fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> DepthVertexOutput {
     var out: DepthVertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(model.position, 1.0);
-    return out;
-}
-
-@vertex
-fn vs_shadow(model: VertexInput) -> DepthVertexOutput {
-    var out: DepthVertexOutput;
-    out.clip_position = shadow_uniforms.light_view_proj * vec4<f32>(model.position, 1.0);
+    let quad = quads[vertex_id / 6u];
+    out.clip_position = shadow_uniforms.light_view_proj * vec4<f32>(quad_position(quad, vertex_id % 6u, subchunk_id), 1.0);
     return out;
 }
 

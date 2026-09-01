@@ -280,10 +280,14 @@ pub struct State {
     // -------------------------------------------------------------------------
     // Indirect rendering managers
     // -------------------------------------------------------------------------
-    /// Manages the unified vertex/index buffers and GPU culling for terrain.
+    /// Manages packed quad descriptors and GPU culling for terrain.
     pub indirect_manager: IndirectManager,
-    /// Manages the unified vertex/index buffers and GPU culling for water.
+    /// Manages packed quad descriptors and GPU culling for water.
     pub water_indirect_manager: IndirectManager,
+    /// Storage bindings for procedural terrain quad expansion.
+    pub terrain_quad_bind_group: wgpu::BindGroup,
+    /// Storage bindings for procedural water quad expansion.
+    pub water_quad_bind_group: wgpu::BindGroup,
 
     // -------------------------------------------------------------------------
     /// Active water reflection mode (`0 = off`, `1 = SSSR`).

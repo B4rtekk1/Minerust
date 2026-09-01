@@ -2,8 +2,10 @@ pub mod biome;
 pub mod block;
 pub mod chunk;
 pub mod game_item;
+pub mod quad;
 pub mod uniforms;
 pub mod vertex;
+pub use quad::PackedQuad;
 
 #[macro_use]
 pub mod mobs;

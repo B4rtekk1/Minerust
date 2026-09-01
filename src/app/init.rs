@@ -196,6 +196,14 @@ impl State {
             log(LogLevel::Info, "Adapter supports MULTI_DRAW_INDIRECT_COUNT");
         }
 
+        // Vertex pulling identifies the owning subchunk through `first_instance`.
+        // wgpu is allowed to ignore non-zero values unless this feature is enabled.
+        if !adapter_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+            panic!("The packed-quad terrain renderer requires INDIRECT_FIRST_INSTANCE");
+        }
+        requested_features |= wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        log(LogLevel::Info, "Adapter supports INDIRECT_FIRST_INSTANCE");
+
         let supports_shader_f16 = adapter_features.contains(wgpu::Features::SHADER_F16);
         if supports_shader_f16 {
             requested_features |= wgpu::Features::SHADER_F16;
@@ -423,6 +431,14 @@ impl State {
                     },
                 ],
             });
+
+        let quad_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Packed Quad Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
 
         // ------------------------------------------------------------------ //
         // SSR (Screen-Space Reflections) targets
@@ -743,14 +759,14 @@ impl State {
         let terrain_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Terrain Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout, &shadow_bind_group_layout],
+                bind_group_layouts: &[&uniform_bind_group_layout, &shadow_bind_group_layout, &quad_bind_group_layout],
                 immediate_size: 0,
             });
 
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Water Pipeline Layout"),
-                bind_group_layouts: &[&water_bind_group_layout],
+                bind_group_layouts: &[&water_bind_group_layout, &quad_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -768,7 +784,7 @@ impl State {
                 module: &terrain_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &terrain_shader,
@@ -803,12 +819,16 @@ impl State {
 
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout, &shadow_pass_bind_group_layout],
+                bind_group_layouts: &[
+                    &uniform_bind_group_layout,
+                    &shadow_pass_bind_group_layout,
+                    &quad_bind_group_layout,
+                ],
             immediate_size: 0,
         });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sun Shadow Pipeline"), layout: Some(&shadow_pipeline_layout), cache: None,
-            vertex: wgpu::VertexState { module: &terrain_shader, entry_point: Some("vs_shadow"), compilation_options: Default::default(), buffers: &[Vertex::desc()] },
+            vertex: wgpu::VertexState { module: &terrain_shader, entry_point: Some("vs_shadow"), compilation_options: Default::default(), buffers: &[] },
             fragment: None,
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, front_face: wgpu::FrontFace::Ccw, cull_mode: Some(wgpu::Face::Back), ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState { constant: 0, slope_scale: 0.0, clamp: 0.0 } }),
@@ -827,7 +847,7 @@ impl State {
                 module: &water_shader,
                 entry_point: Some("vs_water"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &water_shader,
@@ -1389,6 +1409,20 @@ impl State {
         let mut indirect_manager = IndirectManager::new(&device);
         let mut water_indirect_manager =
             IndirectManager::with_budget(&device, IndirectBufferBudget::WATER);
+        let terrain_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Packed Quad Bind Group"), layout: &quad_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: indirect_manager.quad_buffer().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: indirect_manager.subchunk_meta_buffer().as_entire_binding() },
+            ],
+        });
+        let water_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Packed Quad Bind Group"), layout: &quad_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: water_indirect_manager.quad_buffer().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: water_indirect_manager.subchunk_meta_buffer().as_entire_binding() },
+            ],
+        });
 
         // ------------------------------------------------------------------ //
         // Hierarchical-Z (Hi-Z) occlusion buffer
@@ -1656,6 +1690,8 @@ impl State {
             menu_background_view,
             indirect_manager,
             water_indirect_manager,
+            terrain_quad_bind_group,
+            water_quad_bind_group,
             hiz_texture,
             hiz_view,
             hiz_mips,

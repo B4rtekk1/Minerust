@@ -33,10 +33,10 @@ struct Uniforms {
 @group(0) @binding(9) var scene_depth: texture_2d<f32>;
 @group(0) @binding(10) var scene_sampler: sampler;
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) packed:   u32,
-};
+struct PackedQuad { origin_and_face: u32, size_material_ao: u32, color_flags: u32, _reserved: u32, }
+struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, draw_data: vec4<u32>, }
+@group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
+@group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -115,12 +115,31 @@ fn detailed_wave_normal(world_xz: vec2<f32>, base_normal: vec3<f32>, distance_to
     return normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
 }
 
-@vertex
-fn vs_water(model: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    var pos = model.position;
+fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
+    let origin = vec3<f32>(f32(quad.origin_and_face & 0x1fu), f32((quad.origin_and_face >> 5u) & 0x1fu), f32((quad.origin_and_face >> 10u) & 0x1fu)) * 0.5;
+    let face = (quad.origin_and_face >> 15u) & 0x7u;
+    let width = f32((quad.size_material_ao & 0x1fu) + 1u) * 0.5;
+    let height = f32(((quad.size_material_ao >> 5u) & 0x1fu) + 1u) * 0.5;
+    let default_corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    let alternate_corners = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
+    let i = select(default_corners[corner], alternate_corners[corner], ((quad.color_flags >> 9u) & 1u) != 0u);
+    var p = origin;
+    if face == 0u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(0,0,width),vec3(0,height,width),vec3(0,height,0))[i]; }
+    if face == 1u { p += array<vec3<f32>, 4>(vec3(0,0,width),vec3(0,0,0),vec3(0,height,0),vec3(0,height,width))[i]; }
+    if face == 2u { p += array<vec3<f32>, 4>(vec3(0,0,width),vec3(0,0,0),vec3(height,0,0),vec3(height,0,width))[i]; }
+    if face == 3u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(0,0,width),vec3(height,0,width),vec3(height,0,0))[i]; }
+    if face == 4u { p += array<vec3<f32>, 4>(vec3(width,0,0),vec3(0,0,0),vec3(0,height,0),vec3(width,height,0))[i]; }
+    if face == 5u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(width,0,0),vec3(width,height,0),vec3(0,height,0))[i]; }
+    return subchunks[subchunk_id].aabb_min.xyz + p;
+}
 
-    let normal_index = model.packed & 0x7u;
+@vertex
+fn vs_water(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let quad = quads[vertex_id / 6u];
+    var pos = quad_position(quad, vertex_id % 6u, subchunk_id);
+
+    let normal_index = (quad.origin_and_face >> 15u) & 0x7u;
     var normal = face_normal(normal_index);
 
     if normal_index == 3u {
