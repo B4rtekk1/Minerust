@@ -1,4 +1,5 @@
 pub mod frustum;
+pub mod gpu_mesher;
 pub mod indirect;
 pub mod mesh;
 pub mod mesh_loader;
@@ -7,6 +8,7 @@ pub mod texture;
 pub mod atlas_map;
 
 pub use frustum::{AABB, extract_frustum_planes};
+pub use gpu_mesher::GpuFaceMesher;
 pub use indirect::{DrawIndirect, IndirectBufferBudget, IndirectManager, SubchunkKey};
 pub use mesh::{
     add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_player_model,

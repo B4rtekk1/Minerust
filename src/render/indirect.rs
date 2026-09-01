@@ -92,6 +92,14 @@ pub struct DrawIndirect {
     pub first_instance: u32,
 }
 
+/// A pre-reserved descriptor range owned by a GPU face-extraction job.
+#[derive(Copy, Clone, Debug)]
+pub struct GpuQuadAllocation {
+    pub quad_offset: u32,
+    pub quad_capacity: u32,
+    pub subchunk_slot: u32,
+}
+
 /// Per-subchunk metadata uploaded to the GPU for vertex pulling and culling.
 ///
 /// Geometry descriptors are local to this origin.  Keeping it as integers
@@ -687,6 +695,110 @@ impl IndirectManager {
         self.hierarchy_dirty = true;
         self.maybe_coalesce();
         true
+    }
+
+    /// Reserves a descriptor range for a compute meshing dispatch.
+    ///
+    /// Unlike [`Self::upload_subchunk`], this does not upload descriptors.
+    /// The compute shader fills the range and updates `draw_data.x` once it
+    /// knows the number of visible faces.  The allocation is deliberately
+    /// sized by the CPU face-count prepass, not by a worst-case 24,576-face
+    /// reservation per subchunk.
+    pub fn prepare_gpu_subchunk(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: SubchunkKey,
+        quad_capacity: u32,
+    ) -> Option<GpuQuadAllocation> {
+        if quad_capacity == 0 {
+            self.remove_subchunk(queue, key);
+            return Some(GpuQuadAllocation {
+                quad_offset: 0,
+                quad_capacity: 0,
+                subchunk_slot: 0,
+            });
+        }
+        if let Some(old) = self.remove_allocation(queue, key) {
+            Self::add_free_block(
+                &mut self.free_quad_blocks,
+                FreeBlock {
+                    offset: old.quad_offset,
+                    count: old.quad_count,
+                },
+            );
+        }
+        let allocation =
+            Self::find_and_remove_free_block(&mut self.free_quad_blocks, quad_capacity);
+        let (quad_offset, reused) = match allocation {
+            Some(block) => {
+                if block.count > quad_capacity {
+                    Self::add_free_block(
+                        &mut self.free_quad_blocks,
+                        FreeBlock {
+                            offset: block.offset + quad_capacity,
+                            count: block.count - quad_capacity,
+                        },
+                    );
+                }
+                (block.offset, true)
+            }
+            None => {
+                if self.next_quad_offset + quad_capacity > self.max_quads as u32
+                    || self.active_subchunk_count as usize >= MAX_SUBCHUNKS
+                {
+                    log(
+                        LogLevel::Warning,
+                        &format!(
+                            "{} packed quad buffer full while reserving GPU mesh",
+                            self.label
+                        ),
+                    );
+                    self.clear_gpu_data(queue);
+                    return None;
+                }
+                (self.next_quad_offset, false)
+            }
+        };
+        let slot_index = self.active_subchunk_count as usize;
+        let alloc = SubchunkAlloc {
+            quad_offset,
+            // Keep the reserved capacity here so remove/free returns the full range.
+            quad_count: quad_capacity,
+            slot_index,
+            gpu_meta: SubchunkGpuMeta {
+                world_origin: [
+                    key.chunk_x * CHUNK_SIZE,
+                    key.subchunk_y * SUBCHUNK_HEIGHT,
+                    key.chunk_z * CHUNK_SIZE,
+                    0,
+                ],
+                // The CPU prepass and the shader use identical visibility
+                // rules, so capacity is also the expected final count. Keep
+                // it here as well as in GPU metadata: a later swap-remove
+                // must not resurrect a stale zero-count draw.
+                draw_data: [quad_capacity * 6, quad_offset * 6, slot_index as u32, 1],
+            },
+            draw_command: DrawIndirect {
+                vertex_count: quad_capacity * 6,
+                instance_count: 1,
+                first_vertex: quad_offset * 6,
+                first_instance: slot_index as u32,
+            },
+        };
+        self.write_slot(queue, &alloc);
+        if !reused {
+            self.next_quad_offset += quad_capacity;
+        }
+        self.allocations.insert(key, alloc);
+        self.slot_keys.push(key);
+        self.active_subchunk_count += 1;
+        self.hierarchy_dirty = true;
+        self.maybe_coalesce();
+        Some(GpuQuadAllocation {
+            quad_offset,
+            quad_capacity,
+            subchunk_slot: slot_index as u32,
+        })
     }
 
     /// Batched counterpart to [`Self::upload_subchunk`]. It performs the same

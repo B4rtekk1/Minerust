@@ -1,5 +1,20 @@
 use bytemuck::{Pod, Zeroable};
 
+/// Mutable GPU bookkeeping for one voxel subchunk.
+///
+/// The face-extraction compute pass uses this layout when writing persistent
+/// [`crate::core::quad::PackedQuad`] descriptors.  `quad_capacity` is supplied
+/// by the CPU allocator; the shader never writes past that range.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct GpuSubchunk {
+    pub voxel_offset: u32,
+    pub quad_offset: u32,
+    pub quad_count: u32,
+    pub quad_capacity: u32,
+    pub flags: u32,
+}
+
 /// One deferred copy from a frame upload staging buffer to a GPU buffer.
 ///
 /// The source offset points into [`UploadBatch::data`]. All offsets and sizes

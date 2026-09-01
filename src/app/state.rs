@@ -11,7 +11,7 @@ use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
-use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
+use minerust::{Camera, DiggingState, GpuFaceMesher, IndirectManager, InputState, World};
 
 const MESH_UPLOAD_RING_REGIONS: usize = 3;
 const INITIAL_MESH_UPLOAD_REGION_SIZE: u64 = 8 * 1024 * 1024;
@@ -331,6 +331,8 @@ pub struct State {
     pub indirect_manager: IndirectManager,
     /// Manages packed quad descriptors and GPU culling for water.
     pub water_indirect_manager: IndirectManager,
+    /// Persistent compute mesher for ordinary voxel cubes.
+    pub gpu_face_mesher: GpuFaceMesher,
     /// Storage bindings for procedural terrain quad expansion.
     pub terrain_quad_bind_group: wgpu::BindGroup,
     /// Storage bindings for procedural water quad expansion.

@@ -1,6 +1,7 @@
 use crate::core::quad::PackedQuad;
 use crate::world::World;
 use crate::world::generator::ChunkGenerator;
+use crate::world::terrain::SubchunkMeshSnapshot;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -30,6 +31,9 @@ pub struct MeshResult {
     pub terrain: Vec<PackedQuad>,
     /// Water quads, expanded procedurally by the vertex shader.
     pub water: Vec<PackedQuad>,
+    /// Padded voxel input for GPU face extraction.  Present only when all
+    /// relevant blocks are full terrain cubes; custom geometry uses `None`.
+    pub gpu_snapshot: Option<SubchunkMeshSnapshot>,
 }
 
 /// Asynchronous mesh-building system backed by a fixed pool of worker threads.
@@ -90,8 +94,14 @@ impl MeshLoader {
                             continue;
                         };
 
-                        let meshes =
-                            World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
+                        let gpu_snapshot =
+                            crate::render::gpu_mesher::GpuFaceMesher::supports(&snapshot)
+                                .then_some(snapshot.clone());
+                        let meshes = if gpu_snapshot.is_some() {
+                            (Vec::new(), Vec::new())
+                        } else {
+                            World::build_subchunk_mesh_from_snapshot(&generator, &snapshot)
+                        };
 
                         if tx
                             .send(MeshResult {
@@ -101,6 +111,7 @@ impl MeshLoader {
                                 mesh_version: snapshot.mesh_version,
                                 terrain: meshes.0,
                                 water: meshes.1,
+                                gpu_snapshot,
                             })
                             .is_err()
                         {

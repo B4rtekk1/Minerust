@@ -15,8 +15,8 @@ use crate::logger::{LogLevel, log};
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
-    Camera, DiggingState, IndirectBufferBudget, IndirectManager, InputState, OutlineVertex,
-    SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
+    Camera, DiggingState, GpuFaceMesher, IndirectBufferBudget, IndirectManager, InputState,
+    OutlineVertex, SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
 };
 
 use super::state::State;
@@ -1497,6 +1497,7 @@ impl State {
         let mut indirect_manager = IndirectManager::new(&device);
         let mut water_indirect_manager =
             IndirectManager::with_budget(&device, IndirectBufferBudget::WATER);
+        let gpu_face_mesher = GpuFaceMesher::new(&device);
         let terrain_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Terrain Packed Quad Bind Group"),
             layout: &quad_bind_group_layout,
@@ -1792,6 +1793,7 @@ impl State {
             menu_background_view,
             indirect_manager,
             water_indirect_manager,
+            gpu_face_mesher,
             terrain_quad_bind_group,
             water_quad_bind_group,
             hiz_texture,

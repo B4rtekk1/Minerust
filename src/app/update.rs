@@ -51,6 +51,10 @@ impl State {
         let cx = result.cx;
         let cz = result.cz;
         let sy = result.sy;
+        let gpu_face_count = result
+            .gpu_snapshot
+            .as_ref()
+            .map(minerust::GpuFaceMesher::visible_face_count);
 
         // Update CPU-side bookkeeping under a short write lock, then release
         // before touching the GPU buffers to minimize lock contention.
@@ -65,7 +69,9 @@ impl State {
                 return; // A newer block edit or neighbor change invalidated this mesh.
             }
             let aabb = subchunk.aabb;
-            subchunk.num_indices = (result.terrain.len() * 6) as u32;
+            subchunk.num_indices = gpu_face_count
+                .unwrap_or(result.terrain.len() as u32)
+                .saturating_mul(6);
             subchunk.num_water_indices = (result.water.len() * 6) as u32;
             subchunk.mesh_dirty = false;
             aabb
@@ -77,13 +83,36 @@ impl State {
             subchunk_y: sy,
         };
 
-        let terrain_uploaded = self.indirect_manager.upload_subchunk_batched(
-            &self.queue,
-            batch,
-            key,
-            &result.terrain,
-            &aabb_copy,
-        );
+        let terrain_uploaded = if let (Some(snapshot), Some(face_count)) =
+            (result.gpu_snapshot.as_ref(), gpu_face_count)
+        {
+            match self
+                .indirect_manager
+                .prepare_gpu_subchunk(&self.queue, key, face_count)
+            {
+                Some(allocation) => {
+                    if face_count != 0 {
+                        self.gpu_face_mesher.dispatch(
+                            &self.device,
+                            &self.queue,
+                            &self.indirect_manager,
+                            snapshot,
+                            allocation,
+                        );
+                    }
+                    true
+                }
+                None => false,
+            }
+        } else {
+            self.indirect_manager.upload_subchunk_batched(
+                &self.queue,
+                batch,
+                key,
+                &result.terrain,
+                &aabb_copy,
+            )
+        };
 
         let water_uploaded = self.water_indirect_manager.upload_subchunk_batched(
             &self.queue,
