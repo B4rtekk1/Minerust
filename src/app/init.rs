@@ -1685,6 +1685,7 @@ impl State {
 
         let initial_hiz_camera_pos = camera.eye_position();
         let initial_hiz_forward = camera.look_direction();
+        let mesh_upload_ring = super::state::MeshUploadRing::new(&device);
 
         Self {
             surface,
@@ -1715,6 +1716,7 @@ impl State {
             msaa_texture_view,
             world,
             mesh_loader,
+            mesh_upload_ring,
             dirty_mesh_queue: std::collections::VecDeque::new(),
             dirty_mesh_queued: std::collections::HashSet::new(),
             shadow_anchor: camera.position.to_array(),

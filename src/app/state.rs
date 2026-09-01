@@ -13,6 +13,50 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
+const MESH_UPLOAD_RING_REGIONS: usize = 3;
+const INITIAL_MESH_UPLOAD_REGION_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Triple-buffered source storage for batched mesh uploads.
+pub struct MeshUploadRing {
+    buffers: Vec<wgpu::Buffer>,
+    region_size: u64,
+    next_region: usize,
+}
+
+impl MeshUploadRing {
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            buffers: Self::create_buffers(device, INITIAL_MESH_UPLOAD_REGION_SIZE),
+            region_size: INITIAL_MESH_UPLOAD_REGION_SIZE,
+            next_region: 0,
+        }
+    }
+
+    fn create_buffers(device: &wgpu::Device, size: u64) -> Vec<wgpu::Buffer> {
+        (0..MESH_UPLOAD_RING_REGIONS)
+            .map(|index| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Mesh Upload Ring Region {index}")),
+                    size,
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect()
+    }
+
+    pub fn next_buffer(&mut self, device: &wgpu::Device, required_size: u64) -> &wgpu::Buffer {
+        if required_size > self.region_size {
+            self.region_size = required_size.next_power_of_two();
+            self.buffers = Self::create_buffers(device, self.region_size);
+            self.next_region = 0;
+        }
+        let index = self.next_region;
+        self.next_region = (self.next_region + 1) % MESH_UPLOAD_RING_REGIONS;
+        &self.buffers[index]
+    }
+}
+
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
 #[derive(Default)]
 pub struct BlockPlacementState {
@@ -277,6 +321,8 @@ pub struct State {
     pub last_gen_player_cz: i32,
     /// Submits subchunk mesh-build requests to background threads and collects results.
     pub mesh_loader: minerust::MeshLoader,
+    /// Triple-buffered staging source used to batch all mesh writes per frame.
+    pub mesh_upload_ring: MeshUploadRing,
     /// FIFO of subchunks whose CPU block data changed and need async remeshing.
     pub dirty_mesh_queue: VecDeque<(i32, i32, i32)>,
     /// Deduplication set for `dirty_mesh_queue`.

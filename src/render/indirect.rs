@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 
 use crate::constants::{CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT};
 use crate::core::quad::PackedQuad;
+use crate::core::uniforms::UploadBatch;
 use crate::render::frustum::AABB;
 
 use crate::logger::{LogLevel, log};
@@ -573,6 +574,123 @@ impl IndirectManager {
         true
     }
 
+    /// Batched counterpart to [`Self::upload_subchunk`]. It performs the same
+    /// allocator updates, but appends geometry and metadata writes to one
+    /// frame-owned upload batch instead of issuing individual queue writes.
+    pub fn upload_subchunk_batched(
+        &mut self,
+        queue: &wgpu::Queue,
+        batch: &mut UploadBatch,
+        key: SubchunkKey,
+        quads: &[PackedQuad],
+        _aabb: &AABB,
+    ) -> bool {
+        if quads.is_empty() {
+            if let Some(old_alloc) = self.remove_allocation_batched(batch, key) {
+                Self::add_free_block(
+                    &mut self.free_quad_blocks,
+                    FreeBlock {
+                        offset: old_alloc.quad_offset,
+                        count: old_alloc.quad_count,
+                    },
+                );
+                self.maybe_coalesce();
+            }
+            return true;
+        }
+
+        if let Some(old_alloc) = self.remove_allocation_batched(batch, key) {
+            Self::add_free_block(
+                &mut self.free_quad_blocks,
+                FreeBlock {
+                    offset: old_alloc.quad_offset,
+                    count: old_alloc.quad_count,
+                },
+            );
+        }
+
+        let quad_count = quads.len() as u32;
+        let quad_alloc = Self::find_and_remove_free_block(&mut self.free_quad_blocks, quad_count);
+        let (quad_offset, reused_quad) = match quad_alloc {
+            Some(block) => {
+                if block.count > quad_count {
+                    Self::add_free_block(
+                        &mut self.free_quad_blocks,
+                        FreeBlock {
+                            offset: block.offset + quad_count,
+                            count: block.count - quad_count,
+                        },
+                    );
+                }
+                (block.offset, true)
+            }
+            None => {
+                if self.next_quad_offset + quad_count > self.max_quads as u32 {
+                    log(
+                        LogLevel::Warning,
+                        &format!(
+                            "{} packed quad buffer full ({}/{} quads used), clearing indirect draw cache...",
+                            self.label, self.next_quad_offset, self.max_quads
+                        ),
+                    );
+                    // Discard queued writes: clearing the cache must be the
+                    // final operation visible to the GPU this frame.
+                    batch.clear();
+                    self.clear_gpu_data(queue);
+                    return false;
+                }
+                (self.next_quad_offset, false)
+            }
+        };
+
+        if self.active_subchunk_count as usize >= MAX_SUBCHUNKS {
+            log(
+                LogLevel::Warning,
+                "No free metadata slots available, clearing indirect draw cache...",
+            );
+            batch.clear();
+            self.clear_gpu_data(queue);
+            return false;
+        }
+        let slot_index = self.active_subchunk_count as usize;
+        let alloc = SubchunkAlloc {
+            quad_offset,
+            quad_count,
+            slot_index,
+            gpu_meta: SubchunkGpuMeta {
+                world_origin: [
+                    key.chunk_x * CHUNK_SIZE,
+                    key.subchunk_y * SUBCHUNK_HEIGHT,
+                    key.chunk_z * CHUNK_SIZE,
+                    0,
+                ],
+                draw_data: [quad_count * 6, quad_offset * 6, slot_index as u32, 1],
+            },
+            draw_command: DrawIndirect {
+                vertex_count: quad_count * 6,
+                instance_count: 1,
+                first_vertex: quad_offset * 6,
+                first_instance: slot_index as u32,
+            },
+        };
+
+        batch.push(
+            &self.unified_quad_buffer,
+            alloc.quad_offset as u64 * size_of::<PackedQuad>() as u64,
+            bytemuck::cast_slice(quads),
+        );
+        self.write_slot_batched(batch, &alloc);
+
+        if !reused_quad {
+            self.next_quad_offset += quad_count;
+        }
+        self.allocations.insert(key, alloc);
+        self.slot_keys.push(key);
+        self.active_subchunk_count += 1;
+        self.maybe_coalesce();
+        true
+    }
+
     /// Returns the metadata slot index assigned to `key`, if it is allocated.
     pub fn get_slot_index(&self, key: &SubchunkKey) -> Option<usize> {
         self.allocations.get(key).map(|a| a.slot_index)
@@ -651,6 +769,35 @@ impl IndirectManager {
         Some(removed)
     }
 
+    fn remove_allocation_batched(
+        &mut self,
+        batch: &mut UploadBatch,
+        key: SubchunkKey,
+    ) -> Option<SubchunkAlloc> {
+        let removed = self.allocations.remove(&key)?;
+        let removed_slot = removed.slot_index;
+        let last_slot = self.active_subchunk_count as usize - 1;
+        debug_assert_eq!(self.slot_keys[removed_slot], key);
+
+        if removed_slot != last_slot {
+            let moved_key = self.slot_keys[last_slot];
+            let moved_alloc = {
+                let alloc = self
+                    .allocations
+                    .get_mut(&moved_key)
+                    .expect("dense slot map must reference an allocation");
+                alloc.slot_index = removed_slot;
+                *alloc
+            };
+            self.write_slot_batched(batch, &moved_alloc);
+            self.slot_keys[removed_slot] = moved_key;
+        }
+        self.slot_keys.pop();
+        self.active_subchunk_count -= 1;
+        self.zero_metadata_slot_batched(batch, last_slot);
+        Some(removed)
+    }
+
     /// Writes one allocation at its current dense slot, fixing slot-dependent
     /// draw data used by the culler and vertex pulling.
     fn write_slot(&self, queue: &wgpu::Queue, alloc: &SubchunkAlloc) {
@@ -666,6 +813,24 @@ impl IndirectManager {
         let mut draw = alloc.draw_command;
         draw.first_instance = slot as u32;
         queue.write_buffer(
+            &self.draw_commands_buffer,
+            (slot * size_of::<DrawIndirect>()) as u64,
+            bytemuck::bytes_of(&draw),
+        );
+    }
+
+    fn write_slot_batched(&self, batch: &mut UploadBatch, alloc: &SubchunkAlloc) {
+        let slot = alloc.slot_index;
+        let mut meta = alloc.gpu_meta;
+        meta.draw_data[2] = slot as u32;
+        batch.push(
+            &self.subchunk_meta_buffer,
+            (slot * size_of::<SubchunkGpuMeta>()) as u64,
+            bytemuck::bytes_of(&meta),
+        );
+        let mut draw = alloc.draw_command;
+        draw.first_instance = slot as u32;
+        batch.push(
             &self.draw_commands_buffer,
             (slot * size_of::<DrawIndirect>()) as u64,
             bytemuck::bytes_of(&draw),
@@ -691,6 +856,23 @@ impl IndirectManager {
             &self.draw_commands_buffer,
             draw_byte_offset as u64,
             bytemuck::bytes_of(&empty_draw),
+        );
+    }
+
+    fn zero_metadata_slot_batched(&self, batch: &mut UploadBatch, slot_index: usize) {
+        let meta = SubchunkGpuMeta {
+            world_origin: [0; 4],
+            draw_data: [0; 4],
+        };
+        batch.push(
+            &self.subchunk_meta_buffer,
+            (slot_index * size_of::<SubchunkGpuMeta>()) as u64,
+            bytemuck::bytes_of(&meta),
+        );
+        batch.push(
+            &self.draw_commands_buffer,
+            (slot_index * size_of::<DrawIndirect>()) as u64,
+            bytemuck::bytes_of(&DrawIndirect::zeroed()),
         );
     }
 

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use minerust::{
     BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME, MAX_MESH_BUILDS_PER_FRAME,
-    NUM_SUBCHUNKS, SUBCHUNK_HEIGHT,
+    NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, UploadBatch,
 };
 
 use crate::multiplayer::network::update_network;
@@ -43,7 +43,11 @@ impl State {
     ///
     /// Does nothing if the parent chunk has been unloaded since the mesh was
     /// requested.
-    pub fn update_subchunk_mesh(&mut self, result: minerust::mesh_loader::MeshResult) {
+    pub fn update_subchunk_mesh(
+        &mut self,
+        batch: &mut UploadBatch,
+        result: minerust::mesh_loader::MeshResult,
+    ) {
         let cx = result.cx;
         let cz = result.cz;
         let sy = result.sy;
@@ -73,12 +77,17 @@ impl State {
             subchunk_y: sy,
         };
 
-        let terrain_uploaded =
-            self.indirect_manager
-                .upload_subchunk(&self.queue, key, &result.terrain, &aabb_copy);
-
-        let water_uploaded = self.water_indirect_manager.upload_subchunk(
+        let terrain_uploaded = self.indirect_manager.upload_subchunk_batched(
             &self.queue,
+            batch,
+            key,
+            &result.terrain,
+            &aabb_copy,
+        );
+
+        let water_uploaded = self.water_indirect_manager.upload_subchunk_batched(
+            &self.queue,
+            batch,
             key,
             &result.water,
             &aabb_copy,
@@ -404,12 +413,38 @@ impl State {
         // --- 8. Mesh uploads ---
         // Drain completed mesh results up to the per-frame cap so a burst of
         // ready meshes doesn't cause a single-frame GPU upload spike.
+        let mut mesh_uploads = UploadBatch::default();
         for _ in 0..MAX_MESH_BUILDS_PER_FRAME {
             if let Some(result) = self.mesh_loader.poll_result() {
-                self.update_subchunk_mesh(result);
+                self.update_subchunk_mesh(&mut mesh_uploads, result);
             } else {
                 break;
             }
+        }
+
+        // Write all completed terrain and water descriptors in one operation,
+        // then fan them out to their final GPU buffers with GPU-side copies.
+        if !mesh_uploads.data.is_empty() {
+            let staging = self
+                .mesh_upload_ring
+                .next_buffer(&self.device, mesh_uploads.data.len() as u64);
+            self.queue.write_buffer(staging, 0, &mesh_uploads.data);
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Batched Mesh Upload Encoder"),
+                });
+            for copy in &mesh_uploads.copies {
+                encoder.copy_buffer_to_buffer(
+                    staging,
+                    copy.source_offset,
+                    &copy.destination,
+                    copy.destination_offset,
+                    copy.size,
+                );
+            }
+            self.queue.submit(std::iter::once(encoder.finish()));
         }
     }
 
