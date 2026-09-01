@@ -3,6 +3,10 @@ struct SubchunkMeta {
     draw_data: vec4<u32>,
 }
 
+struct ClusterMeta {
+    world_origin: vec4<i32>,
+}
+
 struct DrawIndirect {
     vertex_count: u32,
     instance_count: u32,
@@ -17,6 +21,8 @@ struct CullUniforms {
     subchunk_count: u32,
     hiz_size: vec2<f32>,
     screen_size: vec2<f32>,
+    cull_distance: f32,
+    cluster_count: u32,
     occlusion_enabled: u32,
 }
 
@@ -38,8 +44,17 @@ var hiz_texture: texture_2d<f32>;
 @group(0) @binding(5)
 var hiz_sampler: sampler;
 
+@group(0) @binding(6)
+var<storage, read> clusters: array<ClusterMeta>;
+
+@group(0) @binding(7)
+var<storage, read> subchunk_clusters: array<u32>;
+
+@group(0) @binding(8)
+var<storage, read_write> cluster_visibility: array<u32>;
+
 const FRUSTUM_CULL_MARGIN: f32 = 2.0;
-const SUBCHUNK_EXTENT: vec3<f32> = vec3<f32>(16.0, 16.0, 16.0);
+const CLUSTER_EXTENT: vec3<f32> = vec3<f32>(32.0, 64.0, 32.0);
 const WORKGROUP_SIZE: u32 = 128u;
 
 // Portable workgroup-local compaction.  Keeping this in workgroup memory is
@@ -140,6 +155,28 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     return nearest_z <= occluder_z + 0.0001;
 }
 
+fn is_within_cull_distance(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    let camera_xz = cull_uniforms.camera_pos.xz;
+    let nearest_xz = clamp(camera_xz, aabb_min.xz, aabb_max.xz);
+    return distance(camera_xz, nearest_xz) <= cull_uniforms.cull_distance;
+}
+
+/// Coarse stage.  A failed node prevents all of its children from doing
+/// frustum or Hi-Z work in `main` below.
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn cull_clusters(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let cluster_index = global_id.x;
+    if cluster_index >= cull_uniforms.cluster_count {
+        return;
+    }
+    let aabb_min = vec3<f32>(clusters[cluster_index].world_origin.xyz);
+    let aabb_max = aabb_min + CLUSTER_EXTENT;
+    let visible = is_within_cull_distance(aabb_min, aabb_max)
+        && is_frustum_visible(aabb_min, aabb_max)
+        && is_occlusion_visible(aabb_min, aabb_max);
+    cluster_visibility[cluster_index] = select(0u, 1u, visible);
+}
+
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn main(
     @builtin(global_invocation_id) global_id: vec3<u32>,
@@ -154,11 +191,11 @@ fn main(
     // instead of returning early.
     if idx < cull_uniforms.subchunk_count {
         subchunk = subchunks[idx];
-        if subchunk.draw_data.w != 0u {
-            let aabb_min = vec3<f32>(subchunk.world_origin.xyz);
-            let aabb_max = aabb_min + SUBCHUNK_EXTENT;
-            is_visible = is_frustum_visible(aabb_min, aabb_max)
-                && is_occlusion_visible(aabb_min, aabb_max);
+        if subchunk.draw_data.w != 0u && cluster_visibility[subchunk_clusters[idx]] != 0u {
+            // Children of a visible cluster are emitted directly.  The coarse
+            // AABB is conservative, so this can only add harmless extra draws
+            // near the cluster boundary; it cannot hide visible geometry.
+            is_visible = true;
         }
     }
 

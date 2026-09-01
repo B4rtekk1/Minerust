@@ -1,7 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 
-use crate::constants::{CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT};
+use crate::constants::{
+    CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS, RENDER_DISTANCE, SUBCHUNK_HEIGHT,
+};
 use crate::core::quad::PackedQuad;
 use crate::core::uniforms::UploadBatch;
 use crate::render::frustum::AABB;
@@ -18,6 +20,18 @@ use std::collections::BTreeMap;
 const MAX_CHUNK_COLUMNS: usize =
     (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1) * (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1);
 const MAX_SUBCHUNKS: usize = MAX_CHUNK_COLUMNS * NUM_SUBCHUNKS as usize;
+/// A hierarchy node spans two chunk columns in X/Z and four subchunks in Y.
+const CLUSTER_CHUNK_SPAN: i32 = 2;
+const CLUSTER_SUBCHUNK_SPAN: i32 = 4;
+const CLUSTER_EXTENT: [i32; 3] = [
+    CHUNK_SIZE * CLUSTER_CHUNK_SPAN,
+    SUBCHUNK_HEIGHT * CLUSTER_SUBCHUNK_SPAN,
+    CHUNK_SIZE * CLUSTER_CHUNK_SPAN,
+];
+const MAX_CLUSTER_COLUMNS_PER_AXIS: usize = (CHUNK_UNLOAD_DISTANCE as usize * 2 + 2) / 2;
+const MAX_CLUSTERS: usize = MAX_CLUSTER_COLUMNS_PER_AXIS
+    * MAX_CLUSTER_COLUMNS_PER_AXIS
+    * ((NUM_SUBCHUNKS as usize + 3) / 4);
 
 /// Default terrain geometry budget for the unified buffers.
 ///
@@ -93,6 +107,14 @@ pub struct SubchunkGpuMeta {
     pub draw_data: [u32; 4],
 }
 
+/// GPU metadata for one coarse culling node.  Its extent is fixed at
+/// `2 * 16` by `4 * 16` by `2 * 16` blocks, so only its origin is needed.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ClusterGpuMeta {
+    world_origin: [i32; 4],
+}
+
 /// Uniform data consumed by the GPU culling compute shader.
 ///
 /// Contains everything the shader needs to perform frustum + Hi-Z occlusion
@@ -112,10 +134,14 @@ pub struct CullUniforms {
     pub hiz_size: [f32; 2],
     /// Dimensions of the render target in pixels.
     pub screen_size: [f32; 2],
+    /// Horizontal world-space radius accepted by the coarse distance test.
+    pub cull_distance: f32,
+    /// Number of active coarse hierarchy nodes.
+    pub cluster_count: u32,
     /// Non-zero only when Hi-Z has valid history for `occlusion_view_proj`.
     pub occlusion_enabled: u32,
     /// Explicit padding to preserve the uniform block's 16-byte alignment.
-    pub _padding: [u32; 3],
+    pub _padding: u32,
 }
 
 /// Uniquely identifies a subchunk by its chunk column and vertical slice index.
@@ -171,6 +197,12 @@ pub struct IndirectManager {
 
     /// Per-slot AABB and draw-argument metadata consumed by the culling shader.
     subchunk_meta_buffer: wgpu::Buffer,
+    /// Coarse AABBs rebuilt when the dense subchunk set changes.
+    cluster_meta_buffer: wgpu::Buffer,
+    /// Maps each dense subchunk slot to its parent cluster slot.
+    subchunk_cluster_buffer: wgpu::Buffer,
+    /// Visibility result produced by the cluster pass and consumed by children.
+    cluster_visibility_buffer: wgpu::Buffer,
 
     /// Atomic counter incremented once by each non-empty culling workgroup.
     visible_count_buffer: wgpu::Buffer,
@@ -191,6 +223,8 @@ pub struct IndirectManager {
 
     /// Compute pipeline that performs per-subchunk frustum + Hi-Z culling.
     cull_pipeline: wgpu::ComputePipeline,
+    /// First hierarchy stage: frustum/Hi-Z tests one AABB per cluster.
+    cluster_cull_pipeline: wgpu::ComputePipeline,
     /// Bind group layout used by the main camera culling pass.
     cull_bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group for the main (camera) culling pass; rebuilt when the Hi-Z changes.
@@ -209,6 +243,8 @@ pub struct IndirectManager {
     max_quads: usize,
     /// Short label used in logs.
     label: &'static str,
+    cluster_count: u32,
+    hierarchy_dirty: bool,
 }
 
 impl IndirectManager {
@@ -260,6 +296,25 @@ impl IndirectManager {
             mapped_at_creation: false,
         });
 
+        let cluster_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Cluster Metadata Buffer"),
+            size: (MAX_CLUSTERS * size_of::<ClusterGpuMeta>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let subchunk_cluster_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Subchunk Cluster Index Buffer"),
+            size: (MAX_SUBCHUNKS * size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cluster_visibility_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Cluster Visibility Buffer"),
+            size: (MAX_CLUSTERS * size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let visible_count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Visible Count Buffer"),
             size: 4,
@@ -296,6 +351,8 @@ impl IndirectManager {
         //   3 – visible count atomic (read-write storage)
         //   4 – Hi-Z texture (non-filtered float)
         //   5 – Hi-Z sampler (non-filtering)
+        //   6 – cluster AABBs, 7 – child-to-cluster indices,
+        //   8 – cluster visibility written by the first pass
         let cull_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Cull Bind Group Layout"),
@@ -356,6 +413,36 @@ impl IndirectManager {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -373,6 +460,15 @@ impl IndirectManager {
             compilation_options: Default::default(),
             cache: None,
         });
+        let cluster_cull_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Cluster Cull Pipeline"),
+                layout: Some(&cull_pipeline_layout),
+                module: &cull_shader,
+                entry_point: Some("cull_clusters"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         // Nearest-neighbor clamp sampler; no filtering needed for depth comparisons.
         let hiz_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -390,6 +486,9 @@ impl IndirectManager {
             draw_commands_buffer,
             visible_draw_commands_buffer,
             subchunk_meta_buffer,
+            cluster_meta_buffer,
+            subchunk_cluster_buffer,
+            cluster_visibility_buffer,
             visible_count_buffer,
             visible_count_staging,
             allocations: FxHashMap::default(),
@@ -398,6 +497,7 @@ impl IndirectManager {
             slot_keys: Vec::with_capacity(MAX_SUBCHUNKS),
             free_quad_blocks: BTreeMap::new(),
             cull_pipeline,
+            cluster_cull_pipeline,
             cull_bind_group_layout,
             cull_bind_group: None,
             cull_uniforms_buffer,
@@ -405,6 +505,8 @@ impl IndirectManager {
             coalesce_counter: 0,
             max_quads,
             label,
+            cluster_count: 0,
+            hierarchy_dirty: true,
         }
     }
 
@@ -440,6 +542,18 @@ impl IndirectManager {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.cluster_meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.subchunk_cluster_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.cluster_visibility_buffer.as_entire_binding(),
                 },
             ],
         }));
@@ -570,6 +684,7 @@ impl IndirectManager {
         self.allocations.insert(key, alloc);
         self.slot_keys.push(key);
         self.active_subchunk_count += 1;
+        self.hierarchy_dirty = true;
         self.maybe_coalesce();
         true
     }
@@ -687,6 +802,7 @@ impl IndirectManager {
         self.allocations.insert(key, alloc);
         self.slot_keys.push(key);
         self.active_subchunk_count += 1;
+        self.hierarchy_dirty = true;
         self.maybe_coalesce();
         true
     }
@@ -716,6 +832,7 @@ impl IndirectManager {
             None => return false,
         };
         self.write_slot(queue, &updated_alloc);
+        self.hierarchy_dirty = true;
         true
     }
 
@@ -763,6 +880,7 @@ impl IndirectManager {
 
         self.slot_keys.pop();
         self.active_subchunk_count -= 1;
+        self.hierarchy_dirty = true;
         // The last slot is outside the dense range now. Clearing it avoids
         // stale entries if a future caller accidentally uses a wider range.
         self.zero_metadata_slot(queue, last_slot);
@@ -794,6 +912,7 @@ impl IndirectManager {
         }
         self.slot_keys.pop();
         self.active_subchunk_count -= 1;
+        self.hierarchy_dirty = true;
         self.zero_metadata_slot_batched(batch, last_slot);
         Some(removed)
     }
@@ -974,9 +1093,77 @@ impl IndirectManager {
         self.active_subchunk_count = 0;
         self.slot_keys.clear();
         self.free_quad_blocks.clear();
+        self.cluster_count = 0;
+        self.hierarchy_dirty = true;
     }
 
-    /// Uploads cull uniforms and dispatches the main camera culling compute pass.
+    /// Rebuilds the compact cluster table after streaming or a slot swap.
+    ///
+    /// The child metadata remains dense for drawing, while this table groups
+    /// arbitrary dense slots by their fixed world-space 2×2×4 parent.  This
+    /// indirection avoids constraining the allocator to a spatial slot order.
+    fn upload_hierarchy_if_dirty(&mut self, queue: &wgpu::Queue) {
+        if !self.hierarchy_dirty {
+            return;
+        }
+
+        let active = self.active_subchunk_count as usize;
+        let mut clusters = Vec::<ClusterGpuMeta>::new();
+        let mut cluster_slots = BTreeMap::<(i32, i32, i32), u32>::new();
+        let mut child_clusters = vec![0u32; active];
+
+        for (slot, key) in self.slot_keys.iter().enumerate() {
+            let origin = self
+                .allocations
+                .get(key)
+                .expect("dense slot map must reference an allocation")
+                .gpu_meta
+                .world_origin;
+            let cluster_key = (
+                origin[0].div_euclid(CLUSTER_EXTENT[0]),
+                origin[1].div_euclid(CLUSTER_EXTENT[1]),
+                origin[2].div_euclid(CLUSTER_EXTENT[2]),
+            );
+            let cluster_slot = match cluster_slots.get(&cluster_key) {
+                Some(&slot) => slot,
+                None => {
+                    let slot = clusters.len() as u32;
+                    assert!(
+                        (slot as usize) < MAX_CLUSTERS,
+                        "cluster buffer capacity exceeded"
+                    );
+                    cluster_slots.insert(cluster_key, slot);
+                    clusters.push(ClusterGpuMeta {
+                        world_origin: [
+                            cluster_key.0 * CLUSTER_EXTENT[0],
+                            cluster_key.1 * CLUSTER_EXTENT[1],
+                            cluster_key.2 * CLUSTER_EXTENT[2],
+                            0,
+                        ],
+                    });
+                    slot
+                }
+            };
+            child_clusters[slot] = cluster_slot;
+        }
+
+        if !clusters.is_empty() {
+            queue.write_buffer(
+                &self.cluster_meta_buffer,
+                0,
+                bytemuck::cast_slice(&clusters),
+            );
+            queue.write_buffer(
+                &self.subchunk_cluster_buffer,
+                0,
+                bytemuck::cast_slice(&child_clusters),
+            );
+        }
+        self.cluster_count = clusters.len() as u32;
+        self.hierarchy_dirty = false;
+    }
+
+    /// Uploads cull uniforms and dispatches the two-stage camera culling pass.
     ///
     /// Clears `visible_count_buffer` before dispatching so that only subchunks
     /// that pass culling this frame are drawn. When indirect-count drawing is
@@ -989,7 +1176,7 @@ impl IndirectManager {
     /// Does nothing if no subchunks are currently allocated or if the bind
     /// group has not yet been created via [`update_bind_group`].
     pub fn dispatch_culling(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
         occlusion_view_proj: &glam::Mat4,
@@ -1000,6 +1187,7 @@ impl IndirectManager {
         occlusion_enabled: bool,
         supports_indirect_count: bool,
     ) {
+        self.upload_hierarchy_if_dirty(queue);
         self.dispatch_culling_into(
             encoder,
             queue,
@@ -1052,8 +1240,10 @@ impl IndirectManager {
             subchunk_count: active,
             hiz_size,
             screen_size,
+            cull_distance: (RENDER_DISTANCE * CHUNK_SIZE) as f32,
+            cluster_count: self.cluster_count,
             occlusion_enabled: u32::from(occlusion_enabled),
-            _padding: [0; 3],
+            _padding: 0,
         };
         queue.write_buffer(uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -1065,15 +1255,24 @@ impl IndirectManager {
                 }
             }
 
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cluster_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Cluster Culling Pass"),
+                timestamp_writes: None,
+            });
+            cluster_pass.set_pipeline(&self.cluster_cull_pipeline);
+            cluster_pass.set_bind_group(0, bind_group, &[]);
+            cluster_pass.dispatch_workgroups((self.cluster_count + 127) / 128, 1, 1);
+            drop(cluster_pass);
+
+            let mut child_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.cull_pipeline);
-            cpass.set_bind_group(0, bind_group, &[]);
+            child_pass.set_pipeline(&self.cull_pipeline);
+            child_pass.set_bind_group(0, bind_group, &[]);
 
             let workgroup_count = (active + 127) / 128;
-            cpass.dispatch_workgroups(workgroup_count, 1, 1);
+            child_pass.dispatch_workgroups(workgroup_count, 1, 1);
         }
     }
 
@@ -1129,6 +1328,8 @@ impl IndirectManager {
         self.active_subchunk_count = 0;
         self.slot_keys.clear();
         self.free_quad_blocks.clear();
+        self.cluster_count = 0;
+        self.hierarchy_dirty = true;
     }
 }
 
