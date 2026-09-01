@@ -172,7 +172,7 @@ pub struct IndirectManager {
     /// Per-slot AABB and draw-argument metadata consumed by the culling shader.
     subchunk_meta_buffer: wgpu::Buffer,
 
-    /// Atomic counter incremented by the culling shader for each visible subchunk.
+    /// Atomic counter incremented once by each non-empty culling workgroup.
     visible_count_buffer: wgpu::Buffer,
     /// CPU-readable staging copy of `visible_count_buffer` (for debugging/stats).
     #[allow(dead_code)]
@@ -982,7 +982,9 @@ impl IndirectManager {
     /// that pass culling this frame are drawn. When indirect-count drawing is
     /// unavailable, also clears the command range consumed by the fixed-count
     /// fallback so stale commands become no-op draws.
-    /// One workgroup of 128 threads is launched per 128 active subchunks.
+    /// One workgroup of 128 threads is launched per 128 active subchunks. Each
+    /// workgroup compacts visible entries locally and reserves its output span
+    /// with one global atomic operation.
     ///
     /// Does nothing if no subchunks are currently allocated or if the bind
     /// group has not yet been created via [`update_bind_group`].
@@ -1127,5 +1129,20 @@ impl IndirectManager {
         self.active_subchunk_count = 0;
         self.slot_keys.clear();
         self.free_quad_blocks.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cull_shader_parses_and_validates() {
+        let source = include_str!("../shaders/cull.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(source).expect("cull WGSL must parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("cull WGSL must validate");
     }
 }

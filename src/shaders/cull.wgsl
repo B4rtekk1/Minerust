@@ -40,6 +40,15 @@ var hiz_sampler: sampler;
 
 const FRUSTUM_CULL_MARGIN: f32 = 2.0;
 const SUBCHUNK_EXTENT: vec3<f32> = vec3<f32>(16.0, 16.0, 16.0);
+const WORKGROUP_SIZE: u32 = 128u;
+
+// Portable workgroup-local compaction.  Keeping this in workgroup memory is
+// intentionally the baseline path: subgroup operations are not available on
+// every WebGPU backend.  A subgroup-specialized pipeline can replace just
+// this scan when that capability is enabled without changing the output
+// protocol below.
+var<workgroup> scan_values: array<u32, WORKGROUP_SIZE>;
+var<workgroup> workgroup_visible_base: u32;
 
 fn aabb_vs_plane(aabb_min: vec3<f32>, aabb_max: vec3<f32>, plane: vec4<f32>) -> bool {
     let expanded_min = aabb_min - vec3<f32>(FRUSTUM_CULL_MARGIN);
@@ -131,34 +140,59 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     return nearest_z <= occluder_z + 0.0001;
 }
 
-@compute @workgroup_size(128)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+) {
     let idx = global_id.x;
+    var is_visible = false;
+    var subchunk: SubchunkMeta;
 
-    if idx >= cull_uniforms.subchunk_count {
-        return;
+    // All invocations must reach the barriers below, including the tail of a
+    // partially occupied workgroup, so visibility is represented as 0 or 1
+    // instead of returning early.
+    if idx < cull_uniforms.subchunk_count {
+        subchunk = subchunks[idx];
+        if subchunk.draw_data.w != 0u {
+            let aabb_min = vec3<f32>(subchunk.world_origin.xyz);
+            let aabb_max = aabb_min + SUBCHUNK_EXTENT;
+            is_visible = is_frustum_visible(aabb_min, aabb_max)
+                && is_occlusion_visible(aabb_min, aabb_max);
+        }
     }
 
-    let subchunk = subchunks[idx];
+    scan_values[local_index] = select(0u, 1u, is_visible);
+    workgroupBarrier();
 
-    if subchunk.draw_data.w == 0u {
-        return;
+    // Inclusive Hillis-Steele scan.  It is only seven synchronized shared
+    // memory steps for the fixed 128-thread workgroup.
+    for (var offset = 1u; offset < WORKGROUP_SIZE; offset = offset << 1u) {
+        var addend = 0u;
+        if local_index >= offset {
+            addend = scan_values[local_index - offset];
+        }
+        workgroupBarrier();
+        scan_values[local_index] += addend;
+        workgroupBarrier();
     }
 
-    let aabb_min = vec3<f32>(subchunk.world_origin.xyz);
-    let aabb_max = aabb_min + SUBCHUNK_EXTENT;
-
-    if !is_frustum_visible(aabb_min, aabb_max) {
-        return;
+    if local_index == 0u {
+        let local_visible_count = scan_values[WORKGROUP_SIZE - 1u];
+        if local_visible_count != 0u {
+            workgroup_visible_base = atomicAdd(&visible_count, local_visible_count);
+        } else {
+            workgroup_visible_base = 0u;
+        }
     }
+    workgroupBarrier();
 
-    if !is_occlusion_visible(aabb_min, aabb_max) {
-        return;
+    if is_visible {
+        let local_slot = scan_values[local_index] - 1u;
+        let slot = workgroup_visible_base + local_slot;
+        draw_commands[slot].vertex_count   = subchunk.draw_data.x;
+        draw_commands[slot].instance_count = 1u;
+        draw_commands[slot].first_vertex   = subchunk.draw_data.y;
+        draw_commands[slot].first_instance = subchunk.draw_data.z;
     }
-
-    let slot = atomicAdd(&visible_count, 1u);
-    draw_commands[slot].vertex_count   = subchunk.draw_data.x;
-    draw_commands[slot].instance_count = 1u;
-    draw_commands[slot].first_vertex   = subchunk.draw_data.y;
-    draw_commands[slot].first_instance = subchunk.draw_data.z;
 }
