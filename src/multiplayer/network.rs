@@ -323,13 +323,10 @@ pub fn update_network(
                     player_id,
                     username,
                 } => {
-                    log(
-                        LogLevel::Info,
-                        &format!(
-                            "Received Connect packet: player_id={}, username={}",
-                            player_id, username
-                        ),
-                    );
+                    // Usernames are player-provided data, so keep them out of
+                    // stdout and persistent logs. The connection event itself
+                    // remains useful for diagnosing network flow.
+                    log(LogLevel::Info, "Received Connect packet");
                     if let Some(player) = remote_players.get_mut(&player_id) {
                         player.username = username;
                     } else {
