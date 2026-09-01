@@ -530,6 +530,7 @@ impl State {
             hiz_size_f,
             [self.config.width as f32, self.config.height as f32],
             occlusion_enabled,
+            self.supports_indirect_count,
         );
         self.water_indirect_manager.dispatch_culling(
             &mut encoder,
@@ -540,6 +541,7 @@ impl State {
             hiz_size_f,
             [self.config.width as f32, self.config.height as f32],
             occlusion_enabled,
+            self.supports_indirect_count,
         );
 
         // The shadow map is rendered in light space, independent of the

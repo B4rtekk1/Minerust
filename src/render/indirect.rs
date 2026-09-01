@@ -764,8 +764,10 @@ impl IndirectManager {
 
     /// Uploads cull uniforms and dispatches the main camera culling compute pass.
     ///
-    /// Clears `visible_count_buffer` and the visible command buffer before
-    /// dispatching so that only subchunks that pass culling this frame are drawn.
+    /// Clears `visible_count_buffer` before dispatching so that only subchunks
+    /// that pass culling this frame are drawn. When indirect-count drawing is
+    /// unavailable, also clears the command range consumed by the fixed-count
+    /// fallback so stale commands become no-op draws.
     /// One workgroup of 64 threads is launched per 64 subchunk slots.
     ///
     /// Does nothing if no subchunks are currently allocated or if the bind
@@ -780,6 +782,7 @@ impl IndirectManager {
         hiz_size: [f32; 2],
         screen_size: [f32; 2],
         occlusion_enabled: bool,
+        supports_indirect_count: bool,
     ) {
         self.dispatch_culling_into(
             encoder,
@@ -790,6 +793,7 @@ impl IndirectManager {
             hiz_size,
             screen_size,
             occlusion_enabled,
+            supports_indirect_count,
             &self.cull_uniforms_buffer,
             &self.visible_count_buffer,
             &self.visible_draw_commands_buffer,
@@ -808,13 +812,17 @@ impl IndirectManager {
         hiz_size: [f32; 2],
         screen_size: [f32; 2],
         occlusion_enabled: bool,
+        supports_indirect_count: bool,
         uniforms_buffer: &wgpu::Buffer,
         count_buffer: &wgpu::Buffer,
         commands_buffer: &wgpu::Buffer,
         bind_group: Option<&wgpu::BindGroup>,
         label: &'static str,
     ) {
-        queue.write_buffer(count_buffer, 0, &0u32.to_le_bytes());
+        // Keep this reset in the same command buffer as culling and drawing.
+        // With indirect-count support, the draw pass consumes only this many
+        // commands, so commands left from prior frames need not be cleared.
+        encoder.clear_buffer(count_buffer, 0, None);
 
         if self.active_subchunk_count == 0 {
             return;
@@ -834,9 +842,11 @@ impl IndirectManager {
         queue.write_buffer(uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         if let Some(bind_group) = bind_group {
-            let bytes_to_clear = (active as u64) * size_of::<DrawIndirect>() as u64;
-            if bytes_to_clear > 0 {
-                encoder.clear_buffer(commands_buffer, 0, Some(bytes_to_clear));
+            if !supports_indirect_count {
+                let bytes_to_clear = (active as u64) * size_of::<DrawIndirect>() as u64;
+                if bytes_to_clear > 0 {
+                    encoder.clear_buffer(commands_buffer, 0, Some(bytes_to_clear));
+                }
             }
 
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
