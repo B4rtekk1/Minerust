@@ -291,6 +291,9 @@ impl State {
             // recreate all Hi-Z objects whenever the surface dimensions change.
             let new_hiz_size = [new_size.width, new_size.height];
             if new_hiz_size != self.hiz_size {
+                // The previous pyramid was rasterized at a different resolution,
+                // so it must not participate in the next culling dispatch.
+                self.hiz_history_valid = false;
                 self.hiz_size = new_hiz_size;
                 let hiz_max_dim = new_size.width.max(new_size.height);
                 let hiz_mips_count = (hiz_max_dim as f32).log2().floor() as u32 + 1;

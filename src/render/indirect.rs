@@ -98,8 +98,8 @@ pub struct SubchunkGpuMeta {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct CullUniforms {
-    /// Combined view-projection matrix (column-major).
-    pub view_proj: [[f32; 4]; 4],
+    /// View-projection matrix of the frame that produced the Hi-Z pyramid.
+    pub occlusion_view_proj: [[f32; 4]; 4],
     /// Six frustum planes in world space (normal + distance).
     pub frustum_planes: [[f32; 4]; 6],
     /// World-space camera position (used for LOD or distance culling).
@@ -110,6 +110,10 @@ pub struct CullUniforms {
     pub hiz_size: [f32; 2],
     /// Dimensions of the render target in pixels.
     pub screen_size: [f32; 2],
+    /// Non-zero only when Hi-Z has valid history for `occlusion_view_proj`.
+    pub occlusion_enabled: u32,
+    /// Explicit padding to preserve the uniform block's 16-byte alignment.
+    pub _padding: [u32; 3],
 }
 
 /// Uniquely identifies a subchunk by its chunk column and vertical slice index.
@@ -770,20 +774,22 @@ impl IndirectManager {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
-        view_proj: &glam::Mat4,
+        occlusion_view_proj: &glam::Mat4,
         frustum_planes: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
         hiz_size: [f32; 2],
         screen_size: [f32; 2],
+        occlusion_enabled: bool,
     ) {
         self.dispatch_culling_into(
             encoder,
             queue,
-            view_proj,
+            occlusion_view_proj,
             frustum_planes,
             camera_pos,
             hiz_size,
             screen_size,
+            occlusion_enabled,
             &self.cull_uniforms_buffer,
             &self.visible_count_buffer,
             &self.visible_draw_commands_buffer,
@@ -796,11 +802,12 @@ impl IndirectManager {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
-        view_proj: &glam::Mat4,
+        occlusion_view_proj: &glam::Mat4,
         frustum_planes: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
         hiz_size: [f32; 2],
         screen_size: [f32; 2],
+        occlusion_enabled: bool,
         uniforms_buffer: &wgpu::Buffer,
         count_buffer: &wgpu::Buffer,
         commands_buffer: &wgpu::Buffer,
@@ -815,12 +822,14 @@ impl IndirectManager {
 
         let active = self.max_slot_bound;
         let uniforms = CullUniforms {
-            view_proj: view_proj.to_cols_array_2d(),
+            occlusion_view_proj: occlusion_view_proj.to_cols_array_2d(),
             frustum_planes: *frustum_planes,
             camera_pos,
             subchunk_count: active,
             hiz_size,
             screen_size,
+            occlusion_enabled: u32::from(occlusion_enabled),
+            _padding: [0; 3],
         };
         queue.write_buffer(uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
 

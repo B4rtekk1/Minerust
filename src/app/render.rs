@@ -20,6 +20,11 @@ const SHADOW_MAP_SIZE: f32 = 2048.0;
 const SHADOW_HALF_EXTENT: f32 = 112.0;
 const SHADOW_RECENTER_DISTANCE: f32 = 76.0;
 const SHADOW_ANCHOR_GRID: f32 = 128.0;
+/// A larger step means the existing Hi-Z pyramid no longer safely describes
+/// the camera view (for example after a teleport).
+const HIZ_RESET_POSITION_DISTANCE: f32 = 16.0;
+/// Large camera rotations have the same temporal mismatch as teleports.
+const HIZ_RESET_ROTATION_RADIANS: f32 = 15.0_f32.to_radians();
 
 fn stabilized_sun_matrix(camera_pos: Vec3, sun_dir: Vec3) -> Mat4 {
     let up = if sun_dir.y.abs() > 0.96 {
@@ -367,6 +372,7 @@ impl State {
         // `glam`'s RH projection helpers already use WebGPU's [0, 1] depth range.
         let view_proj = proj * view_mat;
         let view_proj_array: [[f32; 4]; 4] = view_proj.to_cols_array_2d();
+        self.current_view_proj = view_proj;
 
         // ── Day/night cycle ───────────────────────────────────────────────── //
         let time = self.game_start_time.elapsed().as_secs_f32();
@@ -399,7 +405,24 @@ impl State {
         let inv_view_proj_array: [[f32; 4]; 4] = inv_view_proj.to_cols_array_2d();
 
         let eye_pos = self.camera.eye_position();
+        let camera_forward = self.camera.look_direction();
         let is_underwater = self.is_underwater;
+
+        // Hi-Z was rasterized from the previous camera transform.  Its AABB
+        // projection must use that same transform; current planes still drive
+        // frustum culling.  Discard temporal history for discontinuous camera
+        // changes, while the first new pyramid is being generated, and after a
+        // resize (which clears `hiz_history_valid`).
+        let camera_moved_far = eye_pos.distance_squared(self.previous_hiz_camera_pos)
+            > HIZ_RESET_POSITION_DISTANCE * HIZ_RESET_POSITION_DISTANCE;
+        let camera_rotated_far = camera_forward
+            .dot(self.previous_hiz_forward)
+            .clamp(-1.0, 1.0)
+            < HIZ_RESET_ROTATION_RADIANS.cos();
+        let occlusion_enabled = render_world_scene
+            && self.hiz_history_valid
+            && !camera_moved_far
+            && !camera_rotated_far;
 
         // ── Upload uniforms ───────────────────────────────────────────────── //
         self.queue.write_buffer(
@@ -501,20 +524,22 @@ impl State {
         self.indirect_manager.dispatch_culling(
             &mut encoder,
             &self.queue,
-            &view_proj,
+            &self.previous_view_proj,
             &frustum_planes_array,
             self.camera.position.into(),
             hiz_size_f,
             [self.config.width as f32, self.config.height as f32],
+            occlusion_enabled,
         );
         self.water_indirect_manager.dispatch_culling(
             &mut encoder,
             &self.queue,
-            &view_proj,
+            &self.previous_view_proj,
             &frustum_planes_array,
             self.camera.position.into(),
             hiz_size_f,
             [self.config.width as f32, self.config.height as f32],
+            occlusion_enabled,
         );
 
         // The shadow map is rendered in light space, independent of the
@@ -1340,6 +1365,14 @@ impl State {
         // ── Submit & present ──────────────────────────────────────────────── //
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        // This frame's opaque depth has now been submitted into Hi-Z, making
+        // it the history sampled by culling on the next frame.
+        if render_world_scene {
+            self.previous_view_proj = self.current_view_proj;
+            self.previous_hiz_camera_pos = eye_pos;
+            self.previous_hiz_forward = camera_forward;
+            self.hiz_history_valid = true;
+        }
         Ok(())
     }
 

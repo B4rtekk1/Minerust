@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use glam::{Mat4, Vec3};
 use glyphon::{FontSystem, SwashCache, TextAtlas, TextRenderer, Viewport};
 use wgpu;
 use winit::{keyboard::ModifiersState, window::Window};
@@ -200,6 +201,16 @@ pub struct State {
     pub hiz_bind_group_layout: wgpu::BindGroupLayout,
     /// Pixel dimensions of the Hi-Z base level `[width, height]`.
     pub hiz_size: [u32; 2],
+    /// Current camera transform. Frustum culling always uses this frame's matrix.
+    pub current_view_proj: Mat4,
+    /// Camera transform used to render the depth pyramid currently stored in Hi-Z.
+    pub previous_view_proj: Mat4,
+    /// Camera eye position associated with `previous_view_proj`.
+    pub previous_hiz_camera_pos: Vec3,
+    /// Camera forward direction associated with `previous_view_proj`.
+    pub previous_hiz_forward: Vec3,
+    /// True once Hi-Z contains a completed depth pyramid for `previous_view_proj`.
+    pub hiz_history_valid: bool,
 
     // -------------------------------------------------------------------------
     // World, camera, and input

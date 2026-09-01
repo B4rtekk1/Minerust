@@ -1683,6 +1683,9 @@ impl State {
         // Assemble and return State
         // ------------------------------------------------------------------ //
 
+        let initial_hiz_camera_pos = camera.eye_position();
+        let initial_hiz_forward = camera.look_direction();
+
         Self {
             surface,
             device,
@@ -1811,6 +1814,11 @@ impl State {
             hiz_bind_groups,
             hiz_bind_group_layout,
             hiz_size,
+            current_view_proj: Mat4::IDENTITY,
+            previous_view_proj: Mat4::IDENTITY,
+            previous_hiz_camera_pos: initial_hiz_camera_pos,
+            previous_hiz_forward: initial_hiz_forward,
+            hiz_history_valid: false,
             depth_resolve_pipeline,
             depth_resolve_bind_group,
             supports_indirect_count,

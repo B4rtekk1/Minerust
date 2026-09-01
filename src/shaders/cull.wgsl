@@ -12,12 +12,13 @@ struct DrawIndirect {
 }
 
 struct CullUniforms {
-    view_proj: mat4x4<f32>,
+    occlusion_view_proj: mat4x4<f32>,
     frustum_planes: array<vec4<f32>, 6>,
     camera_pos: vec3<f32>,
     subchunk_count: u32,
     hiz_size: vec2<f32>,
     screen_size: vec2<f32>,
+    occlusion_enabled: u32,
 }
 
 @group(0) @binding(0)
@@ -61,7 +62,7 @@ fn is_frustum_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
 }
 
 fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
-    if cull_uniforms.hiz_size.x < 1.0 {
+    if cull_uniforms.occlusion_enabled == 0u || cull_uniforms.hiz_size.x < 1.0 {
         return true;
     }
 
@@ -82,7 +83,7 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     );
 
     for (var c = 0u; c < 8u; c++) {
-        let clip = cull_uniforms.view_proj * vec4<f32>(corners[c], 1.0);
+        let clip = cull_uniforms.occlusion_view_proj * vec4<f32>(corners[c], 1.0);
         if clip.w <= 0.0 {
             any_behind = true;
         } else {
