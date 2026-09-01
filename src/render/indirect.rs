@@ -135,6 +135,10 @@ struct SubchunkAlloc {
     quad_count: u32,
     /// Slot in the `SubchunkGpuMeta` array assigned to this subchunk.
     slot_index: usize,
+    /// CPU copy used to move this entry when a dense slot is removed.
+    gpu_meta: SubchunkGpuMeta,
+    /// Unculled draw command, likewise rewritten when its slot changes.
+    draw_command: DrawIndirect,
 }
 
 /// A contiguous run of free elements inside a unified buffer.
@@ -178,10 +182,8 @@ pub struct IndirectManager {
     next_quad_offset: u32,
     /// Number of subchunks currently allocated.
     active_subchunk_count: u32,
-    /// One past the highest slot index ever assigned; bounds the culling dispatch.
-    max_slot_bound: u32,
-    /// Stack of recycled metadata slot indices ready for reuse.
-    free_slots: Vec<usize>,
+    /// Slot-to-key map. Its indices are always dense in `0..active_subchunk_count`.
+    slot_keys: Vec<SubchunkKey>,
 
     /// Free-list for index buffer regions, keyed by block size for O(log n) lookup.
 
@@ -391,13 +393,7 @@ impl IndirectManager {
             allocations: FxHashMap::default(),
             next_quad_offset: 0,
             active_subchunk_count: 0,
-            max_slot_bound: 0,
-            // Pre-populate the free-slot stack in reverse so slot 0 is popped first.
-            free_slots: {
-                let mut v = Vec::with_capacity(MAX_SUBCHUNKS);
-                v.extend((0..MAX_SUBCHUNKS).rev());
-                v
-            },
+            slot_keys: Vec::with_capacity(MAX_SUBCHUNKS),
             free_quad_blocks: BTreeMap::new(),
             cull_pipeline,
             cull_bind_group_layout,
@@ -468,8 +464,7 @@ impl IndirectManager {
     ) -> bool {
         // Empty geometry means the subchunk should be removed.
         if quads.is_empty() {
-            if let Some(old_alloc) = self.allocations.remove(&key) {
-                self.zero_metadata_slot(queue, old_alloc.slot_index);
+            if let Some(old_alloc) = self.remove_allocation(queue, key) {
                 Self::add_free_block(
                     &mut self.free_quad_blocks,
                     FreeBlock {
@@ -477,16 +472,13 @@ impl IndirectManager {
                         count: old_alloc.quad_count,
                     },
                 );
-                self.free_slots.push(old_alloc.slot_index);
-                self.active_subchunk_count = self.allocations.len() as u32;
-                self.shrink_max_slot_bound_after_free(old_alloc.slot_index);
                 self.maybe_coalesce();
             }
             return true;
         }
 
         // Release the old allocation so its regions can be reused below.
-        if let Some(old_alloc) = self.allocations.remove(&key) {
+        if let Some(old_alloc) = self.remove_allocation(queue, key) {
             Self::add_free_block(
                 &mut self.free_quad_blocks,
                 FreeBlock {
@@ -494,7 +486,6 @@ impl IndirectManager {
                     count: old_alloc.quad_count,
                 },
             );
-            self.free_slots.push(old_alloc.slot_index);
         }
 
         let quad_count = quads.len() as u32;
@@ -528,21 +519,33 @@ impl IndirectManager {
             }
         };
 
-        let slot_index = match self.free_slots.pop() {
-            Some(idx) => idx,
-            None => {
-                log(
-                    LogLevel::Warning,
-                    "No free metadata slots available, clearing indirect draw cache...",
-                );
-                return false;
-            }
-        };
+        if self.active_subchunk_count as usize >= MAX_SUBCHUNKS {
+            log(
+                LogLevel::Warning,
+                "No free metadata slots available, clearing indirect draw cache...",
+            );
+            self.clear_gpu_data(queue);
+            return false;
+        }
+        let slot_index = self.active_subchunk_count as usize;
 
+        let gpu_meta = SubchunkGpuMeta {
+            aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
+            aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, slot_index as f32],
+            draw_data: [quad_count * 6, quad_offset * 6, slot_index as u32, 1],
+        };
+        let draw_command = DrawIndirect {
+            vertex_count: quad_count * 6,
+            instance_count: 1,
+            first_vertex: quad_offset * 6,
+            first_instance: slot_index as u32,
+        };
         let alloc = SubchunkAlloc {
             quad_offset,
             quad_count,
             slot_index,
+            gpu_meta,
+            draw_command,
         };
 
         let quad_byte_offset = alloc.quad_offset as u64 * size_of::<PackedQuad>() as u64;
@@ -552,41 +555,15 @@ impl IndirectManager {
             bytemuck::cast_slice(quads),
         );
 
-        // Write the culling metadata for this slot.
-        let subchunk_meta = SubchunkGpuMeta {
-            aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
-            // Slot index is packed into the w component of aabb_max.
-            aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, slot_index as f32],
-            draw_data: [quad_count * 6, alloc.quad_offset * 6, slot_index as u32, 1],
-        };
-        let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
-        queue.write_buffer(
-            &self.subchunk_meta_buffer,
-            meta_byte_offset as u64,
-            bytemuck::bytes_of(&subchunk_meta),
-        );
-        // Keep a parallel, unculled indirect stream for light-space passes.
-        // The camera culler writes a compacted subset into its own buffer.
-        let draw_command = DrawIndirect {
-            vertex_count: quad_count * 6,
-            instance_count: 1,
-            first_vertex: alloc.quad_offset * 6,
-            first_instance: slot_index as u32,
-        };
-        let draw_byte_offset = slot_index * size_of::<DrawIndirect>();
-        queue.write_buffer(
-            &self.draw_commands_buffer,
-            draw_byte_offset as u64,
-            bytemuck::bytes_of(&draw_command),
-        );
+        self.write_slot(queue, &alloc);
 
         // Advance the high-water marks only when no free block was reused.
         if !reused_quad {
             self.next_quad_offset += quad_count;
         }
         self.allocations.insert(key, alloc);
-        self.active_subchunk_count = self.allocations.len() as u32;
-        self.max_slot_bound = self.max_slot_bound.max(slot_index as u32 + 1);
+        self.slot_keys.push(key);
+        self.active_subchunk_count += 1;
         self.maybe_coalesce();
         true
     }
@@ -596,17 +573,10 @@ impl IndirectManager {
         self.allocations.get(key).map(|a| a.slot_index)
     }
 
-    /// Frees all GPU resources belonging to `key` and zeros its metadata slot.
-    ///
-    /// After this call the slot is returned to the free pool and may be reused
-    /// by a subsequent [`upload_subchunk`].  Does nothing if `key` is not
-    /// currently allocated.
+    /// Frees all GPU resources belonging to `key` using swap-remove to keep
+    /// metadata and unculled draw-command slots dense.
     pub fn remove_subchunk(&mut self, queue: &wgpu::Queue, key: SubchunkKey) {
-        if let Some(alloc) = self.allocations.remove(&key) {
-            // Zero the metadata slot so the culling shader ignores it.
-            self.zero_metadata_slot(queue, alloc.slot_index);
-            self.free_slots.push(alloc.slot_index);
-
+        if let Some(alloc) = self.remove_allocation(queue, key) {
             Self::add_free_block(
                 &mut self.free_quad_blocks,
                 FreeBlock {
@@ -614,11 +584,65 @@ impl IndirectManager {
                     count: alloc.quad_count,
                 },
             );
-
-            self.active_subchunk_count = self.allocations.len() as u32;
-            self.shrink_max_slot_bound_after_free(alloc.slot_index);
             self.maybe_coalesce();
         }
+    }
+
+    /// Removes an allocation from the dense slot array and returns its geometry
+    /// allocation. If it was not last, rewrites the moved entry at the removed
+    /// index and updates its CPU-side slot index.
+    fn remove_allocation(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: SubchunkKey,
+    ) -> Option<SubchunkAlloc> {
+        let removed = self.allocations.remove(&key)?;
+        let removed_slot = removed.slot_index;
+        let last_slot = self.active_subchunk_count as usize - 1;
+        debug_assert_eq!(self.slot_keys[removed_slot], key);
+
+        if removed_slot != last_slot {
+            let moved_key = self.slot_keys[last_slot];
+            let moved_alloc = {
+                let alloc = self
+                    .allocations
+                    .get_mut(&moved_key)
+                    .expect("dense slot map must reference an allocation");
+                alloc.slot_index = removed_slot;
+                *alloc
+            };
+            self.write_slot(queue, &moved_alloc);
+            self.slot_keys[removed_slot] = moved_key;
+        }
+
+        self.slot_keys.pop();
+        self.active_subchunk_count -= 1;
+        // The last slot is outside the dense range now. Clearing it avoids
+        // stale entries if a future caller accidentally uses a wider range.
+        self.zero_metadata_slot(queue, last_slot);
+        Some(removed)
+    }
+
+    /// Writes one allocation at its current dense slot, fixing slot-dependent
+    /// fields used by the culler and vertex pulling.
+    fn write_slot(&self, queue: &wgpu::Queue, alloc: &SubchunkAlloc) {
+        let slot = alloc.slot_index;
+        let mut meta = alloc.gpu_meta;
+        meta.aabb_max[3] = slot as f32;
+        meta.draw_data[2] = slot as u32;
+        queue.write_buffer(
+            &self.subchunk_meta_buffer,
+            (slot * size_of::<SubchunkGpuMeta>()) as u64,
+            bytemuck::bytes_of(&meta),
+        );
+
+        let mut draw = alloc.draw_command;
+        draw.first_instance = slot as u32;
+        queue.write_buffer(
+            &self.draw_commands_buffer,
+            (slot * size_of::<DrawIndirect>()) as u64,
+            bytemuck::bytes_of(&draw),
+        );
     }
 
     /// Zeros one metadata and draw slot so neither camera nor light passes can
@@ -642,20 +666,6 @@ impl IndirectManager {
             draw_byte_offset as u64,
             bytemuck::bytes_of(&empty_draw),
         );
-    }
-
-    /// Keeps culling dispatches bounded by the highest currently allocated slot.
-    fn shrink_max_slot_bound_after_free(&mut self, freed_slot: usize) {
-        if self.max_slot_bound != freed_slot as u32 + 1 {
-            return;
-        }
-
-        self.max_slot_bound = self
-            .allocations
-            .values()
-            .map(|alloc| alloc.slot_index as u32 + 1)
-            .max()
-            .unwrap_or(0);
     }
 
     /// Merges adjacent free blocks in `blocks` to reduce fragmentation.
@@ -755,11 +765,8 @@ impl IndirectManager {
         self.allocations.clear();
         self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
-        self.max_slot_bound = 0;
+        self.slot_keys.clear();
         self.free_quad_blocks.clear();
-
-        self.free_slots.clear();
-        self.free_slots.extend((0..MAX_SUBCHUNKS).rev());
     }
 
     /// Uploads cull uniforms and dispatches the main camera culling compute pass.
@@ -768,7 +775,7 @@ impl IndirectManager {
     /// that pass culling this frame are drawn. When indirect-count drawing is
     /// unavailable, also clears the command range consumed by the fixed-count
     /// fallback so stale commands become no-op draws.
-    /// One workgroup of 64 threads is launched per 64 subchunk slots.
+    /// One workgroup of 128 threads is launched per 128 active subchunks.
     ///
     /// Does nothing if no subchunks are currently allocated or if the bind
     /// group has not yet been created via [`update_bind_group`].
@@ -828,7 +835,7 @@ impl IndirectManager {
             return;
         }
 
-        let active = self.max_slot_bound;
+        let active = self.active_subchunk_count;
         let uniforms = CullUniforms {
             occlusion_view_proj: occlusion_view_proj.to_cols_array_2d(),
             frustum_planes: *frustum_planes,
@@ -882,10 +889,9 @@ impl IndirectManager {
         &self.draw_commands_buffer
     }
 
-    /// Number of command slots occupied by the unculled stream, including
-    /// sparse slots left by unloaded subchunks.
+    /// Number of dense commands in the unculled stream.
     pub fn all_draw_command_count(&self) -> u32 {
-        self.max_slot_bound
+        self.active_subchunk_count
     }
 
     /// Returns the main visible-count buffer (used as an indirect dispatch argument).
@@ -912,9 +918,7 @@ impl IndirectManager {
         self.allocations.clear();
         self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
-        self.max_slot_bound = 0;
-        self.free_slots.clear();
-        self.free_slots.extend((0..MAX_SUBCHUNKS).rev());
+        self.slot_keys.clear();
         self.free_quad_blocks.clear();
     }
 }
