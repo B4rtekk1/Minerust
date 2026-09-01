@@ -35,7 +35,7 @@ struct ShadowUniforms {
 @group(1) @binding(2) var<uniform> shadow_uniforms: ShadowUniforms;
 
 struct PackedQuad { origin_and_face: u32, size_material_ao: u32, color_flags: u32, _reserved: u32, }
-struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, draw_data: vec4<u32>, }
+struct SubchunkMeta { world_origin: vec4<i32>, draw_data: vec4<u32>, }
 @group(2) @binding(0) var<storage, read> quads: array<PackedQuad>;
 @group(2) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
@@ -181,7 +181,7 @@ fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
     if face == 3u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(0,0,width),vec3(height,0,width),vec3(height,0,0))[i]; }
     if face == 4u { p += array<vec3<f32>, 4>(vec3(width,0,0),vec3(0,0,0),vec3(0,height,0),vec3(width,height,0))[i]; }
     if face == 5u { p += array<vec3<f32>, 4>(vec3(0,0,0),vec3(width,0,0),vec3(width,height,0),vec3(0,height,0))[i]; }
-    return subchunks[subchunk_id].aabb_min.xyz + p;
+    return vec3<f32>(subchunks[subchunk_id].world_origin.xyz) + p;
 }
 
 @vertex

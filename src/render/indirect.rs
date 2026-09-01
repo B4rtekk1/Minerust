@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 
-use crate::constants::{CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS};
+use crate::constants::{CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT};
 use crate::core::quad::PackedQuad;
 use crate::render::frustum::AABB;
 
@@ -77,16 +77,17 @@ pub struct DrawIndirect {
     pub first_instance: u32,
 }
 
-/// Per-subchunk metadata uploaded to the GPU for use during the culling pass.
+/// Per-subchunk metadata uploaded to the GPU for vertex pulling and culling.
 ///
-/// Padded to 16-byte alignment (`[f32; 4]`) to satisfy WGSL `struct` layout rules.
+/// Geometry descriptors are local to this origin.  Keeping it as integers
+/// avoids baking lossy world-space `f32` values into every quad and permits a
+/// future camera-relative/floating-origin transform without re-uploading mesh
+/// data.  The fourth component is explicit WGSL `vec4` alignment padding.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SubchunkGpuMeta {
-    /// World-space AABB minimum corner (w component unused, set to 0).
-    pub aabb_min: [f32; 4],
-    /// World-space AABB maximum corner (w component stores the slot index).
-    pub aabb_max: [f32; 4],
+    /// Integer world-space origin of the owning subchunk.
+    pub world_origin: [i32; 4],
     /// Packed draw arguments: `[vertex_count, first_vertex, slot, active]`.
     pub draw_data: [u32; 4],
 }
@@ -460,7 +461,7 @@ impl IndirectManager {
         queue: &wgpu::Queue,
         key: SubchunkKey,
         quads: &[PackedQuad],
-        aabb: &AABB,
+        _aabb: &AABB,
     ) -> bool {
         // Empty geometry means the subchunk should be removed.
         if quads.is_empty() {
@@ -530,8 +531,12 @@ impl IndirectManager {
         let slot_index = self.active_subchunk_count as usize;
 
         let gpu_meta = SubchunkGpuMeta {
-            aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
-            aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, slot_index as f32],
+            world_origin: [
+                key.chunk_x * CHUNK_SIZE,
+                key.subchunk_y * SUBCHUNK_HEIGHT,
+                key.chunk_z * CHUNK_SIZE,
+                0,
+            ],
             draw_data: [quad_count * 6, quad_offset * 6, slot_index as u32, 1],
         };
         let draw_command = DrawIndirect {
@@ -571,6 +576,29 @@ impl IndirectManager {
     /// Returns the metadata slot index assigned to `key`, if it is allocated.
     pub fn get_slot_index(&self, key: &SubchunkKey) -> Option<usize> {
         self.allocations.get(key).map(|a| a.slot_index)
+    }
+
+    /// Changes a subchunk's integer world origin without touching its packed
+    /// quad allocation.  This is the upload primitive needed by a floating
+    /// origin or by streaming systems that reposition an already-built mesh.
+    ///
+    /// Returns `false` when `key` is not currently resident in this manager.
+    pub fn set_subchunk_world_origin(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: SubchunkKey,
+        world_origin: [i32; 3],
+    ) -> bool {
+        let updated_alloc = match self.allocations.get_mut(&key) {
+            Some(alloc) => {
+                alloc.gpu_meta.world_origin =
+                    [world_origin[0], world_origin[1], world_origin[2], 0];
+                *alloc
+            }
+            None => return false,
+        };
+        self.write_slot(queue, &updated_alloc);
+        true
     }
 
     /// Frees all GPU resources belonging to `key` using swap-remove to keep
@@ -624,11 +652,10 @@ impl IndirectManager {
     }
 
     /// Writes one allocation at its current dense slot, fixing slot-dependent
-    /// fields used by the culler and vertex pulling.
+    /// draw data used by the culler and vertex pulling.
     fn write_slot(&self, queue: &wgpu::Queue, alloc: &SubchunkAlloc) {
         let slot = alloc.slot_index;
         let mut meta = alloc.gpu_meta;
-        meta.aabb_max[3] = slot as f32;
         meta.draw_data[2] = slot as u32;
         queue.write_buffer(
             &self.subchunk_meta_buffer,
@@ -649,8 +676,7 @@ impl IndirectManager {
     /// reuse stale geometry after a subchunk has been unloaded.
     fn zero_metadata_slot(&self, queue: &wgpu::Queue, slot_index: usize) {
         let subchunk_meta = SubchunkGpuMeta {
-            aabb_min: [0.0; 4],
-            aabb_max: [0.0; 4],
+            world_origin: [0; 4],
             draw_data: [0, 0, 0, 0],
         };
         let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
@@ -750,8 +776,7 @@ impl IndirectManager {
         // Zero every live metadata slot so stale entries don't survive.
         for alloc in self.allocations.values() {
             let subchunk_meta = SubchunkGpuMeta {
-                aabb_min: [0.0; 4],
-                aabb_max: [0.0; 4],
+                world_origin: [0; 4],
                 draw_data: [0, 0, 0, 0],
             };
             let meta_byte_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>();

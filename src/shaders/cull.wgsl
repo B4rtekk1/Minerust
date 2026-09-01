@@ -1,6 +1,5 @@
 struct SubchunkMeta {
-    aabb_min: vec4<f32>,
-    aabb_max: vec4<f32>,
+    world_origin: vec4<i32>,
     draw_data: vec4<u32>,
 }
 
@@ -40,6 +39,7 @@ var hiz_texture: texture_2d<f32>;
 var hiz_sampler: sampler;
 
 const FRUSTUM_CULL_MARGIN: f32 = 2.0;
+const SUBCHUNK_EXTENT: vec3<f32> = vec3<f32>(16.0, 16.0, 16.0);
 
 fn aabb_vs_plane(aabb_min: vec3<f32>, aabb_max: vec3<f32>, plane: vec4<f32>) -> bool {
     let expanded_min = aabb_min - vec3<f32>(FRUSTUM_CULL_MARGIN);
@@ -145,8 +145,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let aabb_min = subchunk.aabb_min.xyz;
-    let aabb_max = subchunk.aabb_max.xyz;
+    let aabb_min = vec3<f32>(subchunk.world_origin.xyz);
+    let aabb_max = aabb_min + SUBCHUNK_EXTENT;
 
     if !is_frustum_visible(aabb_min, aabb_max) {
         return;
