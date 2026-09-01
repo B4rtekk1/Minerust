@@ -167,8 +167,8 @@ struct DepthVertexOutput {
 };
 
 fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
-    let origin = vec3<f32>(f32(quad.origin_and_face & 0x1fu), f32((quad.origin_and_face >> 5u) & 0x1fu), f32((quad.origin_and_face >> 10u) & 0x1fu)) * 0.5;
-    let face = (quad.origin_and_face >> 15u) & 0x7u;
+    let origin = vec3<f32>(f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu)) * 0.5;
+    let face = (quad.origin_and_face >> 18u) & 0x7u;
     let width = f32((quad.size_material_ao & 0x1fu) + 1u) * 0.5;
     let height = f32(((quad.size_material_ao >> 5u) & 0x1fu) + 1u) * 0.5;
     let default_corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
@@ -188,7 +188,7 @@ fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
 fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
     let quad = quads[vertex_id / 6u];
     let corner = vertex_id % 6u;
-    let n_idx = (quad.origin_and_face >> 15u) & 0x7u;
+    let n_idx = (quad.origin_and_face >> 18u) & 0x7u;
     let t_idx = (quad.size_material_ao >> 10u) & 0xffu;
     let default_corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
     let alternate_corners = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
@@ -218,8 +218,14 @@ fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subch
     out.normal        = normals[n_idx % 6u];
     out.color         = vec3<f32>(r, g, b);
 
-    let raw_uv = uvs[corner_idx];
-    out.uv = vec2<f32>(raw_uv.x * width, raw_uv.y * height);
+    // The legacy terrain mesher assigned UV corners as vertex 0 -> 1,
+    // vertex 1 -> 2, vertex 2 -> 3, and vertex 3 -> 0.
+    let uv_corner = (corner_idx + 1u) & 3u;
+    let raw_uv = uvs[uv_corner];
+    out.uv = vec2<f32>(
+        raw_uv.x * width,
+        raw_uv.y * height,
+    );
 
     out.tex_index = f32(t_idx);
     out.ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);

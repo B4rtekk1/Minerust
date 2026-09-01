@@ -432,13 +432,32 @@ impl State {
                 ],
             });
 
-        let quad_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Packed Quad Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
-        });
+        let quad_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Packed Quad Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         // ------------------------------------------------------------------ //
         // SSR (Screen-Space Reflections) targets
@@ -688,7 +707,11 @@ impl State {
 
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Sun Shadow Map (2048)"),
-            size: wgpu::Extent3d { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -715,34 +738,79 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let shadow_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
-        });
+        let shadow_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Shadow Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shadow Bind Group"), layout: &shadow_bind_group_layout,
+            label: Some("Shadow Bind Group"),
+            layout: &shadow_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: shadow_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shadow_uniform_buffer.as_entire_binding(),
+                },
             ],
         });
         // The depth pass must not bind the same texture as a sampled resource
         // while it is attached for writing. Its vertex shader only needs b2.
-        let shadow_pass_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow Pass Uniform Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
-        });
+        let shadow_pass_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Shadow Pass Uniform Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let shadow_pass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shadow Pass Uniform Bind Group"),
             layout: &shadow_pass_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 2, resource: shadow_uniform_buffer.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 2,
+                resource: shadow_uniform_buffer.as_entire_binding(),
+            }],
         });
 
         // ------------------------------------------------------------------ //
@@ -759,7 +827,11 @@ impl State {
         let terrain_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Terrain Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout, &shadow_bind_group_layout, &quad_bind_group_layout],
+                bind_group_layouts: &[
+                    &uniform_bind_group_layout,
+                    &shadow_bind_group_layout,
+                    &quad_bind_group_layout,
+                ],
                 immediate_size: 0,
             });
 
@@ -817,22 +889,46 @@ impl State {
             multiview_mask: None,
         });
 
-        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Shadow Pipeline Layout"),
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Shadow Pipeline Layout"),
                 bind_group_layouts: &[
                     &uniform_bind_group_layout,
                     &shadow_pass_bind_group_layout,
                     &quad_bind_group_layout,
                 ],
-            immediate_size: 0,
-        });
+                immediate_size: 0,
+            });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Sun Shadow Pipeline"), layout: Some(&shadow_pipeline_layout), cache: None,
-            vertex: wgpu::VertexState { module: &terrain_shader, entry_point: Some("vs_shadow"), compilation_options: Default::default(), buffers: &[] },
+            label: Some("Sun Shadow Pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &terrain_shader,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
             fragment: None,
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, front_face: wgpu::FrontFace::Ccw, cull_mode: Some(wgpu::Face::Back), ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState { constant: 0, slope_scale: 0.0, clamp: 0.0 } }),
-            multisample: wgpu::MultisampleState::default(), multiview_mask: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 0,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
         });
 
         // --- Water (translucent, alpha-blended) ---
@@ -1410,17 +1506,33 @@ impl State {
         let mut water_indirect_manager =
             IndirectManager::with_budget(&device, IndirectBufferBudget::WATER);
         let terrain_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Terrain Packed Quad Bind Group"), layout: &quad_bind_group_layout,
+            label: Some("Terrain Packed Quad Bind Group"),
+            layout: &quad_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: indirect_manager.quad_buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: indirect_manager.subchunk_meta_buffer().as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: indirect_manager.quad_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: indirect_manager.subchunk_meta_buffer().as_entire_binding(),
+                },
             ],
         });
         let water_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Water Packed Quad Bind Group"), layout: &quad_bind_group_layout,
+            label: Some("Water Packed Quad Bind Group"),
+            layout: &quad_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: water_indirect_manager.quad_buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: water_indirect_manager.subchunk_meta_buffer().as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: water_indirect_manager.quad_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: water_indirect_manager
+                        .subchunk_meta_buffer()
+                        .as_entire_binding(),
+                },
             ],
         });
 

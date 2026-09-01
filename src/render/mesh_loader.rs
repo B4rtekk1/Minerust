@@ -1,7 +1,7 @@
 use crate::core::quad::PackedQuad;
-use crate::world::generator::ChunkGenerator;
 use crate::world::World;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crate::world::generator::ChunkGenerator;
+use crossbeam_channel::{Receiver, Sender, bounded};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;

@@ -5,7 +5,7 @@ use crate::constants::{CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS};
 use crate::core::quad::PackedQuad;
 use crate::render::frustum::AABB;
 
-use crate::logger::{log, LogLevel};
+use crate::logger::{LogLevel, log};
 use std::collections::BTreeMap;
 
 /// Maximum number of subchunks that can be tracked simultaneously.

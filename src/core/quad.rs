@@ -67,11 +67,20 @@ impl PackedQuad {
             ((vertices[0].packed >> 21) & 0x3) + ((vertices[2].packed >> 21) & 0x3)
                 > ((vertices[1].packed >> 21) & 0x3) + ((vertices[3].packed >> 21) & 0x3),
         );
+        let local_x = local_half(0);
+        let local_y = local_half(1);
+        let local_z = local_half(2);
+
+        debug_assert!(local_x <= 32);
+        debug_assert!(local_y <= 32);
+        debug_assert!(local_z <= 32);
+        debug_assert!(face <= 5);
+
         Self {
-            origin_and_face: local_half(0)
-                | (local_half(1) << 5)
-                | (local_half(2) << 10)
-                | (face << 15),
+            origin_and_face: (local_x & 0x3f)
+                | ((local_y & 0x3f) << 6)
+                | ((local_z & 0x3f) << 12)
+                | ((face & 0x7) << 18),
             size_material_ao: ((width - 1) & 0x1f)
                 | (((height - 1) & 0x1f) << 5)
                 | (((packed >> 3) & 0xff) << 10)

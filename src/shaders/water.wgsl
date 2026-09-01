@@ -116,8 +116,8 @@ fn detailed_wave_normal(world_xz: vec2<f32>, base_normal: vec3<f32>, distance_to
 }
 
 fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
-    let origin = vec3<f32>(f32(quad.origin_and_face & 0x1fu), f32((quad.origin_and_face >> 5u) & 0x1fu), f32((quad.origin_and_face >> 10u) & 0x1fu)) * 0.5;
-    let face = (quad.origin_and_face >> 15u) & 0x7u;
+    let origin = vec3<f32>(f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu)) * 0.5;
+    let face = (quad.origin_and_face >> 18u) & 0x7u;
     let width = f32((quad.size_material_ao & 0x1fu) + 1u) * 0.5;
     let height = f32(((quad.size_material_ao >> 5u) & 0x1fu) + 1u) * 0.5;
     let default_corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
@@ -139,7 +139,7 @@ fn vs_water(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subc
     let quad = quads[vertex_id / 6u];
     var pos = quad_position(quad, vertex_id % 6u, subchunk_id);
 
-    let normal_index = (quad.origin_and_face >> 15u) & 0x7u;
+    let normal_index = (quad.origin_and_face >> 18u) & 0x7u;
     var normal = face_normal(normal_index);
 
     if normal_index == 3u {

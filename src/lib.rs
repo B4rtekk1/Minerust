@@ -63,10 +63,10 @@ pub use core::{
 };
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{
+    AABB, DrawIndirect, IndirectBufferBudget, IndirectManager, MeshLoader, SubchunkKey,
     add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_player_model,
-    extract_frustum_planes, generate_texture_atlas, load_texture_atlas_from_file, DrawIndirect,
-    IndirectBufferBudget, IndirectManager, MeshLoader, SubchunkKey, AABB,
+    extract_frustum_planes, generate_texture_atlas, load_texture_atlas_from_file,
 };
-pub use save::{load_world, save_world, SavedWorld, DEFAULT_WORLD_FILE};
+pub use save::{DEFAULT_WORLD_FILE, SavedWorld, load_world, save_world};
 pub use vertex::OutlineVertex;
 pub use world::{ChunkGenResult, ChunkGenerator, ChunkLoader, World};

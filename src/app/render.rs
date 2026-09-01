@@ -3,8 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, ShadowUniforms, Uniforms, Vertex, World,
-    build_block_outline, build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, ShadowUniforms, Uniforms,
+    Vertex, World, build_block_outline, build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -22,7 +22,11 @@ const SHADOW_RECENTER_DISTANCE: f32 = 76.0;
 const SHADOW_ANCHOR_GRID: f32 = 128.0;
 
 fn stabilized_sun_matrix(camera_pos: Vec3, sun_dir: Vec3) -> Mat4 {
-    let up = if sun_dir.y.abs() > 0.96 { Vec3::Z } else { Vec3::Y };
+    let up = if sun_dir.y.abs() > 0.96 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
     let mut center = camera_pos;
     let mut eye = center + sun_dir * 190.0;
     let initial_view = Mat4::look_at_rh(eye, center, up);
@@ -33,13 +37,18 @@ fn stabilized_sun_matrix(camera_pos: Vec3, sun_dir: Vec3) -> Mat4 {
         (center_ls.y / texel_world).round() * texel_world,
         center_ls.z,
     );
-    let world_adjustment = initial_view.inverse().transform_vector3(snapped - center_ls);
+    let world_adjustment = initial_view
+        .inverse()
+        .transform_vector3(snapped - center_ls);
     center += world_adjustment;
     eye += world_adjustment;
     Mat4::orthographic_rh(
-        -SHADOW_HALF_EXTENT, SHADOW_HALF_EXTENT,
-        -SHADOW_HALF_EXTENT, SHADOW_HALF_EXTENT,
-        0.1, 400.0,
+        -SHADOW_HALF_EXTENT,
+        SHADOW_HALF_EXTENT,
+        -SHADOW_HALF_EXTENT,
+        SHADOW_HALF_EXTENT,
+        0.1,
+        400.0,
     ) * Mat4::look_at_rh(eye, center, up)
 }
 
@@ -516,7 +525,10 @@ impl State {
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
@@ -526,7 +538,8 @@ impl State {
             shadow_pass.set_bind_group(1, &self.shadow_pass_bind_group, &[]);
             shadow_pass.set_bind_group(2, &self.terrain_quad_bind_group, &[]);
             shadow_pass.multi_draw_indirect(
-                self.indirect_manager.all_draw_commands(), 0,
+                self.indirect_manager.all_draw_commands(),
+                0,
                 self.indirect_manager.all_draw_command_count(),
             );
         }

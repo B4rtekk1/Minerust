@@ -156,7 +156,10 @@ fn write_clipboard_text(text: &str) -> bool {
         }
     }
 
-    let wide = text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let wide = text
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
     let byte_len = wide.len() * std::mem::size_of::<u16>();
 
     unsafe {
