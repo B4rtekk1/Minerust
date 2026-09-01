@@ -3,8 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, ShadowUniforms, Uniforms,
-    Vertex, World, build_block_outline, build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
+    build_block_outline, build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -16,46 +16,11 @@ use super::state::State;
 
 const MAX_DIRTY_MESH_REQUESTS_PER_FRAME: usize = 128;
 const MAX_DIRTY_MESH_QUEUE_INSPECTIONS_PER_FRAME: usize = 1024;
-const SHADOW_MAP_SIZE: f32 = 2048.0;
-const SHADOW_HALF_EXTENT: f32 = 112.0;
-const SHADOW_RECENTER_DISTANCE: f32 = 76.0;
-const SHADOW_ANCHOR_GRID: f32 = 128.0;
 /// A larger step means the existing Hi-Z pyramid no longer safely describes
 /// the camera view (for example after a teleport).
 const HIZ_RESET_POSITION_DISTANCE: f32 = 16.0;
 /// Large camera rotations have the same temporal mismatch as teleports.
 const HIZ_RESET_ROTATION_RADIANS: f32 = 15.0_f32.to_radians();
-
-fn stabilized_sun_matrix(camera_pos: Vec3, sun_dir: Vec3) -> Mat4 {
-    let up = if sun_dir.y.abs() > 0.96 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let mut center = camera_pos;
-    let mut eye = center + sun_dir * 190.0;
-    let initial_view = Mat4::look_at_rh(eye, center, up);
-    let texel_world = (SHADOW_HALF_EXTENT * 2.0) / SHADOW_MAP_SIZE;
-    let center_ls = initial_view.transform_point3(center);
-    let snapped = Vec3::new(
-        (center_ls.x / texel_world).round() * texel_world,
-        (center_ls.y / texel_world).round() * texel_world,
-        center_ls.z,
-    );
-    let world_adjustment = initial_view
-        .inverse()
-        .transform_vector3(snapped - center_ls);
-    center += world_adjustment;
-    eye += world_adjustment;
-    Mat4::orthographic_rh(
-        -SHADOW_HALF_EXTENT,
-        SHADOW_HALF_EXTENT,
-        -SHADOW_HALF_EXTENT,
-        SHADOW_HALF_EXTENT,
-        0.1,
-        400.0,
-    ) * Mat4::look_at_rh(eye, center, up)
-}
 
 /// Computes which faces of the highlighted block should be outlined.
 ///
@@ -450,33 +415,6 @@ impl State {
             }]),
         );
 
-        // Keep the light projection anchored in world space.  Recentering only
-        // after travelling a large distance avoids shadows following each
-        // individual camera step; snapping the new anchor makes transitions
-        // deterministic rather than frame-rate dependent.
-        let camera_pos = self.camera.position;
-        let mut shadow_anchor = Vec3::from_array(self.shadow_anchor);
-        let anchor_delta_xz = Vec3::new(
-            camera_pos.x - shadow_anchor.x,
-            0.0,
-            camera_pos.z - shadow_anchor.z,
-        );
-        if anchor_delta_xz.length() > SHADOW_RECENTER_DISTANCE {
-            shadow_anchor.x = (camera_pos.x / SHADOW_ANCHOR_GRID).round() * SHADOW_ANCHOR_GRID;
-            shadow_anchor.z = (camera_pos.z / SHADOW_ANCHOR_GRID).round() * SHADOW_ANCHOR_GRID;
-            self.shadow_anchor = shadow_anchor.to_array();
-        }
-        let shadow_matrix = stabilized_sun_matrix(shadow_anchor, sun_dir);
-        self.queue.write_buffer(
-            &self.shadow_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[ShadowUniforms {
-                light_view_proj: shadow_matrix.to_cols_array_2d(),
-                texel_size: [1.0 / SHADOW_MAP_SIZE, 1.0 / SHADOW_MAP_SIZE],
-                _padding: [0.0; 2],
-            }]),
-        );
-
         // ── Frustum planes (main camera) ──────────────────────────────────── //
         // Six half-space planes derived from the combined view-projection
         // matrix, used both for CPU-side mesh gating and the GPU cull shader.
@@ -544,33 +482,6 @@ impl State {
             self.supports_indirect_count,
         );
 
-        // The shadow map is rendered in light space, independent of the
-        // camera image.  It reuses the already-culled terrain draw stream.
-        if sun_dir.y > 0.015 {
-            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Sun Shadow Pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
-            shadow_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            shadow_pass.set_bind_group(1, &self.shadow_pass_bind_group, &[]);
-            shadow_pass.set_bind_group(2, &self.terrain_quad_bind_group, &[]);
-            shadow_pass.multi_draw_indirect(
-                self.indirect_manager.all_draw_commands(),
-                0,
-                self.indirect_manager.all_draw_command_count(),
-            );
-        }
-
         // ── Opaque pass ───────────────────────────────────────────────────── //
         // Renders: sky dome → terrain chunks → remote player models → sun/moon.
         // Writes to the 4× MSAA color target which is resolved simultaneously
@@ -623,8 +534,7 @@ impl State {
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
-            opaque_pass.set_bind_group(2, &self.terrain_quad_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.terrain_quad_bind_group, &[]);
             if self.supports_indirect_count {
                 opaque_pass.multi_draw_indirect_count(
                     self.indirect_manager.draw_commands(),
@@ -651,7 +561,6 @@ impl State {
                 ) {
                     opaque_pass.set_pipeline(&self.render_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     opaque_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);

@@ -140,14 +140,3 @@ pub struct Uniforms {
     /// Explicit padding so the uniform block remains 16-byte aligned.
     pub _pad_uniforms: f32,
 }
-
-/// Per-frame directional-light transform used by the terrain shadow pass.
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct ShadowUniforms {
-    /// Stabilized orthographic projection from the sun's point of view.
-    pub light_view_proj: [[f32; 4]; 4],
-    /// Reciprocal shadow-map dimensions, used to express the PCF radius in texels.
-    pub texel_size: [f32; 2],
-    pub _padding: [f32; 2],
-}

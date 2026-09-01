@@ -59,8 +59,7 @@ mod shader_utils;
 pub use constants::*;
 pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
 pub use core::{
-    Biome, BlockType, Chunk, GameItem, PackedQuad, ShadowUniforms, SubChunk, Uniforms, UploadBatch,
-    Vertex,
+    Biome, BlockType, Chunk, GameItem, PackedQuad, SubChunk, Uniforms, UploadBatch, Vertex,
 };
 pub use player::{Camera, DiggingState, InputState};
 pub use render::{

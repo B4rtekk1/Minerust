@@ -24,60 +24,16 @@ struct Uniforms {
 @group(0) @binding(1) var texture_atlas: texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 
-struct ShadowUniforms {
-    light_view_proj: mat4x4<f32>,
-    texel_size: vec2<f32>,
-    _padding: vec2<f32>,
-};
-
-@group(1) @binding(0) var sun_shadow_map: texture_depth_2d;
-@group(1) @binding(1) var sun_shadow_sampler: sampler_comparison;
-@group(1) @binding(2) var<uniform> shadow_uniforms: ShadowUniforms;
-
 struct PackedQuad { origin_and_face: u32, size_material_ao: u32, color_flags: u32, _reserved: u32, }
 struct SubchunkMeta { world_origin: vec4<i32>, draw_data: vec4<u32>, }
-@group(2) @binding(0) var<storage, read> quads: array<PackedQuad>;
-@group(2) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
+@group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
+@group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
 const TERRAIN_FOG_NEAR: f32 = 180.0;
 const TERRAIN_FOG_FAR:  f32 = 620.0;
 
 fn hash31(p: vec3<f32>) -> f32 {
     return fract(sin(dot(p, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453);
-}
-
-// Rotated Poisson-disk PCF.  The radius is in shadow-map texels, keeping the
-// penumbra stable when the player changes monitor resolution.
-fn sun_shadow_visibility(world_pos: vec3<f32>, normal: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
-    let light_clip = shadow_uniforms.light_view_proj * vec4<f32>(world_pos, 1.0);
-    let light_ndc = light_clip.xyz / max(light_clip.w, 0.00001);
-    let uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 0.5 - light_ndc.y * 0.5);
-    if any(uv <= vec2<f32>(0.001)) || any(uv >= vec2<f32>(0.999)) || light_ndc.z <= 0.0 || light_ndc.z >= 1.0 {
-        return 1.0;
-    }
-
-    // Receiver-plane bias only counteracts depth quantisation.  Casters are
-    // not moved, so block shadows stay attached instead of peter-panning.
-    let bias = 0.00008 + (1.0 - max(dot(normal, sun_dir), 0.0)) * 0.00016;
-    // Keep the kernel fixed in shadow-map space. Rotating it per fragment
-    // produces attractive noise in stills but turns into visible crawling as
-    // the light matrix changes by fractions of a texel.
-    let poisson = array<vec2<f32>, 8>(
-        vec2<f32>(-0.613,  0.617), vec2<f32>( 0.171, -0.040),
-        vec2<f32>(-0.299, -0.428), vec2<f32>( 0.532,  0.343),
-        vec2<f32>(-0.082, -0.814), vec2<f32>( 0.760, -0.582),
-        vec2<f32>(-0.742, -0.169), vec2<f32>( 0.337,  0.734),
-    );
-    var visibility = 0.0;
-    for (var i = 0u; i < 8u; i = i + 1u) {
-        visibility += textureSampleCompareLevel(
-            sun_shadow_map,
-            sun_shadow_sampler,
-            uv + poisson[i] * shadow_uniforms.texel_size * 1.35,
-            light_ndc.z - bias,
-        );
-    }
-    return visibility * 0.125;
 }
 
 fn horizon_atmosphere(sun_dir: vec3<f32>, day: f32, twilight: f32) -> vec3<f32> {
@@ -162,10 +118,6 @@ struct VertexOutput {
     @location(5) ambient_occlusion: f32,
 };
 
-struct DepthVertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-};
-
 fn quad_position(quad: PackedQuad, corner: u32, subchunk_id: u32) -> vec3<f32> {
     let origin = vec3<f32>(f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu)) * 0.5;
     let face = (quad.origin_and_face >> 18u) & 0x7u;
@@ -232,14 +184,6 @@ fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subch
     return out;
 }
 
-@vertex
-fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> DepthVertexOutput {
-    var out: DepthVertexOutput;
-    let quad = quads[vertex_id / 6u];
-    out.clip_position = shadow_uniforms.light_view_proj * vec4<f32>(quad_position(quad, vertex_id % 6u, subchunk_id), 1.0);
-    return out;
-}
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_dir = normalize(uniforms.sun_dir);
@@ -263,7 +207,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_exposure = smoothstep(0.0, 0.20, uniforms.sky_visibility);
     let direct_day = smoothstep(-0.04, 0.12, sun_dir.y);
     let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.78 * direct_day * sun_exposure;
-    let sun_shadow = sun_shadow_visibility(in.world_pos, normal, sun_dir);
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
     let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor * sun_exposure;
 
@@ -285,7 +228,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_occlusion = in.ambient_occlusion;
     let total_light =
         (indirect_light * ambient_occlusion
-            + sun_color * sun_diff * sun_shadow
+            + sun_color * sun_diff
             + vec3<f32>(0.58, 0.68, 0.82) * fill_diff * mix(0.70, 1.0, ambient_occlusion)
             + vec3<f32>(0.44, 0.57, 0.86) * moon_diff
             + moon_ambient * ambient_occlusion)

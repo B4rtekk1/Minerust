@@ -16,14 +16,10 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{
     Camera, DiggingState, IndirectBufferBudget, IndirectManager, InputState, OutlineVertex,
-    SEA_LEVEL, ShadowUniforms, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
+    SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
 };
 
 use super::state::State;
-
-/// One stabilized directional map is much cheaper than cascades for this
-/// voxel render distance while retaining a sub-voxel PCF footprint.
-const SHADOW_MAP_SIZE: u32 = 2048;
 
 fn create_menu_background_texture(
     device: &wgpu::Device,
@@ -705,7 +701,7 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
-        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+        /*let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Sun Shadow Map (2048)"),
             size: wgpu::Extent3d {
                 width: SHADOW_MAP_SIZE,
@@ -811,7 +807,7 @@ impl State {
                 binding: 2,
                 resource: shadow_uniform_buffer.as_entire_binding(),
             }],
-        });
+        });*/
 
         // ------------------------------------------------------------------ //
         // Pipeline layouts
@@ -827,11 +823,7 @@ impl State {
         let terrain_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Terrain Pipeline Layout"),
-                bind_group_layouts: &[
-                    &uniform_bind_group_layout,
-                    &shadow_bind_group_layout,
-                    &quad_bind_group_layout,
-                ],
+                bind_group_layouts: &[&uniform_bind_group_layout, &quad_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -889,7 +881,7 @@ impl State {
             multiview_mask: None,
         });
 
-        let shadow_pipeline_layout =
+        /*let shadow_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Shadow Pipeline Layout"),
                 bind_group_layouts: &[
@@ -929,7 +921,7 @@ impl State {
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-        });
+        });*/
 
         // --- Water (translucent, alpha-blended) ---
         // No back-face culling so water surfaces are visible from below.
@@ -1693,7 +1685,6 @@ impl State {
             queue,
             config,
             render_pipeline,
-            shadow_pipeline,
             water_pipeline,
             outline_pipeline,
             sun_pipeline,
@@ -1707,19 +1698,13 @@ impl State {
             show_crosshair: true,
             uniform_buffer,
             uniform_bind_group,
-            shadow_bind_group,
-            shadow_pass_bind_group,
-            shadow_uniform_buffer,
             depth_texture,
-            shadow_texture,
-            shadow_view,
             msaa_texture_view,
             world,
             mesh_loader,
             mesh_upload_ring,
             dirty_mesh_queue: std::collections::VecDeque::new(),
             dirty_mesh_queued: std::collections::HashSet::new(),
-            shadow_anchor: camera.position.to_array(),
             camera,
             highlighted_block: None,
             input: InputState::default(),
