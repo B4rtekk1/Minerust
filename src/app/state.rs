@@ -75,6 +75,8 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Main opaque terrain render pipeline.
     pub render_pipeline: wgpu::RenderPipeline,
+    /// Depth-only terrain pass from the sun's perspective.
+    pub shadow_pipeline: wgpu::RenderPipeline,
     /// Transparent water render pipeline (blended over opaque geometry).
     pub water_pipeline: wgpu::RenderPipeline,
     /// 3-D block outline overlay pipeline.
@@ -114,6 +116,11 @@ pub struct State {
     pub uniform_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
+    /// Shadow map, comparison sampler and light transform for terrain shading.
+    pub shadow_bind_group: wgpu::BindGroup,
+    /// Shadow-pass-only bindings.  Deliberately excludes the map being written.
+    pub shadow_pass_bind_group: wgpu::BindGroup,
+    pub shadow_uniform_buffer: wgpu::Buffer,
     /// Bind group for the water pass (SSR color/depth textures + sampler).
     pub water_bind_group: wgpu::BindGroup,
     /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
@@ -131,6 +138,9 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Non-linear (sRGB) depth buffer view used by the main render pass.
     pub depth_texture: wgpu::TextureView,
+    #[allow(dead_code)]
+    pub shadow_texture: wgpu::Texture,
+    pub shadow_view: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
     /// Intermediate scene color texture rendered into before compositing.
@@ -371,6 +381,9 @@ pub struct State {
     pub is_underwater: f32,
     /// Smoothed open-sky visibility at the camera position.
     pub sky_visibility: f32,
+    /// World-space centre of the currently cached directional shadow region.
+    /// It is intentionally decoupled from the camera to prevent swimming.
+    pub shadow_anchor: [f32; 3],
 
     // -------------------------------------------------------------------------
     // Multiplayer

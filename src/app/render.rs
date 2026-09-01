@@ -3,7 +3,7 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, ShadowUniforms, Uniforms, Vertex, World,
     build_block_outline, build_player_model, extract_frustum_planes,
 };
 
@@ -16,6 +16,32 @@ use super::state::State;
 
 const MAX_DIRTY_MESH_REQUESTS_PER_FRAME: usize = 128;
 const MAX_DIRTY_MESH_QUEUE_INSPECTIONS_PER_FRAME: usize = 1024;
+const SHADOW_MAP_SIZE: f32 = 2048.0;
+const SHADOW_HALF_EXTENT: f32 = 112.0;
+const SHADOW_RECENTER_DISTANCE: f32 = 76.0;
+const SHADOW_ANCHOR_GRID: f32 = 128.0;
+
+fn stabilized_sun_matrix(camera_pos: Vec3, sun_dir: Vec3) -> Mat4 {
+    let up = if sun_dir.y.abs() > 0.96 { Vec3::Z } else { Vec3::Y };
+    let mut center = camera_pos;
+    let mut eye = center + sun_dir * 190.0;
+    let initial_view = Mat4::look_at_rh(eye, center, up);
+    let texel_world = (SHADOW_HALF_EXTENT * 2.0) / SHADOW_MAP_SIZE;
+    let center_ls = initial_view.transform_point3(center);
+    let snapped = Vec3::new(
+        (center_ls.x / texel_world).round() * texel_world,
+        (center_ls.y / texel_world).round() * texel_world,
+        center_ls.z,
+    );
+    let world_adjustment = initial_view.inverse().transform_vector3(snapped - center_ls);
+    center += world_adjustment;
+    eye += world_adjustment;
+    Mat4::orthographic_rh(
+        -SHADOW_HALF_EXTENT, SHADOW_HALF_EXTENT,
+        -SHADOW_HALF_EXTENT, SHADOW_HALF_EXTENT,
+        0.1, 400.0,
+    ) * Mat4::look_at_rh(eye, center, up)
+}
 
 /// Computes which faces of the highlighted block should be outlined.
 ///
@@ -342,9 +368,11 @@ impl State {
         // Offset by π/2 so the sun starts at noon (Y = +1) rather than
         // the horizon.
         let sun_angle = time * day_cycle_speed + std::f32::consts::FRAC_PI_2;
-        let sun_x = 0.0;
+        // A tilted orbital path gives the sun a genuine horizontal travel
+        // across the sky, so the shadow direction evolves through the day.
+        let sun_x = sun_angle.cos() * 0.34;
         let sun_y = sun_angle.sin(); // +1 = overhead noon, −1 = midnight
-        let sun_z = sun_angle.cos();
+        let sun_z = sun_angle.cos() * 0.94;
         let sun_dir = Vec3::new(sun_x, sun_y, sun_z).normalize();
         let moon_intensity = (-sun_dir.y).clamp(0.0, 1.0);
 
@@ -387,6 +415,33 @@ impl State {
                 sky_visibility: self.sky_visibility,
                 menu_blur: if menu_visible { 1.0 } else { 0.0 },
                 _pad_uniforms: 0.0,
+            }]),
+        );
+
+        // Keep the light projection anchored in world space.  Recentering only
+        // after travelling a large distance avoids shadows following each
+        // individual camera step; snapping the new anchor makes transitions
+        // deterministic rather than frame-rate dependent.
+        let camera_pos = self.camera.position;
+        let mut shadow_anchor = Vec3::from_array(self.shadow_anchor);
+        let anchor_delta_xz = Vec3::new(
+            camera_pos.x - shadow_anchor.x,
+            0.0,
+            camera_pos.z - shadow_anchor.z,
+        );
+        if anchor_delta_xz.length() > SHADOW_RECENTER_DISTANCE {
+            shadow_anchor.x = (camera_pos.x / SHADOW_ANCHOR_GRID).round() * SHADOW_ANCHOR_GRID;
+            shadow_anchor.z = (camera_pos.z / SHADOW_ANCHOR_GRID).round() * SHADOW_ANCHOR_GRID;
+            self.shadow_anchor = shadow_anchor.to_array();
+        }
+        let shadow_matrix = stabilized_sun_matrix(shadow_anchor, sun_dir);
+        self.queue.write_buffer(
+            &self.shadow_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[ShadowUniforms {
+                light_view_proj: shadow_matrix.to_cols_array_2d(),
+                texel_size: [1.0 / SHADOW_MAP_SIZE, 1.0 / SHADOW_MAP_SIZE],
+                _padding: [0.0; 2],
             }]),
         );
 
@@ -453,6 +508,30 @@ impl State {
             [self.config.width as f32, self.config.height as f32],
         );
 
+        // The shadow map is rendered in light space, independent of the
+        // camera image.  It reuses the already-culled terrain draw stream.
+        if sun_dir.y > 0.015 {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Sun Shadow Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            shadow_pass.set_bind_group(1, &self.shadow_pass_bind_group, &[]);
+            shadow_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
+            shadow_pass.set_index_buffer(self.indirect_manager.index_buffer().slice(..), wgpu::IndexFormat::Uint32);
+            shadow_pass.multi_draw_indexed_indirect(
+                self.indirect_manager.all_draw_commands(), 0,
+                self.indirect_manager.all_draw_command_count(),
+            );
+        }
+
         // ── Opaque pass ───────────────────────────────────────────────────── //
         // Renders: sky dome → terrain chunks → remote player models → sun/moon.
         // Writes to the 4× MSAA color target which is resolved simultaneously
@@ -505,6 +584,7 @@ impl State {
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             opaque_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
             opaque_pass.set_index_buffer(
                 self.indirect_manager.index_buffer().slice(..),
@@ -536,6 +616,7 @@ impl State {
                 ) {
                     opaque_pass.set_pipeline(&self.render_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    opaque_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     opaque_pass.draw_indexed(0..self.player_model_num_indices, 0, 0..1);

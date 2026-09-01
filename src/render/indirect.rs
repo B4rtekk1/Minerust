@@ -173,7 +173,6 @@ pub struct IndirectManager {
     unified_index_buffer: wgpu::Buffer,
 
     /// Staging buffer for all draw commands before culling (written by CPU).
-    #[allow(dead_code)]
     draw_commands_buffer: wgpu::Buffer,
     /// Output buffer for draw commands that survive the culling pass.
     visible_draw_commands_buffer: wgpu::Buffer,
@@ -259,7 +258,12 @@ impl IndirectManager {
         let draw_commands_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Draw Commands Buffer"),
             size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            // The sun pass reads the unculled commands so off-camera casters
+            // still contribute to shadows. The main pass uses the separate
+            // visible command buffer produced by the culling compute shader.
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -665,6 +669,21 @@ impl IndirectManager {
             meta_byte_offset as u64,
             bytemuck::bytes_of(&subchunk_meta),
         );
+        // Keep a parallel, unculled indirect stream for light-space passes.
+        // The camera culler writes a compacted subset into its own buffer.
+        let draw_command = DrawIndexedIndirect {
+            index_count,
+            instance_count: 1,
+            first_index: alloc.index_offset,
+            base_vertex: alloc.vertex_offset as i32,
+            first_instance: 0,
+        };
+        let draw_byte_offset = slot_index * size_of::<DrawIndexedIndirect>();
+        queue.write_buffer(
+            &self.draw_commands_buffer,
+            draw_byte_offset as u64,
+            bytemuck::bytes_of(&draw_command),
+        );
 
         // Advance the high-water marks only when no free block was reused.
         if !reused_vertex {
@@ -721,7 +740,8 @@ impl IndirectManager {
         }
     }
 
-    /// Zeros one metadata slot so the culling shader ignores it.
+    /// Zeros one metadata and draw slot so neither camera nor light passes can
+    /// reuse stale geometry after a subchunk has been unloaded.
     fn zero_metadata_slot(&self, queue: &wgpu::Queue, slot_index: usize) {
         let subchunk_meta = SubchunkGpuMeta {
             aabb_min: [0.0; 4],
@@ -733,6 +753,13 @@ impl IndirectManager {
             &self.subchunk_meta_buffer,
             meta_byte_offset as u64,
             bytemuck::bytes_of(&subchunk_meta),
+        );
+        let empty_draw = DrawIndexedIndirect::zeroed();
+        let draw_byte_offset = slot_index * size_of::<DrawIndexedIndirect>();
+        queue.write_buffer(
+            &self.draw_commands_buffer,
+            draw_byte_offset as u64,
+            bytemuck::bytes_of(&empty_draw),
         );
     }
 
@@ -954,6 +981,18 @@ impl IndirectManager {
     /// Returns a reference to the visible (post-cull) indirect draw command buffer.
     pub fn draw_commands(&self) -> &wgpu::Buffer {
         &self.visible_draw_commands_buffer
+    }
+
+    /// Commands for every loaded subchunk, before camera frustum/Hi-Z culling.
+    /// Used by light-space passes, whose visibility cannot depend on the camera.
+    pub fn all_draw_commands(&self) -> &wgpu::Buffer {
+        &self.draw_commands_buffer
+    }
+
+    /// Number of command slots occupied by the unculled stream, including
+    /// sparse slots left by unloaded subchunks.
+    pub fn all_draw_command_count(&self) -> u32 {
+        self.max_slot_bound
     }
 
     /// Returns the main visible-count buffer (used as an indirect dispatch argument).

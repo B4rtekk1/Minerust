@@ -3,8 +3,8 @@ const WATER_COLOR_DEEP:    vec3<f32> = vec3<f32>(0.004, 0.045, 0.115);
 const FRESNEL_R0:          f32 = 0.020;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
 
-const FOG_NEAR: f32 = 18.0;
-const FOG_FAR:  f32 = 210.0;
+const FOG_NEAR: f32 = 150.0;
+const FOG_FAR:  f32 = 600.0;
 
 struct Uniforms {
     view_proj:       mat4x4<f32>,
@@ -307,13 +307,8 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let ssr_weight = clamp(ssr.confidence * 1.20, 0.0, 1.0);
     let reflected_scene = mix(sky_reflection * 0.82, ssr.color, ssr_weight);
 
-    // Fresnel dominates at grazing angles, while a small base reflection keeps
-    // the surface readable when viewed nearly straight down.
     let reflection_strength = clamp(0.24 + fresnel * 0.74, 0.0, 0.96);
     if uniforms.reflection_mode >= 0.5 {
-        // Give confirmed SSR geometry an additional direct contribution. This
-        // keeps terrain and structures readable even when viewed from above,
-        // where the physical Fresnel term alone would otherwise be very weak.
         let visible_reflection = max(reflection_strength, ssr_weight * 0.62);
         water_color = mix(water_color, reflected_scene, visible_reflection);
     }
@@ -330,6 +325,16 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let crest = smoothstep(0.022, 0.050, wave_height(in.world_pos.xz));
     water_color += vec3<f32>(0.06, 0.14, 0.16) * crest * distance_fade * 0.22;
 
+    let shore = 1.0 - smoothstep(0.18, 1.65, water_depth);
+    let foam_wave = sin(in.world_pos.x * 2.35 + uniforms.time * 1.15)
+        + sin(in.world_pos.z * 2.73 - uniforms.time * 0.92)
+        + sin((in.world_pos.x + in.world_pos.z) * 1.34 + uniforms.time * 0.54);
+    let foam_breakup = smoothstep(0.10, 1.45, foam_wave);
+    let top_surface = smoothstep(0.55, 0.94, normal.y);
+    let foam_amount = shore * mix(0.38, 0.92, foam_breakup) * top_surface * distance_fade;
+    let foam_color = mix(vec3<f32>(0.42, 0.63, 0.66), vec3<f32>(0.86, 0.93, 0.91), day);
+    water_color = mix(water_color, foam_color, foam_amount * 0.72);
+
     if uniforms.is_underwater > 0.5 {
         water_color = mix(water_color, WATER_COLOR_DEEP, 0.34);
     }
@@ -338,6 +343,10 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let fog_color = mix(vec3<f32>(0.003, 0.008, 0.022), sky_reflection, day * 0.52 + 0.08);
     water_color = mix(water_color, fog_color, fog_amount * fog_amount);
 
-    let alpha = clamp(0.38 + depth_factor * 0.25 + fresnel * 0.24 + fog_amount * 0.08, 0.34, 0.88);
+    let alpha = clamp(
+        0.38 + depth_factor * 0.25 + fresnel * 0.24 + fog_amount * 0.08 + foam_amount * 0.26,
+        0.34,
+        0.92,
+    );
     return vec4<f32>(max(water_color, vec3<f32>(0.0)), alpha);
 }

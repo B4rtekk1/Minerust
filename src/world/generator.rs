@@ -1632,8 +1632,10 @@ impl ChunkGenerator {
         world_z: i32,
     ) {
         let hash = self.position_hash(world_x, world_z);
-        let length = 3 + (hash % 3) as i32;
+        let length = 4 + (hash % 4) as i32;
         let (step_x, step_z) = if hash & 1 == 0 { (1, 0) } else { (0, 1) };
+        let side_x = if step_x == 0 { 1 } else { 0 };
+        let side_z = if step_z == 0 { 1 } else { 0 };
         let start = -(length / 2);
 
         if self.fallen_log_collides_with_tree(chunk, lx, y, lz, length, step_x, step_z) {
@@ -1659,6 +1661,19 @@ impl ChunkGenerator {
             }
         }
 
+        let stump_side = if hash & 2 == 0 { -1 } else { 1 };
+        let stump_x = lx + side_x * stump_side;
+        let stump_z = lz + side_z * stump_side;
+        let placed_stump =
+            self.try_place_fallen_log_detail(chunk, stump_x, y, stump_z, BlockType::Wood);
+        if placed_stump
+            && y + 1 < WORLD_HEIGHT
+            && hash % 3 == 0
+            && chunk.get_block(stump_x, y + 1, stump_z) == BlockType::Air
+        {
+            chunk.set_block_raw(stump_x, y + 1, stump_z, BlockType::Wood);
+        }
+
         for i in 0..length {
             let offset = start + i;
             let nx = lx + step_x * offset;
@@ -1676,8 +1691,6 @@ impl ChunkGenerator {
                     % 3
                     == 0
             {
-                let side_x = if step_x == 0 { 1 } else { 0 };
-                let side_z = if step_z == 0 { 1 } else { 0 };
                 for side in [-1, 1] {
                     let sx = nx + side_x * side;
                     let sz = nz + side_z * side;
@@ -1691,7 +1704,69 @@ impl ChunkGenerator {
                     }
                 }
             }
+
+            let segment_hash =
+                self.position_hash_3d(world_x + step_x * offset, y + i, world_z + step_z * offset);
+            if i > 0 && i < length - 1 && segment_hash % 5 == 0 {
+                let branch_side = if segment_hash & 1 == 0 { -1 } else { 1 };
+                let branch_x = nx + side_x * branch_side;
+                let branch_z = nz + side_z * branch_side;
+                let branch_block = if step_x != 0 {
+                    BlockType::WoodLogZ
+                } else {
+                    BlockType::WoodLogX
+                };
+                self.try_place_fallen_log_detail(chunk, branch_x, y, branch_z, branch_block);
+            }
         }
+
+        for end_offset in [start - 1, start + length] {
+            let end_x = lx + step_x * end_offset;
+            let end_z = lz + step_z * end_offset;
+            self.try_place_fallen_log_detail(chunk, end_x, y, end_z, BlockType::Leaves);
+
+            for side in [-1, 1] {
+                let leaf_hash = self.position_hash_3d(
+                    world_x + step_x * end_offset + side_x * side,
+                    y,
+                    world_z + step_z * end_offset + side_z * side,
+                );
+                if leaf_hash % 2 == 0 {
+                    self.try_place_fallen_log_detail(
+                        chunk,
+                        end_x + side_x * side,
+                        y,
+                        end_z + side_z * side,
+                        BlockType::Leaves,
+                    );
+                }
+            }
+        }
+    }
+
+    fn try_place_fallen_log_detail(
+        &self,
+        chunk: &mut Chunk,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: BlockType,
+    ) -> bool {
+        if x <= 0 || x >= CHUNK_SIZE - 1 || z <= 0 || z >= CHUNK_SIZE - 1 || y <= 0 {
+            return false;
+        }
+
+        let ground = chunk.get_block(x, y - 1, z);
+        if !matches!(
+            ground,
+            BlockType::Grass | BlockType::Dirt | BlockType::Clay | BlockType::Sand
+        ) || chunk.get_block(x, y, z) != BlockType::Air
+        {
+            return false;
+        }
+
+        chunk.set_block_raw(x, y, z, block);
+        true
     }
 
     fn fallen_log_collides_with_tree(
@@ -1910,17 +1985,21 @@ mod tests {
             BlockType::WoodLogZ
         };
         let mut oriented_logs = 0;
+        let mut stump_blocks = 0;
 
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 if chunk.get_block(x, y, z) == expected_log {
                     oriented_logs += 1;
                 }
-                assert_ne!(chunk.get_block(x, y, z), BlockType::Wood);
+                if chunk.get_block(x, y, z) == BlockType::Wood {
+                    stump_blocks += 1;
+                }
             }
         }
 
-        assert!(oriented_logs >= 3);
+        assert!(oriented_logs >= 4);
+        assert!(stump_blocks >= 1);
     }
 
     #[test]
