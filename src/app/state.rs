@@ -12,6 +12,8 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
+pub(super) const MSAA_SAMPLE_COUNT: u32 = 4;
+
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
 #[derive(Default)]
 pub struct BlockPlacementState {

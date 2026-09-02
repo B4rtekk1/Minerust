@@ -19,7 +19,7 @@ use minerust::{
     SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
 };
 
-use super::state::State;
+use super::state::{MSAA_SAMPLE_COUNT, State};
 
 fn create_menu_background_texture(
     device: &wgpu::Device,
@@ -269,7 +269,7 @@ impl State {
         // memory/bandwidth cost.  All color render passes write to the MSAA
         // texture; it is resolved to the swap-chain image at the end of each
         // frame.
-        let msaa_sample_count: u32 = 4;
+        let msaa_sample_count = MSAA_SAMPLE_COUNT;
 
         // A multisampled Depth32Float texture is used for all geometry passes
         // (terrain, water, sun, sky).  A separate single-sampled depth texture
@@ -436,37 +436,8 @@ impl State {
         // The terrain pass renders into these textures first.  The water
         // shader then samples them to produce planar reflections of the scene
         // above the water surface.
-        let ssr_color_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSR Color Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1, // SSR targets are single-sampled (no MSAA)
-            dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let ssr_color_view = ssr_color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let ssr_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSR Depth Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let ssr_depth_view = ssr_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (ssr_color_texture, ssr_color_view, ssr_depth_texture, ssr_depth_view) =
+            super::resize::create_ssr_targets(&device, &config, surface_format);
 
         // Nearest-neighbor sampler for SSR lookups; bilinear filtering would
         // blur the reflected image and cause incorrect depth comparisons.
