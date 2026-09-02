@@ -4,10 +4,12 @@ pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 16;
 pub const SUBCHUNK_HEIGHT: i32 = 16;
 pub const NUM_SUBCHUNKS: i32 = WORLD_HEIGHT / SUBCHUNK_HEIGHT;
-pub const RENDER_DISTANCE: i32 = 32;
+pub const RENDER_DISTANCE: i32 = 128;
 pub const SIMULATION_DISTANCE: i32 = RENDER_DISTANCE / 2;
 pub const GENERATION_DISTANCE: i32 = RENDER_DISTANCE + 2;
 pub const SEA_LEVEL: i32 = 64;
+/// Temporary day-cycle speed. Set to zero to keep the sun fixed at noon.
+pub const SUN_MOVEMENT_SPEED: f32 = 0.0;
 pub const CHUNK_UNLOAD_DISTANCE: i32 = RENDER_DISTANCE + 5;
 pub const TEX_GRASS_TOP: f32 = 0.0;
 pub const TEX_GRASS_SIDE: f32 = 1.0;

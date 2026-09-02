@@ -4,7 +4,8 @@ use wgpu::util::DeviceExt;
 
 use minerust::{
     BlockType, CHUNK_SIZE, DEFAULT_FOV, MAX_MESH_BUILDS_PER_FRAME, RENDER_DISTANCE, SEA_LEVEL,
-    Uniforms, Vertex, World, build_block_outline, build_player_model, extract_frustum_planes,
+    SUN_MOVEMENT_SPEED, Uniforms, Vertex, World, build_block_outline, build_player_model,
+    extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -273,9 +274,9 @@ impl State {
         // ── Day/night cycle ───────────────────────────────────────────────── //
         let time = self.game_start_time.elapsed().as_secs_f32();
 
-        // `day_cycle_speed` controls how fast the sun orbits.  At 0.005 rad/s
-        // a full day takes ~1257 seconds (≈21 minutes).
-        let day_cycle_speed = 0.005;
+        // Keep the speed in constants so the day cycle can be re-enabled
+        // without changing render logic. It is currently fixed at noon.
+        let day_cycle_speed = SUN_MOVEMENT_SPEED;
         // Offset by π/2 so the sun starts at noon (Y = +1) rather than
         // the horizon.
         let sun_angle = time * day_cycle_speed + std::f32::consts::FRAC_PI_2;

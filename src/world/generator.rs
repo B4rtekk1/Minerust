@@ -201,8 +201,8 @@ impl ChunkGenerator {
             // - temperature/moisture frequencies kept similar => less striping
             noise_terrain: Self::create_fbm_noise(seed.wrapping_add(1), 0.007),
             noise_detail: Self::create_fbm_noise(seed.wrapping_add(2), 0.015),
-            noise_temperature: Self::create_noise(seed.wrapping_add(3), 0.006),
-            noise_moisture: Self::create_noise(seed.wrapping_add(4), 0.008),
+            noise_temperature: Self::create_noise(seed.wrapping_add(3), 0.0016),
+            noise_moisture: Self::create_noise(seed.wrapping_add(4), 0.0024),
             noise_river: Self::create_noise(seed.wrapping_add(5), 0.004),
             noise_lake: Self::create_noise(seed.wrapping_add(6), 0.022),
             noise_trees: Self::create_noise(seed.wrapping_add(7), 0.12),
@@ -327,7 +327,19 @@ impl ChunkGenerator {
         }
 
         // ── Pass 2: coarse 3-D terrain-density lattice ──────────────────── //
-        let density_lattice = self.build_density_lattice(base_x, base_z);
+        // The lattice uses the same coarse XZ samples as its shape cache.
+        // This avoids re-sampling all 2-D terrain noise for every lattice
+        // point after the column pass has already evaluated that location.
+        let first_shape = self.terrain_shape(&self.sample_terrain_noise(base_x, base_z));
+        let mut density_shapes = [[first_shape; DENSITY_XZ_SAMPLES]; DENSITY_XZ_SAMPLES];
+        for ix in 0..DENSITY_XZ_SAMPLES {
+            for iz in 0..DENSITY_XZ_SAMPLES {
+                let x = base_x + ix as i32 * DENSITY_CELL_SIZE;
+                let z = base_z + iz as i32 * DENSITY_CELL_SIZE;
+                density_shapes[ix][iz] = self.terrain_shape(&self.sample_terrain_noise(x, z));
+            }
+        }
+        let density_lattice = self.build_density_lattice(base_x, base_z, &density_shapes);
         // Surface rules and vegetation need the visible density surface, not
         // merely the macro-height estimate used to construct the field.
         for lx in 0..CHUNK_SIZE {
@@ -527,20 +539,16 @@ impl ChunkGenerator {
     fn terrain_warp(&self, x: i32, z: i32) -> (f32, f32) {
         let fx = x as f32;
         let fz = z as f32;
-        let macro_x = fx
-            + self.noise_warp_x.get_noise_2d(fx * 0.25, fz * 0.25)
-                * MACRO_WARP_AMPLITUDE;
+        let macro_x =
+            fx + self.noise_warp_x.get_noise_2d(fx * 0.25, fz * 0.25) * MACRO_WARP_AMPLITUDE;
         let macro_z = fz
-            + self
-                .noise_warp_z
-                .get_noise_2d(
-                    (fx + TERRAIN_WARP_Z_OFFSET) * 0.25,
-                    (fz + TERRAIN_WARP_Z_OFFSET) * 0.25,
-                )
-                * MACRO_WARP_AMPLITUDE;
+            + self.noise_warp_z.get_noise_2d(
+                (fx + TERRAIN_WARP_Z_OFFSET) * 0.25,
+                (fz + TERRAIN_WARP_Z_OFFSET) * 0.25,
+            ) * MACRO_WARP_AMPLITUDE;
 
-        let wx = macro_x
-            + self.noise_warp_x.get_noise_2d(macro_x, macro_z) * REGIONAL_WARP_AMPLITUDE;
+        let wx =
+            macro_x + self.noise_warp_x.get_noise_2d(macro_x, macro_z) * REGIONAL_WARP_AMPLITUDE;
         let wz = macro_z
             + self.noise_warp_z.get_noise_2d(
                 macro_x + TERRAIN_WARP_Z_OFFSET,
@@ -815,14 +823,27 @@ impl ChunkGenerator {
 
     fn river_channel_strength(&self, noise: &TerrainNoiseSample) -> f64 {
         let threshold = noise.river_threshold as f64;
-        ((noise.river_value as f64 - threshold) / (1.0 - threshold).max(0.001)).clamp(0.0, 1.0)
+        let centerline =
+            ((noise.river_value as f64 - threshold) / (1.0 - threshold).max(0.001)).clamp(0.0, 1.0);
+        let land = smoothstep(((noise.continental - (-0.24)) / 0.34).clamp(0.0, 1.0));
+        let height = CONTINENTAL_SPLINE.sample(noise.continental);
+        let low_terrain =
+            (1.0 - ((height - SEA_LEVEL as f64) / 42.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let valley =
+            smoothstep(((-noise.biome_peaks_valleys as f64 + 0.10) / 0.70).clamp(0.0, 1.0));
+        centerline * land * (0.35 + 0.65 * valley) * (0.35 + 0.65 * low_terrain)
     }
 
     fn lake_strength(&self, noise: &TerrainNoiseSample) -> f64 {
         if noise.biome_continental <= -0.12 || noise.biome_erosion <= -0.35 {
             return 0.0;
         }
-        smoothstep(((LAKE_THRESHOLD as f64 - noise.lake as f64) / 0.22).clamp(0.0, 1.0))
+        let basin =
+            smoothstep(((LAKE_THRESHOLD as f64 - noise.lake as f64) / 0.22).clamp(0.0, 1.0));
+        let height = CONTINENTAL_SPLINE.sample(noise.continental);
+        let lowland = (1.0 - ((height - SEA_LEVEL as f64) / 30.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let flatness = ((noise.biome_erosion as f64 + 1.0) * 0.5).clamp(0.0, 1.0);
+        basin * lowland * smoothstep((flatness - 0.25) / 0.55)
     }
 
     fn island_strength(&self, noise: &TerrainNoiseSample) -> f64 {
@@ -968,10 +989,30 @@ impl ChunkGenerator {
         preliminary_surface: i32,
         is_entrance: bool,
     ) -> f64 {
+        if y <= 4 || y >= preliminary_surface {
+            return 1.0;
+        }
+
+        // Keep the existing family thresholds for gameplay compatibility, but
+        // use a signed, continuous cheese field around their main boundary.
+        // This removes the hard binary cut at the edge of large cavities while
+        // spaghetti/noodle/worm families still get their exact opening shape.
+        let fx = x as f32;
+        let fy = y as f32;
+        let fz = z as f32;
+        let c1 = self
+            .noise_cave1
+            .get_noise_3d(fx * 0.030, fy * 0.010, fz * 0.030);
+        let c2 = self.noise_cave2.get_noise_3d(
+            fx * 0.022 + 400.0,
+            fy * 0.008 + 400.0,
+            fz * 0.022 + 400.0,
+        );
+        let cheese_signed = (0.30 - c1.max(0.0) * c2.max(0.0)) * 5.0;
         if self.is_cave(x, y, z, preliminary_surface, is_entrance) {
             -1.0
         } else {
-            1.0
+            cheese_signed.clamp(0.08, 1.0) as f64
         }
     }
 
@@ -1042,14 +1083,18 @@ impl ChunkGenerator {
         (ix * DENSITY_Y_SAMPLES + iy) * DENSITY_XZ_SAMPLES + iz
     }
 
-    fn build_density_lattice(&self, base_x: i32, base_z: i32) -> [f64; DENSITY_LATTICE_LEN] {
+    fn build_density_lattice(
+        &self,
+        base_x: i32,
+        base_z: i32,
+        shapes: &[[TerrainShape; DENSITY_XZ_SAMPLES]; DENSITY_XZ_SAMPLES],
+    ) -> [f64; DENSITY_LATTICE_LEN] {
         let mut lattice = [0.0; DENSITY_LATTICE_LEN];
         for ix in 0..DENSITY_XZ_SAMPLES {
             for iz in 0..DENSITY_XZ_SAMPLES {
                 let x = base_x + ix as i32 * DENSITY_CELL_SIZE;
                 let z = base_z + iz as i32 * DENSITY_CELL_SIZE;
-                let noise = self.sample_terrain_noise(x, z);
-                let shape = self.terrain_shape(&noise);
+                let shape = shapes[ix][iz];
                 for iy in 0..DENSITY_Y_SAMPLES {
                     let y = iy as i32 * DENSITY_CELL_SIZE;
                     lattice[Self::density_index(ix, iy, iz)] =
