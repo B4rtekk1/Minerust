@@ -3,8 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
-    build_block_outline, build_player_model, extract_frustum_planes,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, MAX_MESH_BUILDS_PER_FRAME, RENDER_DISTANCE, SEA_LEVEL,
+    Uniforms, Vertex, World, build_block_outline, build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -364,7 +364,7 @@ impl State {
                 }
             }
         }
-        for (cx, cz, sy) in &meshes_to_request {
+        for (cx, cz, sy) in meshes_to_request.iter().take(MAX_MESH_BUILDS_PER_FRAME) {
             self.mesh_loader.request_mesh(*cx, *cz, *sy);
         }
 

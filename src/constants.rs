@@ -28,7 +28,9 @@ pub const TEX_DEAD_BUSH: f32 = 15.0;
 pub const TEXTURE_SIZE: u32 = 256;
 pub const ATLAS_SIZE: u32 = 4;
 
+/// Maximum number of chunk-generation requests submitted to workers per frame.
 pub const MAX_CHUNKS_PER_FRAME: usize = 8;
+/// Maximum number of subchunk mesh-build requests submitted to workers per frame.
 pub const MAX_MESH_BUILDS_PER_FRAME: usize = 8;
 /// Maximum number of finished chunk columns committed to `World` in one
 /// frame. Generation remains asynchronous; this only spreads the expensive

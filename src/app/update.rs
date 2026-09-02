@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME, MAX_MESH_BUILDS_PER_FRAME,
-    NUM_SUBCHUNKS, SUBCHUNK_HEIGHT,
+    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME,
+    MAX_CHUNKS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT,
 };
 
 use crate::multiplayer::network::update_network;
@@ -169,7 +169,7 @@ impl State {
     /// 6. **Digging** – accumulate break progress for the targeted block.
     /// 7. **World write** – insert newly generated chunks, break blocks, and
     ///    evict out-of-range chunks (all in a single write-lock window).
-    /// 8. **Mesh uploads** – drain up to `MAX_MESH_BUILDS_PER_FRAME` completed
+    /// 8. **Mesh uploads** – drain up to `MAX_MESH_COMMITS_PER_FRAME` completed
     ///    mesh results from the background workers.
     pub fn update(&mut self) {
         // --- 1. Network ---
@@ -191,7 +191,9 @@ impl State {
         }
 
         // --- 3. Chunk streaming ---
-        let completed_chunks = self.chunk_loader.poll_results(MAX_CHUNKS_PER_FRAME);
+        let completed_chunks = self
+            .chunk_loader
+            .poll_results(MAX_CHUNK_COMMITS_PER_FRAME);
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
@@ -460,7 +462,7 @@ impl State {
         // --- 8. Mesh uploads ---
         // Drain completed mesh results up to the per-frame cap so a burst of
         // ready meshes doesn't cause a single-frame GPU upload spike.
-        for _ in 0..MAX_MESH_BUILDS_PER_FRAME {
+        for _ in 0..MAX_MESH_COMMITS_PER_FRAME {
             if let Some(result) = self.mesh_loader.poll_result() {
                 self.update_subchunk_mesh(result);
             } else {
