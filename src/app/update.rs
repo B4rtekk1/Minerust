@@ -38,8 +38,8 @@ impl State {
     ///    under a brief write lock.
     /// 2. Uploads the terrain and water meshes to the respective
     ///    `IndirectManager` instances.
-    /// 3. If either upload fails (buffer full), marks the subchunk dirty again
-    ///    so it will be retried on the next frame.
+    /// 3. Rebuilds vertex-pulling bind groups if an arena moved, and retries
+    ///    only a metadata-capacity failure on a later frame.
     ///
     /// Does nothing if the parent chunk has been unloaded since the mesh was
     /// requested.
@@ -73,19 +73,72 @@ impl State {
             subchunk_y: sy,
         };
 
-        let terrain_uploaded =
-            self.indirect_manager
-                .upload_subchunk(&self.queue, key, &result.terrain, &aabb_copy);
+        let terrain_uploaded = self.indirect_manager.upload_subchunk(
+            &self.device,
+            &self.queue,
+            key,
+            &result.terrain,
+            &aabb_copy,
+        );
 
         let water_uploaded = self.water_indirect_manager.upload_subchunk(
+            &self.device,
             &self.queue,
             key,
             &result.water,
             &aabb_copy,
         );
 
-        // If either buffer was full the upload was skipped; re-dirty the
-        // subchunk so the mesh is requested again once space becomes available.
+        // A growing/compacting arena has a new buffer identity. Rebind it before
+        // the render pass while retaining every existing subchunk allocation.
+        if self.indirect_manager.take_quad_buffer_rebind() {
+            let layout = self.render_pipeline.get_bind_group_layout(1);
+            self.terrain_quad_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Terrain Quad Vertex Pulling Bind Group"),
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.indirect_manager.quad_buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self
+                                .indirect_manager
+                                .subchunk_meta_buffer()
+                                .as_entire_binding(),
+                        },
+                    ],
+                });
+        }
+        if self.water_indirect_manager.take_quad_buffer_rebind() {
+            let layout = self.water_pipeline.get_bind_group_layout(1);
+            self.water_quad_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Water Quad Vertex Pulling Bind Group"),
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self
+                                .water_indirect_manager
+                                .quad_buffer()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self
+                                .water_indirect_manager
+                                .subchunk_meta_buffer()
+                                .as_entire_binding(),
+                        },
+                    ],
+                });
+        }
+
+        // Upload failure is now reserved for metadata-slot exhaustion; geometry
+        // overflow grows or compacts the arena without invalidating the cache.
         if !terrain_uploaded || !water_uploaded {
             let mut world = self.world.write();
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {

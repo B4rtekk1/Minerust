@@ -5,7 +5,7 @@ use crate::constants::{CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS};
 use crate::render::frustum::AABB;
 use crate::render::quad::PackedQuad;
 
-use crate::logger::{LogLevel, log};
+use crate::logger::{log, LogLevel};
 use std::collections::BTreeMap;
 
 /// Maximum number of subchunks that can be tracked simultaneously.
@@ -18,40 +18,33 @@ const MAX_CHUNK_COLUMNS: usize =
     (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1) * (CHUNK_UNLOAD_DISTANCE as usize * 2 + 1);
 const MAX_SUBCHUNKS: usize = MAX_CHUNK_COLUMNS * NUM_SUBCHUNKS as usize;
 
-/// Default terrain geometry budget for the unified buffers.
-///
-/// Greedy meshing keeps most subchunks far below these averages. If a pathological
-/// area exceeds the budget, upload_subchunk falls back to the existing cache clear
-/// and retry path instead of overflowing the GPU buffers.
-const TERRAIN_VERTICES_PER_SUBCHUNK_BUDGET: usize = 384;
-
-/// Water is meshed separately from terrain but normally needs far fewer faces
-/// per subchunk. Keeping a smaller water budget avoids duplicating the large
-/// terrain buffers while preserving the same render distance and culling range.
-const WATER_VERTICES_PER_SUBCHUNK_BUDGET: usize = 64;
+/// Initial arena sizes. Geometry grows on demand, so render distance does not
+/// translate directly into a permanent VRAM reservation.
+const TERRAIN_INITIAL_ARENA_BYTES: usize = 32 * 1024 * 1024;
+const WATER_INITIAL_ARENA_BYTES: usize = 4 * 1024 * 1024;
 
 /// Geometry allocation policy for one [`IndirectManager`].
 #[derive(Clone, Copy, Debug)]
 pub struct IndirectBufferBudget {
     label: &'static str,
-    vertices_per_subchunk: usize,
+    initial_arena_bytes: usize,
 }
 
 impl IndirectBufferBudget {
     /// Budget used for opaque terrain geometry.
     pub const TERRAIN: Self = Self {
         label: "Terrain",
-        vertices_per_subchunk: TERRAIN_VERTICES_PER_SUBCHUNK_BUDGET,
+        initial_arena_bytes: TERRAIN_INITIAL_ARENA_BYTES,
     };
 
     /// Budget used for water geometry.
     pub const WATER: Self = Self {
         label: "Water",
-        vertices_per_subchunk: WATER_VERTICES_PER_SUBCHUNK_BUDGET,
+        initial_arena_bytes: WATER_INITIAL_ARENA_BYTES,
     };
 
-    fn max_vertices(&self) -> usize {
-        MAX_SUBCHUNKS * self.vertices_per_subchunk
+    fn initial_quads(&self) -> usize {
+        self.initial_arena_bytes / size_of::<PackedQuad>()
     }
 
     fn label(&self) -> &'static str {
@@ -144,8 +137,8 @@ struct FreeBlock {
 
 /// Manages GPU-side geometry and indirect draw commands for all visible subchunks.
 ///
-/// `IndirectManager` owns a pair of large, pre-allocated unified buffers (vertex +
-/// index) and assigns subregions of those buffers to individual subchunks via a
+/// `IndirectManager` owns a growable unified quad arena and assigns subregions of
+/// that buffer to individual subchunks via a
 /// free-list allocator.  A GPU compute pass then performs frustum and Hi-Z
 /// occlusion culling each frame, writing surviving draw commands into a separate
 /// indirect command buffer that is consumed by the main render pass.
@@ -198,8 +191,10 @@ pub struct IndirectManager {
     free_quad_blocks: BTreeMap<u32, Vec<FreeBlock>>,
     /// Counts uploads/removals since the last free-list coalescing pass.
     coalesce_counter: usize,
-    /// Maximum vertex count reserved by this manager.
+    /// Current capacity of the growable quad arena.
     max_quads: usize,
+    /// Set after the arena is replaced; the renderer must rebuild its vertex-pulling bind group.
+    quad_buffer_rebind_pending: bool,
     /// Short label used in logs.
     label: &'static str,
 }
@@ -215,13 +210,15 @@ impl IndirectManager {
 
     /// Creates a new `IndirectManager` with a custom geometry budget.
     pub fn with_budget(device: &wgpu::Device, budget: IndirectBufferBudget) -> Self {
-        let max_quads = budget.max_vertices();
+        let max_quads = budget.initial_quads();
         let label = budget.label();
 
         let unified_quad_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("{label} Unified Quad Buffer")),
             size: (max_quads * size_of::<PackedQuad>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -398,6 +395,7 @@ impl IndirectManager {
             hiz_sampler,
             coalesce_counter: 0,
             max_quads,
+            quad_buffer_rebind_pending: false,
             label,
         }
     }
@@ -448,11 +446,11 @@ impl IndirectManager {
     /// geometry is written, so callers do not need to call [`remove_subchunk`]
     /// first.
     ///
-    /// Returns `true` on success.  Returns `false` if either unified buffer is
-    /// full and had to be cleared; the caller should re-submit all subchunks
-    /// in that case.
+    /// Returns `true` on success. The arena is compacted or grown in-place when
+    /// necessary; live geometry is copied GPU-to-GPU and is never evicted.
     pub fn upload_subchunk(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         key: SubchunkKey,
         quads: &[PackedQuad],
@@ -498,15 +496,29 @@ impl IndirectManager {
             }
             None => {
                 if self.next_quad_offset + quad_count > self.max_quads as u32 {
+                    // If enough space exists but is fragmented, pack live regions into a
+                    // fresh GPU buffer first. This changes no mesh data and needs no CPU readback.
+                    let free_quads: u32 = self
+                        .free_quad_blocks
+                        .values()
+                        .flatten()
+                        .map(|block| block.count)
+                        .sum();
+                    if free_quads >= quad_count {
+                        self.compact_quad_arena(device, queue);
+                    }
+                }
+                if self.next_quad_offset + quad_count > self.max_quads as u32 {
                     log(
-                        LogLevel::Warning,
+                        LogLevel::Info,
                         &format!(
-                            "{} unified quad buffer full ({}/{} quads used), clearing indirect draw cache...",
-                            self.label, self.next_quad_offset, self.max_quads
+                            "Growing {} quad arena from {} to at least {} quads",
+                            self.label,
+                            self.max_quads,
+                            self.next_quad_offset as usize + quad_count as usize
                         ),
                     );
-                    self.clear_gpu_data(queue);
-                    return false;
+                    self.grow_quad_arena(device, queue, quad_count);
                 }
                 (self.next_quad_offset, false)
             }
@@ -517,7 +529,7 @@ impl IndirectManager {
             None => {
                 log(
                     LogLevel::Warning,
-                    "No free metadata slots available, clearing indirect draw cache...",
+                    "No free metadata slots available; deferring this subchunk upload",
                 );
                 return false;
             }
@@ -559,6 +571,100 @@ impl IndirectManager {
         self.max_slot_bound = self.max_slot_bound.max(slot_index as u32 + 1);
         self.maybe_coalesce();
         true
+    }
+
+    fn create_quad_buffer(
+        device: &wgpu::Device,
+        label: &'static str,
+        quads: usize,
+    ) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label} Unified Quad Buffer")),
+            size: (quads * size_of::<PackedQuad>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Replaces the arena with a larger one and copies its occupied prefix entirely on the GPU.
+    fn grow_quad_arena(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, required: u32) {
+        let required_capacity = self.next_quad_offset as usize + required as usize;
+        let new_capacity = (self.max_quads.saturating_mul(3) / 2)
+            .max(required_capacity)
+            .max(1);
+        self.replace_quad_arena(device, queue, new_capacity, false);
+    }
+
+    /// GPU-side defragmentation. Metadata slots stay stable; only quad offsets are rewritten.
+    fn compact_quad_arena(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.replace_quad_arena(device, queue, self.max_quads, true);
+    }
+
+    fn replace_quad_arena(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        capacity: usize,
+        compact: bool,
+    ) {
+        let new_buffer = Self::create_quad_buffer(device, self.label, capacity);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Indirect Quad Arena Relocation"),
+        });
+
+        if compact {
+            let mut live: Vec<_> = self
+                .allocations
+                .iter()
+                .map(|(key, alloc)| (*key, *alloc))
+                .collect();
+            live.sort_by_key(|(_, alloc)| alloc.quad_offset);
+            let mut next_offset = 0u32;
+            for (key, old) in live {
+                let byte_count = old.quad_count as u64 * size_of::<PackedQuad>() as u64;
+                encoder.copy_buffer_to_buffer(
+                    &self.unified_quad_buffer,
+                    old.quad_offset as u64 * size_of::<PackedQuad>() as u64,
+                    &new_buffer,
+                    next_offset as u64 * size_of::<PackedQuad>() as u64,
+                    byte_count,
+                );
+                let alloc = self
+                    .allocations
+                    .get_mut(&key)
+                    .expect("live allocation disappeared");
+                alloc.quad_offset = next_offset;
+                let draw_data = [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1];
+                let draw_data_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>() + 32;
+                queue.write_buffer(
+                    &self.subchunk_meta_buffer,
+                    draw_data_offset as u64,
+                    bytemuck::cast_slice(&draw_data),
+                );
+                next_offset += old.quad_count;
+            }
+            self.next_quad_offset = next_offset;
+            self.free_quad_blocks.clear();
+        } else if self.next_quad_offset > 0 {
+            encoder.copy_buffer_to_buffer(
+                &self.unified_quad_buffer,
+                0,
+                &new_buffer,
+                0,
+                self.next_quad_offset as u64 * size_of::<PackedQuad>() as u64,
+            );
+        }
+        queue.submit(Some(encoder.finish()));
+        self.unified_quad_buffer = new_buffer;
+        self.max_quads = capacity;
+        self.quad_buffer_rebind_pending = true;
+    }
+
+    /// Returns whether a replaced arena requires a new vertex-pulling bind group.
+    pub fn take_quad_buffer_rebind(&mut self) -> bool {
+        std::mem::take(&mut self.quad_buffer_rebind_pending)
     }
 
     /// Returns the metadata slot index assigned to `key`, if it is allocated.
