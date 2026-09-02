@@ -297,12 +297,6 @@ impl State {
             // Main opaque geometry pass: texture atlas lookup and lighting.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
-        let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Shader"),
-            // Translucent water pass: SSR reflection, refraction, foam edge
-            // detection, Fresnel blend.
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water.wgsl").into()),
-        });
         let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("UI Shader"),
             // Renders flat UI geometry (crosshair, hotbar) in screen space with
@@ -851,13 +845,6 @@ impl State {
                 immediate_size: 0,
             });
 
-        let water_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Water Pipeline Layout"),
-                bind_group_layouts: &[&water_bind_group_layout, &quad_bind_group_layout],
-                immediate_size: 0,
-            });
-
         // ------------------------------------------------------------------ //
         // Render pipelines
         // ------------------------------------------------------------------ //
@@ -946,51 +933,6 @@ impl State {
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
         });*/
-
-        // --- Water (translucent, alpha-blended) ---
-        // No back-face culling so water surfaces are visible from below.
-        // Depth writes are disabled: water contributes to color but must not
-        // occlude geometry drawn in later transparent passes.
-        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Water Pipeline"),
-            layout: Some(&water_pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &water_shader,
-                entry_point: Some("vs_water"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &water_shader,
-                entry_point: Some("fs_water"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // visible from both sides
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false, // read-only depth test
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-        });
 
         // --- Block outline overlay ---
         // Alpha-blended line list drawn on top of the scene for the block
@@ -1552,26 +1494,6 @@ impl State {
                 },
             ],
         });
-        let sssr = minerust::SssrRenderer::new(
-            &device, &queue, [config.width, config.height], &uniform_buffer,
-            &quad_bind_group_layout, &ssr_color_view, &ssr_depth_view,
-        );
-        // Replace the provisional binding-13 source with the denoised output.
-        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Water Bind Group (SSSR)"), layout: &water_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&texture_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&texture_sampler) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&ssr_color_view) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&ssr_depth_view) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&ssr_sampler) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&flow_map_view) },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&flow_sampler) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&sssr.reflection_view) },
-            ],
-        });
-
         // ------------------------------------------------------------------ //
         // Hierarchical-Z (Hi-Z) occlusion buffer
         // ------------------------------------------------------------------ //
@@ -1729,7 +1651,6 @@ impl State {
             queue,
             config,
             render_pipeline,
-            water_pipeline,
             outline_pipeline,
             sun_pipeline,
             sky_pipeline,
@@ -1853,8 +1774,6 @@ impl State {
             hiz_history_valid: false,
             depth_resolve_pipeline,
             depth_resolve_bind_group,
-            sssr,
-            previous_sssr_time: 0.0,
             supports_indirect_count,
             hotbar_slot: 0,
             hotbar_vertex_buffer: None,

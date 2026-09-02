@@ -399,9 +399,9 @@ impl State {
                 prev_view_proj: self.previous_view_proj.to_cols_array_2d(),
                 camera_pos: eye_pos.to_array(),
                 time,
-                prev_time: self.previous_sssr_time,
-                frame_index: self.sssr.frame as u32,
-                sssr_history_valid: self.sssr.valid as u32,
+                prev_time: 0.0,
+                frame_index: 0,
+                sssr_history_valid: 0,
                 _pad_sssr: 0,
                 sun_position: [sun_x, sun_y, sun_z],
                 is_underwater,
@@ -496,9 +496,9 @@ impl State {
                 label: Some("Opaque Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
-                    // Resolve MSAA into the SSR color target so the water
-                    // shader can sample the opaque scene for reflections.
-                    resolve_target: Some(&self.ssr_color_view),
+                    // Static water is rendered in this pass, so resolve the
+                    // complete scene directly for post-processing.
+                    resolve_target: Some(&self.scene_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         // Clear to the sky color computed above.
@@ -553,6 +553,22 @@ impl State {
                     self.indirect_manager.draw_commands(),
                     0,
                     self.indirect_manager.active_count(),
+                );
+            }
+
+            // Static water is rendered with the terrain shader and texture
+            // atlas. It has no wave, reflection, refraction or foam effect.
+            opaque_pass.set_bind_group(1, &self.water_quad_bind_group, &[]);
+            if self.supports_indirect_count {
+                opaque_pass.multi_draw_indirect_count(
+                    self.water_indirect_manager.draw_commands(), 0,
+                    self.water_indirect_manager.visible_count_buffer(), 0,
+                    self.water_indirect_manager.active_count(),
+                );
+            } else {
+                opaque_pass.multi_draw_indirect(
+                    self.water_indirect_manager.draw_commands(), 0,
+                    self.water_indirect_manager.active_count(),
                 );
             }
 
@@ -614,61 +630,6 @@ impl State {
                 hiz_pass.dispatch_workgroups((mip_width + 15) / 16, (mip_height + 15) / 16, 1);
             }
 
-            self.sssr.record(
-                &self.queue,
-                &mut encoder,
-                &self.ssr_depth_texture,
-                &self.water_indirect_manager,
-                &self.water_quad_bind_group,
-                self.supports_indirect_count,
-            );
-        }
-
-        // ── Transparent (water) pass ──────────────────────────────────────── //
-        // Loads (does not clear) the existing MSAA color and depth buffers so
-        // water is composited on top of the opaque scene.  Resolves into
-        // `scene_color_view` for the composite pass.
-        {
-            let mut transparent_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Transparent Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.msaa_texture_view,
-                    resolve_target: Some(&self.scene_color_view),
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // keep opaque scene color
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // keep opaque depth for z-test
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-
-            transparent_pass.set_pipeline(&self.water_pipeline);
-            transparent_pass.set_bind_group(0, &self.water_bind_group, &[]);
-            transparent_pass.set_bind_group(1, &self.water_quad_bind_group, &[]);
-            if self.supports_indirect_count {
-                transparent_pass.multi_draw_indirect_count(
-                    self.water_indirect_manager.draw_commands(),
-                    0,
-                    self.water_indirect_manager.visible_count_buffer(),
-                    0,
-                    self.water_indirect_manager.active_count(),
-                );
-            } else {
-                transparent_pass.multi_draw_indirect(
-                    self.water_indirect_manager.draw_commands(),
-                    0,
-                    self.water_indirect_manager.active_count(),
-                );
-            }
         }
 
         // ── Block outline pass ───────────────────────────────────────────── //
@@ -1297,7 +1258,6 @@ impl State {
             self.previous_hiz_camera_pos = eye_pos;
             self.previous_hiz_forward = camera_forward;
             self.hiz_history_valid = true;
-            self.previous_sssr_time = time;
         }
         Ok(())
     }

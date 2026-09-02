@@ -1163,33 +1163,6 @@ impl World {
                         let world_z = base_z + lz;
                         let block = get_block_world(world_x, y, world_z);
 
-                        // Water top faces are vertex-displaced in the shader.
-                        // Keep them as 1x1 quads so the wave deformation has
-                        // enough tessellation and does not produce large planar
-                        // facets across merged surfaces.
-                        if block == BlockType::Water && face_dir == 3 {
-                            let neighbor = get_block_world(world_x, y + 1, world_z);
-                            if block.should_render_face_against(neighbor) {
-                                let x = world_x as f32;
-                                let y_f = y as f32;
-                                let z = world_z as f32;
-                                add_quad(
-                                    &mut water_vertices,
-                                    &mut water_indices,
-                                    [x, y_f + 1.0, z],
-                                    [x, y_f + 1.0, z + 1.0],
-                                    [x + 1.0, y_f + 1.0, z + 1.0],
-                                    [x + 1.0, y_f + 1.0, z],
-                                    [0.0, 1.0, 0.0],
-                                    block.color(),
-                                    block.tex_for_face(3),
-                                    block.roughness(),
-                                    block.metallic(),
-                                );
-                            }
-                            continue;
-                        }
-
                         // Skip Air and Stairs (handled in pass 1 or by transparency).
                         if block == BlockType::Air || block == BlockType::WoodStairs {
                             continue;
