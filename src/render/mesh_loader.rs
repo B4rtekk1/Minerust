@@ -1,4 +1,4 @@
-use crate::core::vertex::Vertex;
+use crate::render::quad::PackedQuad;
 use crate::world::World;
 use crate::world::generator::ChunkGenerator;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -26,10 +26,10 @@ pub struct MeshResult {
     pub sy: i32,
     /// Mesh-input revision captured with the world snapshot used for this mesh.
     pub mesh_version: u64,
-    /// Terrain mesh as `(vertices, indices)`.
-    pub terrain: (Vec<Vertex>, Vec<u32>),
-    /// Water mesh as `(vertices, indices)`.
-    pub water: (Vec<Vertex>, Vec<u32>),
+    /// Opaque terrain faces, ready for vertex pulling.
+    pub terrain: Vec<PackedQuad>,
+    /// Water faces, in the same vertex-pulling format.
+    pub water: Vec<PackedQuad>,
 }
 
 /// Asynchronous mesh-building system backed by a fixed pool of worker threads.

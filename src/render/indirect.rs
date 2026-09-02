@@ -2,8 +2,8 @@ use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 
 use crate::constants::{CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS};
-use crate::core::vertex::Vertex;
 use crate::render::frustum::AABB;
+use crate::render::quad::PackedQuad;
 
 use crate::logger::{LogLevel, log};
 use std::collections::BTreeMap;
@@ -24,20 +24,17 @@ const MAX_SUBCHUNKS: usize = MAX_CHUNK_COLUMNS * NUM_SUBCHUNKS as usize;
 /// area exceeds the budget, upload_subchunk falls back to the existing cache clear
 /// and retry path instead of overflowing the GPU buffers.
 const TERRAIN_VERTICES_PER_SUBCHUNK_BUDGET: usize = 384;
-const TERRAIN_INDICES_PER_SUBCHUNK_BUDGET: usize = 768;
 
 /// Water is meshed separately from terrain but normally needs far fewer faces
 /// per subchunk. Keeping a smaller water budget avoids duplicating the large
 /// terrain buffers while preserving the same render distance and culling range.
 const WATER_VERTICES_PER_SUBCHUNK_BUDGET: usize = 64;
-const WATER_INDICES_PER_SUBCHUNK_BUDGET: usize = 128;
 
 /// Geometry allocation policy for one [`IndirectManager`].
 #[derive(Clone, Copy, Debug)]
 pub struct IndirectBufferBudget {
     label: &'static str,
     vertices_per_subchunk: usize,
-    indices_per_subchunk: usize,
 }
 
 impl IndirectBufferBudget {
@@ -45,22 +42,16 @@ impl IndirectBufferBudget {
     pub const TERRAIN: Self = Self {
         label: "Terrain",
         vertices_per_subchunk: TERRAIN_VERTICES_PER_SUBCHUNK_BUDGET,
-        indices_per_subchunk: TERRAIN_INDICES_PER_SUBCHUNK_BUDGET,
     };
 
     /// Budget used for water geometry.
     pub const WATER: Self = Self {
         label: "Water",
         vertices_per_subchunk: WATER_VERTICES_PER_SUBCHUNK_BUDGET,
-        indices_per_subchunk: WATER_INDICES_PER_SUBCHUNK_BUDGET,
     };
 
     fn max_vertices(&self) -> usize {
         MAX_SUBCHUNKS * self.vertices_per_subchunk
-    }
-
-    fn max_indices(&self) -> usize {
-        MAX_SUBCHUNKS * self.indices_per_subchunk
     }
 
     fn label(&self) -> &'static str {
@@ -68,22 +59,19 @@ impl IndirectBufferBudget {
     }
 }
 
-/// GPU-side arguments for a single `draw_indexed_indirect` call.
+/// GPU-side arguments for a single non-indexed indirect draw.
 ///
-/// The memory layout matches the `VkDrawIndexedIndirectCommand` / wgpu
-/// `DrawIndexedIndirectArgs` spec so the buffer can be consumed directly by
+/// The memory layout matches wgpu `DrawIndirectArgs` so the buffer can be consumed directly by
 /// the GPU without additional marshaling.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct DrawIndexedIndirect {
-    /// Number of indices to draw.
-    pub index_count: u32,
+pub struct DrawIndirect {
+    /// Number of procedurally pulled vertices to draw.
+    pub vertex_count: u32,
     /// Number of instances to draw (typically 1).
     pub instance_count: u32,
-    /// Offset into the index buffer where this draw starts.
-    pub first_index: u32,
-    /// Value added to each index before fetching a vertex (base vertex offset).
-    pub base_vertex: i32,
+    /// Offset into the implicit six-vertices-per-quad stream.
+    pub first_vertex: u32,
     /// Instance ID of the first instance.
     pub first_instance: u32,
 }
@@ -98,7 +86,7 @@ pub struct SubchunkGpuMeta {
     pub aabb_min: [f32; 4],
     /// World-space AABB maximum corner (w component stores the slot index).
     pub aabb_max: [f32; 4],
-    /// Packed draw arguments: `[index_count, index_offset, vertex_offset, 1]`.
+    /// Packed draw arguments: `[vertex_count, first_vertex, unused, active]`.
     pub draw_data: [u32; 4],
 }
 
@@ -138,13 +126,9 @@ pub struct SubchunkKey {
 #[derive(Copy, Clone, Debug)]
 struct SubchunkAlloc {
     /// First vertex index in the unified vertex buffer.
-    vertex_offset: u32,
-    /// Number of vertices belonging to this subchunk.
-    vertex_count: u32,
-    /// First index in the unified index buffer.
-    index_offset: u32,
-    /// Number of indices belonging to this subchunk.
-    index_count: u32,
+    quad_offset: u32,
+    /// Number of quad descriptors belonging to this subchunk.
+    quad_count: u32,
     /// Slot in the `SubchunkGpuMeta` array assigned to this subchunk.
     slot_index: usize,
 }
@@ -168,9 +152,7 @@ struct FreeBlock {
 ///
 pub struct IndirectManager {
     /// Single large vertex buffer shared by all subchunks.
-    unified_vertex_buffer: wgpu::Buffer,
-    /// Single large index buffer shared by all subchunks.
-    unified_index_buffer: wgpu::Buffer,
+    unified_quad_buffer: wgpu::Buffer,
 
     /// Staging buffer for all draw commands before culling (written by CPU).
     #[allow(dead_code)]
@@ -190,9 +172,7 @@ pub struct IndirectManager {
     /// Map from subchunk identity to its current buffer allocation.
     allocations: FxHashMap<SubchunkKey, SubchunkAlloc>,
     /// High-water mark for vertex allocations (used when no free block fits).
-    next_vertex_offset: u32,
-    /// High-water mark for index allocations (used when no free block fits).
-    next_index_offset: u32,
+    next_quad_offset: u32,
     /// Number of subchunks currently allocated.
     active_subchunk_count: u32,
     /// One past the highest slot index ever assigned; bounds the culling dispatch.
@@ -201,7 +181,6 @@ pub struct IndirectManager {
     free_slots: Vec<usize>,
 
     /// Free-list for index buffer regions, keyed by block size for O(log n) lookup.
-    free_index_blocks: BTreeMap<u32, Vec<FreeBlock>>,
 
     /// Compute pipeline that performs per-subchunk frustum + Hi-Z culling.
     cull_pipeline: wgpu::ComputePipeline,
@@ -216,13 +195,11 @@ pub struct IndirectManager {
     hiz_sampler: wgpu::Sampler,
 
     /// Free-list for vertex buffer regions, keyed by block size for O(log n) lookup.
-    free_vertex_blocks: BTreeMap<u32, Vec<FreeBlock>>,
+    free_quad_blocks: BTreeMap<u32, Vec<FreeBlock>>,
     /// Counts uploads/removals since the last free-list coalescing pass.
     coalesce_counter: usize,
     /// Maximum vertex count reserved by this manager.
-    max_vertices: usize,
-    /// Maximum index count reserved by this manager.
-    max_indices: usize,
+    max_quads: usize,
     /// Short label used in logs.
     label: &'static str,
 }
@@ -238,34 +215,26 @@ impl IndirectManager {
 
     /// Creates a new `IndirectManager` with a custom geometry budget.
     pub fn with_budget(device: &wgpu::Device, budget: IndirectBufferBudget) -> Self {
-        let max_vertices = budget.max_vertices();
-        let max_indices = budget.max_indices();
+        let max_quads = budget.max_vertices();
         let label = budget.label();
 
-        let unified_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{label} Unified Vertex Buffer")),
-            size: (max_vertices * size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let unified_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{label} Unified Index Buffer")),
-            size: (max_indices * size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        let unified_quad_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label} Unified Quad Buffer")),
+            size: (max_quads * size_of::<PackedQuad>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let draw_commands_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Draw Commands Buffer"),
-            size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
+            size: (MAX_SUBCHUNKS * size_of::<DrawIndirect>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let visible_draw_commands_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Visible Draw Commands Buffer"),
-            size: (MAX_SUBCHUNKS * size_of::<DrawIndexedIndirect>()) as u64,
+            size: (MAX_SUBCHUNKS * size_of::<DrawIndirect>()) as u64,
             usage: wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST,
@@ -405,16 +374,14 @@ impl IndirectManager {
         });
 
         Self {
-            unified_vertex_buffer,
-            unified_index_buffer,
+            unified_quad_buffer,
             draw_commands_buffer,
             visible_draw_commands_buffer,
             subchunk_meta_buffer,
             visible_count_buffer,
             visible_count_staging,
             allocations: FxHashMap::default(),
-            next_vertex_offset: 0,
-            next_index_offset: 0,
+            next_quad_offset: 0,
             active_subchunk_count: 0,
             max_slot_bound: 0,
             // Pre-populate the free-slot stack in reverse so slot 0 is popped first.
@@ -423,16 +390,14 @@ impl IndirectManager {
                 v.extend((0..MAX_SUBCHUNKS).rev());
                 v
             },
-            free_vertex_blocks: BTreeMap::new(),
-            free_index_blocks: BTreeMap::new(),
+            free_quad_blocks: BTreeMap::new(),
             cull_pipeline,
             cull_bind_group_layout,
             cull_bind_group: None,
             cull_uniforms_buffer,
             hiz_sampler,
             coalesce_counter: 0,
-            max_vertices,
-            max_indices,
+            max_quads,
             label,
         }
     }
@@ -490,130 +455,60 @@ impl IndirectManager {
         &mut self,
         queue: &wgpu::Queue,
         key: SubchunkKey,
-        vertices: &[Vertex],
-        indices: &[u32],
+        quads: &[PackedQuad],
         aabb: &AABB,
     ) -> bool {
         // Empty geometry means the subchunk should be removed.
-        if vertices.is_empty() || indices.is_empty() {
-            if let Some(old_alloc) = self.allocations.remove(&key) {
-                self.zero_metadata_slot(queue, old_alloc.slot_index);
-                if old_alloc.vertex_count > 0 {
-                    Self::add_free_block(
-                        &mut self.free_vertex_blocks,
-                        FreeBlock {
-                            offset: old_alloc.vertex_offset,
-                            count: old_alloc.vertex_count,
-                        },
-                    );
-                }
-                if old_alloc.index_count > 0 {
-                    Self::add_free_block(
-                        &mut self.free_index_blocks,
-                        FreeBlock {
-                            offset: old_alloc.index_offset,
-                            count: old_alloc.index_count,
-                        },
-                    );
-                }
-                self.free_slots.push(old_alloc.slot_index);
-                self.active_subchunk_count = self.allocations.len() as u32;
-                self.shrink_max_slot_bound_after_free(old_alloc.slot_index);
-                self.maybe_coalesce();
-            }
+        if quads.is_empty() {
+            self.remove_subchunk(queue, key);
             return true;
         }
 
         // Release the old allocation so its regions can be reused below.
         if let Some(old_alloc) = self.allocations.remove(&key) {
-            if old_alloc.vertex_count > 0 {
+            if old_alloc.quad_count > 0 {
                 Self::add_free_block(
-                    &mut self.free_vertex_blocks,
+                    &mut self.free_quad_blocks,
                     FreeBlock {
-                        offset: old_alloc.vertex_offset,
-                        count: old_alloc.vertex_count,
-                    },
-                )
-            }
-            if old_alloc.index_count > 0 {
-                Self::add_free_block(
-                    &mut self.free_index_blocks,
-                    FreeBlock {
-                        offset: old_alloc.index_offset,
-                        count: old_alloc.index_count,
+                        offset: old_alloc.quad_offset,
+                        count: old_alloc.quad_count,
                     },
                 );
             }
             self.free_slots.push(old_alloc.slot_index);
         }
 
-        let vertex_count = vertices.len() as u32;
-        let index_count = indices.len() as u32;
+        let quad_count = quads.len() as u32;
 
         // Try to reuse a free block; fall back to the high-water mark.
-        let vertex_alloc =
-            Self::find_and_remove_free_block(&mut self.free_vertex_blocks, vertex_count);
-        let index_alloc =
-            Self::find_and_remove_free_block(&mut self.free_index_blocks, index_count);
-
-        let (vertex_offset, reused_vertex) = match vertex_alloc {
+        let quad_alloc = Self::find_and_remove_free_block(&mut self.free_quad_blocks, quad_count);
+        let (quad_offset, reused_quad) = match quad_alloc {
             Some(block) => {
                 // Return the leftover tail of the block to the free list.
-                if block.count > vertex_count {
+                if block.count > quad_count {
                     Self::add_free_block(
-                        &mut self.free_vertex_blocks,
+                        &mut self.free_quad_blocks,
                         FreeBlock {
-                            offset: block.offset + vertex_count,
-                            count: block.count - vertex_count,
-                        },
-                    )
-                }
-                (block.offset, true)
-            }
-            None => {
-                if self.next_vertex_offset + vertex_count > self.max_vertices as u32 {
-                    log(
-                        LogLevel::Warning,
-                        &format!(
-                            "{} unified vertex buffer full ({}/{} vertices used), clearing indirect draw cache...",
-                            self.label, self.next_vertex_offset, self.max_vertices
-                        ),
-                    );
-                    self.clear_gpu_data(queue);
-                    return false;
-                }
-                (self.next_vertex_offset, false)
-            }
-        };
-
-        let (index_offset, reused_index) = match index_alloc {
-            Some(block) => {
-                // Return the leftover tail of the block to the free list.
-                if block.count > index_count {
-                    Self::add_free_block(
-                        &mut self.free_index_blocks,
-                        FreeBlock {
-                            offset: block.offset + index_count,
-                            count: block.count - index_count,
+                            offset: block.offset + quad_count,
+                            count: block.count - quad_count,
                         },
                     );
                 }
                 (block.offset, true)
             }
             None => {
-                if self.next_index_offset + index_count > self.max_indices as u32 {
+                if self.next_quad_offset + quad_count > self.max_quads as u32 {
                     log(
                         LogLevel::Warning,
                         &format!(
-                            "{} unified index buffer full ({}/{} indices used), clearing indirect draw cache...",
-                            self.label, self.next_index_offset, self.max_indices
+                            "{} unified quad buffer full ({}/{} quads used), clearing indirect draw cache...",
+                            self.label, self.next_quad_offset, self.max_quads
                         ),
                     );
                     self.clear_gpu_data(queue);
                     return false;
                 }
-                let offset = self.next_index_offset;
-                (offset, false)
+                (self.next_quad_offset, false)
             }
         };
 
@@ -629,27 +524,16 @@ impl IndirectManager {
         };
 
         let alloc = SubchunkAlloc {
-            vertex_offset,
-            vertex_count,
-            index_offset,
-            index_count,
+            quad_offset,
+            quad_count,
             slot_index,
         };
 
-        // Upload vertex data at the allocated offset.
-        let vertex_byte_offset = alloc.vertex_offset as u64 * size_of::<Vertex>() as u64;
+        let quad_byte_offset = alloc.quad_offset as u64 * size_of::<PackedQuad>() as u64;
         queue.write_buffer(
-            &self.unified_vertex_buffer,
-            vertex_byte_offset,
-            bytemuck::cast_slice(vertices),
-        );
-
-        // Upload index data at the allocated offset.
-        let index_byte_offset = alloc.index_offset as u64 * size_of::<u32>() as u64;
-        queue.write_buffer(
-            &self.unified_index_buffer,
-            index_byte_offset,
-            bytemuck::cast_slice(indices),
+            &self.unified_quad_buffer,
+            quad_byte_offset,
+            bytemuck::cast_slice(quads),
         );
 
         // Write the culling metadata for this slot.
@@ -657,7 +541,7 @@ impl IndirectManager {
             aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
             // Slot index is packed into the w component of aabb_max.
             aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, slot_index as f32],
-            draw_data: [index_count, alloc.index_offset, alloc.vertex_offset, 1],
+            draw_data: [quad_count * 6, alloc.quad_offset * 6, 0, 1],
         };
         let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
         queue.write_buffer(
@@ -667,11 +551,8 @@ impl IndirectManager {
         );
 
         // Advance the high-water marks only when no free block was reused.
-        if !reused_vertex {
-            self.next_vertex_offset += vertex_count;
-        }
-        if !reused_index {
-            self.next_index_offset += index_count;
+        if !reused_quad {
+            self.next_quad_offset += quad_count;
         }
         self.allocations.insert(key, alloc);
         self.active_subchunk_count = self.allocations.len() as u32;
@@ -696,21 +577,12 @@ impl IndirectManager {
             self.zero_metadata_slot(queue, alloc.slot_index);
             self.free_slots.push(alloc.slot_index);
 
-            if alloc.vertex_count > 0 {
+            if alloc.quad_count > 0 {
                 Self::add_free_block(
-                    &mut self.free_vertex_blocks,
+                    &mut self.free_quad_blocks,
                     FreeBlock {
-                        offset: alloc.vertex_offset,
-                        count: alloc.vertex_count,
-                    },
-                )
-            }
-            if alloc.index_count > 0 {
-                Self::add_free_block(
-                    &mut self.free_index_blocks,
-                    FreeBlock {
-                        offset: alloc.index_offset,
-                        count: alloc.index_count,
+                        offset: alloc.quad_offset,
+                        count: alloc.quad_count,
                     },
                 );
             }
@@ -794,8 +666,7 @@ impl IndirectManager {
 
         self.coalesce_counter += 1;
         if self.coalesce_counter >= COALESCE_THRESHOLD {
-            Self::coalesce_vertex_blocks(&mut self.free_vertex_blocks);
-            Self::coalesce_vertex_blocks(&mut self.free_index_blocks);
+            Self::coalesce_vertex_blocks(&mut self.free_quad_blocks);
             self.coalesce_counter = 0;
         }
     }
@@ -846,12 +717,10 @@ impl IndirectManager {
         }
 
         self.allocations.clear();
-        self.next_vertex_offset = 0;
-        self.next_index_offset = 0;
+        self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
         self.max_slot_bound = 0;
-        self.free_vertex_blocks.clear();
-        self.free_index_blocks.clear();
+        self.free_quad_blocks.clear();
 
         self.free_slots.clear();
         self.free_slots.extend((0..MAX_SUBCHUNKS).rev());
@@ -924,7 +793,7 @@ impl IndirectManager {
         queue.write_buffer(uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         if let Some(bind_group) = bind_group {
-            let bytes_to_clear = (active as u64) * size_of::<DrawIndexedIndirect>() as u64;
+            let bytes_to_clear = (active as u64) * size_of::<DrawIndirect>() as u64;
             if bytes_to_clear > 0 {
                 encoder.clear_buffer(commands_buffer, 0, Some(bytes_to_clear));
             }
@@ -941,14 +810,14 @@ impl IndirectManager {
         }
     }
 
-    /// Returns a reference to the unified vertex buffer.
-    pub fn vertex_buffer(&self) -> &wgpu::Buffer {
-        &self.unified_vertex_buffer
+    /// Returns the compact descriptor buffer consumed by vertex-pulling shaders.
+    pub fn quad_buffer(&self) -> &wgpu::Buffer {
+        &self.unified_quad_buffer
     }
 
-    /// Returns a reference to the unified index buffer.
-    pub fn index_buffer(&self) -> &wgpu::Buffer {
-        &self.unified_index_buffer
+    /// Returns metadata indexed by `first_instance` in the draw command.
+    pub fn subchunk_meta_buffer(&self) -> &wgpu::Buffer {
+        &self.subchunk_meta_buffer
     }
 
     /// Returns a reference to the visible (post-cull) indirect draw command buffer.
@@ -978,13 +847,11 @@ impl IndirectManager {
     /// the metadata slots.
     pub fn clear(&mut self) {
         self.allocations.clear();
-        self.next_vertex_offset = 0;
-        self.next_index_offset = 0;
+        self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
         self.max_slot_bound = 0;
         self.free_slots.clear();
         self.free_slots.extend((0..MAX_SUBCHUNKS).rev());
-        self.free_vertex_blocks.clear();
-        self.free_index_blocks.clear();
+        self.free_quad_blocks.clear();
     }
 }

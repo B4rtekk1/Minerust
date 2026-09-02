@@ -61,8 +61,8 @@ impl State {
                 return; // A newer block edit or neighbor change invalidated this mesh.
             }
             let aabb = subchunk.aabb;
-            subchunk.num_indices = result.terrain.1.len() as u32;
-            subchunk.num_water_indices = result.water.1.len() as u32;
+            subchunk.num_quads = result.terrain.len() as u32;
+            subchunk.num_water_quads = result.water.len() as u32;
             subchunk.mesh_dirty = false;
             aabb
         };
@@ -73,19 +73,14 @@ impl State {
             subchunk_y: sy,
         };
 
-        let terrain_uploaded = self.indirect_manager.upload_subchunk(
-            &self.queue,
-            key,
-            &result.terrain.0,
-            &result.terrain.1,
-            &aabb_copy,
-        );
+        let terrain_uploaded =
+            self.indirect_manager
+                .upload_subchunk(&self.queue, key, &result.terrain, &aabb_copy);
 
         let water_uploaded = self.water_indirect_manager.upload_subchunk(
             &self.queue,
             key,
-            &result.water.0,
-            &result.water.1,
+            &result.water,
             &aabb_copy,
         );
 

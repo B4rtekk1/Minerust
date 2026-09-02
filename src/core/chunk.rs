@@ -37,17 +37,17 @@ pub struct SubChunk {
     /// results cannot clear a newer dirty state.
     pub mesh_version: u64,
 
-    /// Number of solid-geometry indices in the current GPU mesh.
+    /// Number of solid-geometry quad descriptors in the current GPU mesh.
     ///
     /// Used by the render pass to issue the correct `draw_indexed` call.
     /// Zero when no mesh has been generated yet or the sub-chunk is empty.
-    pub num_indices: u32,
+    pub num_quads: u32,
 
-    /// Number of water-geometry indices in the current GPU mesh.
+    /// Number of water-geometry quad descriptors in the current GPU mesh.
     ///
-    /// Kept separate from [`Self::num_indices`] because water is rendered in a
+    /// Kept separate from [`Self::num_quads`] because water is rendered in a
     /// dedicated translucent pass.
-    pub num_water_indices: u32,
+    pub num_water_quads: u32,
 
     /// Axis-aligned bounding box in world space.
     ///
@@ -83,8 +83,8 @@ impl SubChunk {
             is_fully_opaque: false,
             mesh_dirty: true,
             mesh_version: 0,
-            num_indices: 0,
-            num_water_indices: 0,
+            num_quads: 0,
+            num_water_quads: 0,
             aabb: AABB::new(
                 Vec3::new(world_x as f32, world_y as f32, world_z as f32),
                 Vec3::new(

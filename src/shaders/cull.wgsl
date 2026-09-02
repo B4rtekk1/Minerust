@@ -4,11 +4,10 @@ struct SubchunkMeta {
     draw_data: vec4<u32>,
 }
 
-struct DrawIndexedIndirect {
-    index_count: u32,
+struct DrawIndirect {
+    vertex_count: u32,
     instance_count: u32,
-    first_index: u32,
-    base_vertex: i32,
+    first_vertex: u32,
     first_instance: u32,
 }
 
@@ -28,7 +27,7 @@ var<uniform> cull_uniforms: CullUniforms;
 var<storage, read> subchunks: array<SubchunkMeta>;
 
 @group(0) @binding(2)
-var<storage, read_write> draw_commands: array<DrawIndexedIndirect>;
+var<storage, read_write> draw_commands: array<DrawIndirect>;
 
 @group(0) @binding(3)
 var<storage, read_write> visible_count: atomic<u32>;
@@ -157,9 +156,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let slot = atomicAdd(&visible_count, 1u);
-    draw_commands[slot].index_count    = subchunk.draw_data.x;
+    draw_commands[slot].vertex_count   = subchunk.draw_data.x;
     draw_commands[slot].instance_count = 1u;
-    draw_commands[slot].first_index    = subchunk.draw_data.y;
-    draw_commands[slot].base_vertex    = i32(subchunk.draw_data.z);
-    draw_commands[slot].first_instance = 0u;
+    draw_commands[slot].first_vertex   = subchunk.draw_data.y;
+    draw_commands[slot].first_instance = idx;
 }

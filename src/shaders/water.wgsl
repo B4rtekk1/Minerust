@@ -33,10 +33,10 @@ struct Uniforms {
 @group(0) @binding(8) var scene_color: texture_2d<f32>;
 @group(0) @binding(10) var scene_sampler: sampler;
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) packed:   u32,
-};
+struct PackedQuad { origin_and_face: u32, size_material_ao: u32, }
+struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, draw_data: vec4<u32>, }
+@group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
+@group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -66,11 +66,23 @@ fn cheap_water_normal(world_xz: vec2<f32>, time: f32) -> vec3<f32> {
 }
 
 @vertex
-fn vs_water(model: VertexInput) -> VertexOutput {
+fn vs_water(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
     var out: VertexOutput;
-    var pos = model.position;
+    let quad = quads[vertex_id / 6u];
+    let corner_id = vertex_id % 6u;
+    let diagonal = (quad.origin_and_face >> 30u) & 0x1u;
+    let regular = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u)[corner_id];
+    let alternate = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u)[corner_id];
+    let corner = select(regular, alternate, diagonal == 1u);
+    let normal_index = (quad.origin_and_face >> 18u) & 0x7u;
+    let width = f32(quad.size_material_ao & 0x3fu) * 0.5;
+    let height = f32((quad.size_material_ao >> 6u) & 0x3fu) * 0.5;
+    let local_origin = vec3<f32>(f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu)) * 0.5;
+    let edge_u = array<vec3<f32>, 6>(vec3(0.,0.,1.), vec3(0.,0.,-1.), vec3(0.,0.,-1.), vec3(0.,0.,1.), vec3(-1.,0.,0.), vec3(1.,0.,0.))[normal_index];
+    let edge_v = array<vec3<f32>, 6>(vec3(0.,1.,0.), vec3(0.,1.,0.), vec3(1.,0.,0.), vec3(1.,0.,0.), vec3(0.,1.,0.), vec3(0.,1.,0.))[normal_index];
+    let corner_uv = array<vec2<f32>, 4>(vec2(0.,0.), vec2(1.,0.), vec2(1.,1.), vec2(0.,1.))[corner];
+    var pos = subchunks[subchunk_id].aabb_min.xyz + local_origin + edge_u * (corner_uv.x * width) + edge_v * (corner_uv.y * height);
 
-    let normal_index = model.packed & 0x7u;
     var normal = face_normal(normal_index);
 
     if normal_index == 3u {

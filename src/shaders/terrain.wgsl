@@ -77,10 +77,10 @@ fn fast_global_illumination(
     return mix(ambient, vec3<f32>(ambient_luma), vec3<f32>(night_neutralize));
 }
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) packed:   u32,
-};
+struct PackedQuad { origin_and_face: u32, size_material_ao: u32, }
+struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, draw_data: vec4<u32>, }
+@group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
+@group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -96,20 +96,60 @@ struct DepthVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 };
 
-@vertex
-fn vs_main(model: VertexInput) -> VertexOutput {
-    let n_idx   = model.packed & 0x7u;
-    let t_idx   = (model.packed >> 3u) & 0xFFu;
-    let uv_idx  = (model.packed >> 11u) & 0x3u;
-    let w_raw   = (model.packed >> 13u) & 0xFu;
-    let h_raw   = (model.packed >> 17u) & 0xFu;
-    let ao_raw  = (model.packed >> 21u) & 0x3u;
-    let r       = f32((model.packed >> 23u) & 0x7u) / 7.0;
-    let g       = f32((model.packed >> 26u) & 0x7u) / 7.0;
-    let b       = f32((model.packed >> 29u) & 0x7u) / 7.0;
+// Retained for dynamic/player models, which still use the shared Vertex buffer.
+struct LegacyVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) packed: u32,
+};
 
-    let width  = f32(w_raw + 1u);
-    let height = f32(h_raw + 1u);
+@vertex
+fn vs_legacy(model: LegacyVertexInput) -> VertexOutput {
+    let n_idx = model.packed & 0x7u;
+    let t_idx = (model.packed >> 3u) & 0xffu;
+    let uv_idx = (model.packed >> 11u) & 0x3u;
+    let ao_raw = (model.packed >> 21u) & 0x3u;
+    let width = f32(((model.packed >> 13u) & 0xfu) + 1u);
+    let height = f32(((model.packed >> 17u) & 0xfu) + 1u);
+    let color = vec3<f32>(
+        f32((model.packed >> 23u) & 0x7u) / 7.0,
+        f32((model.packed >> 26u) & 0x7u) / 7.0,
+        f32((model.packed >> 29u) & 0x7u) / 7.0,
+    );
+    let normals = array<vec3<f32>, 6>(
+        vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 0.),
+        vec3(0., 1., 0.), vec3(0., 0., -1.), vec3(0., 0., 1.),
+    );
+    let uvs = array<vec2<f32>, 4>(vec2(0., 0.), vec2(0., 1.), vec2(1., 1.), vec2(1., 0.));
+    var out: VertexOutput;
+    out.clip_position = uniforms.view_proj * vec4(model.position, 1.0);
+    out.world_pos = model.position;
+    out.normal = normals[n_idx % 6u];
+    out.color = color;
+    out.uv = uvs[uv_idx] * vec2(width, height);
+    out.tex_index = f32(t_idx);
+    out.ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
+    return out;
+}
+
+fn pulled_vertex(vertex_id: u32, subchunk_id: u32) -> VertexOutput {
+    let quad = quads[vertex_id / 6u];
+    let corner_id = vertex_id % 6u;
+    let diagonal = (quad.origin_and_face >> 30u) & 0x1u;
+    let regular = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u)[corner_id];
+    let alternate = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u)[corner_id];
+    let corner = select(regular, alternate, diagonal == 1u);
+    let n_idx = (quad.origin_and_face >> 18u) & 0x7u;
+    let t_idx = (quad.size_material_ao >> 12u) & 0xffu;
+    let width = f32(quad.size_material_ao & 0x3fu) * 0.5;
+    let height = f32((quad.size_material_ao >> 6u) & 0x3fu) * 0.5;
+    let ao_raw = (quad.size_material_ao >> (20u + corner * 2u)) & 0x3u;
+    let color_bits = (quad.origin_and_face >> 21u) & 0x1ffu;
+    let r = f32(color_bits & 0x7u) / 7.0;
+    let g = f32((color_bits >> 3u) & 0x7u) / 7.0;
+    let b = f32((color_bits >> 6u) & 0x7u) / 7.0;
+    let local_origin = vec3<f32>(
+        f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu),
+    ) * 0.5;
 
     let normals = array<vec3<f32>, 6>(
         vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
@@ -117,19 +157,20 @@ fn vs_main(model: VertexInput) -> VertexOutput {
         vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0),
     );
 
-    let uvs = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
-    );
+    let edge_u = array<vec3<f32>, 6>(vec3(0.,0.,1.), vec3(0.,0.,-1.), vec3(0.,0.,-1.), vec3(0.,0.,1.), vec3(-1.,0.,0.), vec3(1.,0.,0.))[n_idx];
+    let edge_v = array<vec3<f32>, 6>(vec3(0.,1.,0.), vec3(0.,1.,0.), vec3(1.,0.,0.), vec3(1.,0.,0.), vec3(0.,1.,0.), vec3(0.,1.,0.))[n_idx];
+    let position_corners = array<vec2<f32>, 4>(vec2(0.,0.), vec2(1.,0.), vec2(1.,1.), vec2(0.,1.));
+    let texture_corners = array<vec2<f32>, 4>(vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
+    let local_position = local_origin + edge_u * (position_corners[corner].x * width) + edge_v * (position_corners[corner].y * height);
+    let world_position = subchunks[subchunk_id].aabb_min.xyz + local_position;
 
     var out: VertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(model.position, 1.0);
-    out.world_pos     = model.position;
+    out.clip_position = uniforms.view_proj * vec4<f32>(world_position, 1.0);
+    out.world_pos     = world_position;
     out.normal        = normals[n_idx % 6u];
     out.color         = vec3<f32>(r, g, b);
 
-    let raw_uv = uvs[uv_idx % 4u];
-    out.uv = vec2<f32>(raw_uv.x * width, raw_uv.y * height);
+    out.uv = texture_corners[corner] * vec2(width, height);
 
     out.tex_index = f32(t_idx);
     out.ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
@@ -137,9 +178,14 @@ fn vs_main(model: VertexInput) -> VertexOutput {
 }
 
 @vertex
-fn vs_depth(model: VertexInput) -> DepthVertexOutput {
+fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
+    return pulled_vertex(vertex_id, subchunk_id);
+}
+
+@vertex
+fn vs_depth(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> DepthVertexOutput {
     var out: DepthVertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(model.position, 1.0);
+    out.clip_position = pulled_vertex(vertex_id, subchunk_id).clip_position;
     return out;
 }
 

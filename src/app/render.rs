@@ -353,7 +353,7 @@ impl State {
                         if subchunk.mesh_dirty && !self.mesh_loader.is_pending(cx, cz, sy as i32) {
                             meshes_to_request.push((cx, cz, sy as i32));
                         }
-                        if subchunk.num_indices > 0 || subchunk.num_water_indices > 0 {
+                        if subchunk.num_quads > 0 || subchunk.num_water_quads > 0 {
                             subchunks_rendered += 1;
                             chunk_has_visible = true;
                         }
@@ -468,17 +468,13 @@ impl State {
             opaque_pass.draw_indexed(0..6, 0, 0..1);
 
             // --- Terrain chunks (indirect) ---
-            // `multi_draw_indexed_indirect[_count]` emits one draw call per
+            // `multi_draw_indirect[_count]` emits one draw call per
             // visible chunk; the GPU cull pass already filtered the list.
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_vertex_buffer(0, self.indirect_manager.vertex_buffer().slice(..));
-            opaque_pass.set_index_buffer(
-                self.indirect_manager.index_buffer().slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
+            opaque_pass.set_bind_group(1, &self.terrain_quad_bind_group, &[]);
             if self.supports_indirect_count {
-                opaque_pass.multi_draw_indexed_indirect_count(
+                opaque_pass.multi_draw_indirect_count(
                     self.indirect_manager.draw_commands(),
                     0,
                     self.indirect_manager.visible_count_buffer(),
@@ -486,7 +482,7 @@ impl State {
                     self.indirect_manager.active_count(),
                 );
             } else {
-                opaque_pass.multi_draw_indexed_indirect(
+                opaque_pass.multi_draw_indirect(
                     self.indirect_manager.draw_commands(),
                     0,
                     self.indirect_manager.active_count(),
@@ -501,7 +497,7 @@ impl State {
                     &self.player_model_vertex_buffer,
                     &self.player_model_index_buffer,
                 ) {
-                    opaque_pass.set_pipeline(&self.render_pipeline);
+                    opaque_pass.set_pipeline(&self.player_model_pipeline);
                     opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                     opaque_pass.set_vertex_buffer(0, vb.slice(..));
                     opaque_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -581,14 +577,9 @@ impl State {
 
             transparent_pass.set_pipeline(&self.water_pipeline);
             transparent_pass.set_bind_group(0, &self.water_bind_group, &[]);
-            transparent_pass
-                .set_vertex_buffer(0, self.water_indirect_manager.vertex_buffer().slice(..));
-            transparent_pass.set_index_buffer(
-                self.water_indirect_manager.index_buffer().slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
+            transparent_pass.set_bind_group(1, &self.water_quad_bind_group, &[]);
             if self.supports_indirect_count {
-                transparent_pass.multi_draw_indexed_indirect_count(
+                transparent_pass.multi_draw_indirect_count(
                     self.water_indirect_manager.draw_commands(),
                     0,
                     self.water_indirect_manager.visible_count_buffer(),
@@ -596,7 +587,7 @@ impl State {
                     self.water_indirect_manager.active_count(),
                 );
             } else {
-                transparent_pass.multi_draw_indexed_indirect(
+                transparent_pass.multi_draw_indirect(
                     self.water_indirect_manager.draw_commands(),
                     0,
                     self.water_indirect_manager.active_count(),

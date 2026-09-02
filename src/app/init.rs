@@ -192,6 +192,15 @@ impl State {
             log(LogLevel::Info, "Adapter supports MULTI_DRAW_INDIRECT_COUNT");
         }
 
+        // Vertex pulling uses the metadata slot as `first_instance`; without
+        // this feature wgpu may legally ignore the non-zero value.
+        if adapter_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+            requested_features |= wgpu::Features::INDIRECT_FIRST_INSTANCE;
+            log(LogLevel::Info, "Adapter supports INDIRECT_FIRST_INSTANCE");
+        } else {
+            panic!("Packed terrain vertex pulling requires INDIRECT_FIRST_INSTANCE");
+        }
+
         let supports_shader_f16 = adapter_features.contains(wgpu::Features::SHADER_F16);
         if supports_shader_f16 {
             requested_features |= wgpu::Features::SHADER_F16;
@@ -666,6 +675,33 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
+        let quad_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Quad Vertex Pulling Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         // ------------------------------------------------------------------ //
         // Pipeline layouts
         // ------------------------------------------------------------------ //
@@ -680,14 +716,14 @@ impl State {
         let terrain_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Terrain Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout],
+                bind_group_layouts: &[&uniform_bind_group_layout, &quad_bind_group_layout],
                 immediate_size: 0,
             });
 
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Water Pipeline Layout"),
-                bind_group_layouts: &[&water_bind_group_layout],
+                bind_group_layouts: &[&water_bind_group_layout, &quad_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -705,7 +741,7 @@ impl State {
                 module: &terrain_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &terrain_shader,
@@ -738,6 +774,48 @@ impl State {
             multiview_mask: None,
         });
 
+        let player_model_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Player Model Pipeline"),
+                layout: Some(&pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &terrain_shader,
+                    entry_point: Some("vs_legacy"),
+                    compilation_options: Default::default(),
+                    buffers: &[Vertex::desc()],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &terrain_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: msaa_sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+            });
+
         // --- Water (translucent, alpha-blended) ---
         // No back-face culling so water surfaces are visible from below.
         // Depth writes are disabled: water contributes to color but must not
@@ -750,7 +828,7 @@ impl State {
                 module: &water_shader,
                 entry_point: Some("vs_water"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &water_shader,
@@ -1455,6 +1533,36 @@ impl State {
         // cull shader can sample it during the indirect dispatch.
         indirect_manager.update_bind_group(&device, &hiz_view);
         water_indirect_manager.update_bind_group(&device, &hiz_view);
+        let terrain_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Quad Vertex Pulling Bind Group"),
+            layout: &quad_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: indirect_manager.quad_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: indirect_manager.subchunk_meta_buffer().as_entire_binding(),
+                },
+            ],
+        });
+        let water_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Quad Vertex Pulling Bind Group"),
+            layout: &quad_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: water_indirect_manager.quad_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: water_indirect_manager
+                        .subchunk_meta_buffer()
+                        .as_entire_binding(),
+                },
+            ],
+        });
 
         // ------------------------------------------------------------------ //
         // Assemble and return State
@@ -1466,6 +1574,7 @@ impl State {
             queue,
             config,
             render_pipeline,
+            player_model_pipeline,
             water_pipeline,
             outline_pipeline,
             sun_pipeline,
@@ -1479,6 +1588,8 @@ impl State {
             show_crosshair: true,
             uniform_buffer,
             uniform_bind_group,
+            terrain_quad_bind_group,
+            water_quad_bind_group,
             depth_texture,
             msaa_texture_view,
             world,

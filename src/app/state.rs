@@ -75,6 +75,8 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Main opaque terrain render pipeline.
     pub render_pipeline: wgpu::RenderPipeline,
+    /// Legacy vertex-input pipeline used only by dynamic player models.
+    pub player_model_pipeline: wgpu::RenderPipeline,
     /// Transparent water render pipeline (blended over opaque geometry).
     pub water_pipeline: wgpu::RenderPipeline,
     /// 3-D block outline overlay pipeline.
@@ -114,6 +116,10 @@ pub struct State {
     pub uniform_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
+    /// Descriptor and subchunk metadata buffers for opaque terrain vertex pulling.
+    pub terrain_quad_bind_group: wgpu::BindGroup,
+    /// Descriptor and subchunk metadata buffers for water vertex pulling.
+    pub water_quad_bind_group: wgpu::BindGroup,
     /// Bind group for the water pass (SSR color/depth textures + sampler).
     pub water_bind_group: wgpu::BindGroup,
     /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
