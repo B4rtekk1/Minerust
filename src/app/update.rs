@@ -314,7 +314,15 @@ impl State {
         let mut write_ops = WorldWriteOps {
             completed_chunks: completed_chunks
                 .into_iter()
-                .map(|r| (r.cx, r.cz, r.chunk))
+                // A chunk can finish long after the player has moved away.
+                // Its pending entry was already released by `poll_results`, so
+                // discard it here instead of inserting, dirtying, meshing, and
+                // immediately evicting a column outside the current radius.
+                .filter(|result| {
+                    (result.cx - player_cx).abs() <= GENERATION_DISTANCE
+                        && (result.cz - player_cz).abs() <= GENERATION_DISTANCE
+                })
+                .map(|result| (result.cx, result.cz, result.chunk))
                 .collect(),
             block_break: None,
             block_places: Vec::new(),
