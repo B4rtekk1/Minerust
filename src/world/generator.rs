@@ -23,8 +23,6 @@ const TERRAIN_WARP_AMPLITUDE: f32 = 72.0;
 const RIVER_THRESHOLD_MIN: f32 = 0.875;
 const RIVER_THRESHOLD_MAX: f32 = 0.935;
 const LAKE_THRESHOLD: f32 = -0.69;
-const VALLEY_CUT_DEPTH: f64 = 16.0;
-const PLATEAU_TERRACE_STEP: f64 = 4.0;
 
 static CONTINENTAL_SPLINE: Lazy<TerrainSpline> = Lazy::new(TerrainSpline::continental);
 #[derive(Clone, Copy)]
@@ -56,7 +54,6 @@ struct TerrainNoiseSample {
     continental: f64,
     biome_continental: f32,
     terrain: f64,
-    detail: f64,
     temperature: f32,
     moisture: f32,
     river_value: f32,
@@ -509,7 +506,6 @@ impl ChunkGenerator {
             continental: self.noise_continents.get_noise_2d(wx, wz) as f64,
             biome_continental,
             terrain: self.noise_terrain.get_noise_2d(wx, wz) as f64,
-            detail: self.noise_detail.get_noise_2d(wx, wz) as f64,
             temperature: self.noise_temperature.get_noise_2d(wx, wz),
             moisture: self.noise_moisture.get_noise_2d(wx, wz),
             river_value: 1.0 - river_noise.abs() * 2.0,
@@ -669,19 +665,27 @@ impl ChunkGenerator {
     /// boundary stay in sync regardless of world position.
     fn terrain_shape(&self, noise: &TerrainNoiseSample) -> TerrainShape {
         let continentalness = noise.continental;
-        let erosion01 = ((noise.erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        let peak_signal = peaks_and_valleys(noise.weirdness);
+        let erosion = noise.erosion;
+        let pv = peaks_and_valleys(noise.weirdness);
         let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
-        let low_erosion = 1.0 - erosion01;
-        let mountain_strength = inland * low_erosion.powf(1.35) * peak_signal.max(0.0);
-        let base_height = CONTINENTAL_SPLINE.sample(continentalness);
-        // These are the three inputs of the density field. They are shaped
-        // independently so erosion changes more than just noise amplitude.
-        let offset = (base_height - SEA_LEVEL as f64) / 64.0
-            + mountain_strength * 0.44
-            + noise.terrain * (0.035 + mountain_strength * 0.06);
-        let factor = lerp(0.82, 1.55, mountain_strength) * lerp(0.94, 1.08, low_erosion);
-        let jaggedness = mountain_strength * (0.18 + (noise.ridged + 1.0) * 0.16);
+        let low_erosion = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
+        let mountain_strength = inland * low_erosion * pv.max(0.0);
+        let mut offset = self.shape_offset(continentalness, erosion, pv);
+        let mut factor = self.shape_factor(continentalness, erosion, pv);
+        let mut jaggedness = self.shape_jaggedness(continentalness, erosion, pv, noise.ridged);
+
+        // Every macro landform participates in the final density shape.
+        let river = self.river_channel_strength(noise) * (1.0 - mountain_strength * 0.78);
+        let lake = self.lake_strength(noise);
+        let valley = self.valley_strength(noise);
+        let plateau = self.plateau_strength(noise);
+        let ocean_factor = ((-continentalness - 0.42) / 0.58).clamp(0.0, 1.0);
+        let island = self.island_strength(noise) * ocean_factor;
+        offset -= river * 0.12 + lake * 0.17 + valley * 0.15;
+        offset += island * 0.60 + plateau * 0.05;
+        factor *= 1.0 - river * 0.18 - lake * 0.10 + plateau * 0.08;
+        jaggedness *= 1.0 - river * 0.70 - lake * 0.65;
+        offset += noise.terrain * (0.025 + mountain_strength * 0.045);
         TerrainShape {
             offset,
             factor,
@@ -689,43 +693,52 @@ impl ChunkGenerator {
         }
     }
 
+    fn shape_offset(&self, continentalness: f64, erosion: f64, pv: f64) -> f64 {
+        let continental = (CONTINENTAL_SPLINE.sample(continentalness) - SEA_LEVEL as f64) / 64.0;
+        let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
+        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
+        let eroded = lerp(-0.035, 0.055, pv.max(0.0));
+        let rough = lerp(-0.075, 0.40, pv.max(0.0));
+        continental + inland * lerp(eroded, rough, roughness)
+    }
+
+    fn shape_factor(&self, continentalness: f64, erosion: f64, pv: f64) -> f64 {
+        let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
+        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
+        let flat = lerp(0.76, 0.92, pv.max(0.0));
+        let rugged = lerp(0.96, 1.62, pv.max(0.0));
+        lerp(0.72, lerp(flat, rugged, roughness), inland)
+    }
+
+    fn shape_jaggedness(&self, continentalness: f64, erosion: f64, pv: f64, ridged: f64) -> f64 {
+        let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
+        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
+        inland * roughness * pv.max(0.0) * (0.10 + (ridged + 1.0) * 0.12)
+    }
+
     /// Terrain geometry is intentionally independent of the selected land
     /// biome.  A forest, desert or tundra may therefore occur on the same
     /// plains, valley, plateau or mountain terrain family.
-    fn preliminary_surface_level(&self, shape: &TerrainShape, noise: &TerrainNoiseSample) -> f64 {
-        // A preliminary level only bounds fast scans and surface features. It
-        // is not used to construct final terrain density.
-        let mut height = SEA_LEVEL as f64 + shape.offset * 64.0;
-
-        // Water forms are terrain cuts, never biome-specific terrain recipes.
-        if noise.biome_continental < -0.42 {
-            let ocean_factor = ((-(noise.biome_continental as f64) - 0.42) / 0.58).clamp(0.0, 1.0);
-            let island_core = smoothstep(((noise.island as f64 + 1.0) * 0.5 - 0.76) / 0.24);
-            let island_uplift = island_core * (1.0 - ocean_factor * 0.35) * 44.0;
-            height =
-                25.0 + (noise.continental + 1.0) * 0.5 * 18.0 + island_uplift + noise.detail * 2.5;
-        } else if noise.biome_continental < -0.18 {
-            height = SEA_LEVEL as f64 + noise.terrain * 3.0 + noise.detail * 1.5;
-        } else if noise.lake < LAKE_THRESHOLD && noise.biome_erosion > -0.35 {
-            let basin = ((LAKE_THRESHOLD as f64 - noise.lake as f64) / 0.22).clamp(0.0, 1.0);
-            height = lerp(
-                height,
-                SEA_LEVEL as f64 - 4.0 - basin * 7.0,
-                smoothstep(basin),
-            );
-        } else {
-            let channel = self.river_channel_strength(noise);
-            if channel > 0.0 {
-                height = lerp(height, SEA_LEVEL as f64 - 4.0, smoothstep(channel));
-            }
-            height = self.apply_landform_modifiers(height, noise);
-        }
-        height.clamp(2.0, (WORLD_HEIGHT - 2) as f64)
+    fn preliminary_surface_level(&self, shape: &TerrainShape, _noise: &TerrainNoiseSample) -> f64 {
+        // A prediction of the zero crossing of the same terrain shape, not a
+        // second geometry system with its own river/lake/island rules.
+        (SEA_LEVEL as f64 + shape.offset * 64.0).clamp(2.0, (WORLD_HEIGHT - 2) as f64)
     }
 
     fn river_channel_strength(&self, noise: &TerrainNoiseSample) -> f64 {
         let threshold = noise.river_threshold as f64;
         ((noise.river_value as f64 - threshold) / (1.0 - threshold).max(0.001)).clamp(0.0, 1.0)
+    }
+
+    fn lake_strength(&self, noise: &TerrainNoiseSample) -> f64 {
+        if noise.biome_continental <= -0.12 || noise.biome_erosion <= -0.35 {
+            return 0.0;
+        }
+        smoothstep(((LAKE_THRESHOLD as f64 - noise.lake as f64) / 0.22).clamp(0.0, 1.0))
+    }
+
+    fn island_strength(&self, noise: &TerrainNoiseSample) -> f64 {
+        smoothstep(((noise.island as f64 + 1.0) * 0.5 - 0.76) / 0.24)
     }
 
     fn valley_strength(&self, noise: &TerrainNoiseSample) -> f64 {
@@ -745,26 +758,6 @@ impl ChunkGenerator {
         smoothstep((raw_plateau - 0.58) / 0.32)
             * smoothstep((eroded_flatness - 0.35) / 0.45)
             * land_factor
-    }
-
-    fn terrace_height(&self, height: f64, step: f64) -> f64 {
-        (height / step).round() * step
-    }
-
-    fn apply_landform_modifiers(&self, height: f64, noise: &TerrainNoiseSample) -> f64 {
-        let mut adjusted = height;
-        let valley = self.valley_strength(noise);
-        if valley > 0.0 {
-            adjusted -= valley * VALLEY_CUT_DEPTH;
-        }
-
-        let plateau = self.plateau_strength(noise);
-        if plateau > 0.0 && adjusted > SEA_LEVEL as f64 + 8.0 {
-            let terraced = self.terrace_height(adjusted, PLATEAU_TERRACE_STEP);
-            adjusted = lerp(adjusted, terraced, (plateau * 0.68).clamp(0.0, 0.78));
-        }
-
-        adjusted
     }
 
     // ── Cave system ───────────────────────────────────────────────────────── //
