@@ -7,7 +7,7 @@ struct Uniforms {
     is_underwater:  f32,
     screen_size:    vec2<f32>,
     water_level:    f32,
-    reflection_mode: f32,
+    _pad_water:     f32,
     moon_position:  vec3<f32>,
     _pad1_moon:     f32,
     moon_intensity: f32,
@@ -262,6 +262,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist = length(in.world_pos.xz - uniforms.camera_pos.xz);
     let is_underwater = uniforms.is_underwater > 0.5;
 
+    let is_water = abs(in.tex_index - 5.0) < 0.5;
     var final_color = lit;
 
     if is_underwater {
@@ -283,6 +284,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             horizon_atmosphere(sun_dir, day_factor, twilight_factor),
             fog_amount * 0.88,
         );
+    }
+
+    // Water geometry is rendered by the alpha-blended water pipeline. Give it
+    // a stable blue tint and opacity independent of atlas filtering.
+    if is_water {
+        final_color = mix(final_color, vec3<f32>(0.03, 0.28, 0.85), 0.58);
+        return vec4<f32>(final_color, 0.65);
     }
 
     return vec4<f32>(final_color, 1.0);

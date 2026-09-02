@@ -166,10 +166,6 @@ impl State {
                         binding: 12,
                         resource: wgpu::BindingResource::Sampler(&self.flow_sampler),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: wgpu::BindingResource::TextureView(&self.ssr_color_view),
-                    },
                 ],
                 label: Some("water_bind_group"),
             });

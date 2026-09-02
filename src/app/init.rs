@@ -332,20 +332,14 @@ impl State {
             contents: bytemuck::cast_slice(&[Uniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 camera_pos: [0.0, 0.0, 0.0],
                 time: 0.0,
-                prev_time: 0.0,
-                frame_index: 0,
-                sssr_history_valid: 0,
-                _pad_sssr: 0,
                 sun_position: [0.4, -0.2, 0.3],
                 is_underwater: 0.0,
                 screen_size: [1920.0, 1080.0],
                 // Y coordinate (in world blocks) of the water surface.
                 water_level: SEA_LEVEL as f32 - 1.0,
-                // 1.0 = SSSR enabled, 0.0 = flat reflection fallback.
-                reflection_mode: 1.0,
+                _pad_water: 0.0,
                 moon_position: [-0.4, 0.2, -0.3],
                 _pad1_moon: 0.0,
                 moon_intensity: 0.0,
@@ -641,19 +635,6 @@ impl State {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
-                    // Denoised SSSR result.  Until the dedicated renderer is
-                    // wired into the frame graph this is initialized with the
-                    // opaque resolve, keeping the binding contract valid.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 13,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
                 ],
             });
 
@@ -691,10 +672,6 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: wgpu::BindingResource::Sampler(&flow_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 13,
-                    resource: wgpu::BindingResource::TextureView(&ssr_color_view),
                 },
             ],
             label: Some("water_bind_group"),
@@ -881,6 +858,50 @@ impl State {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: msaa_sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+        });
+
+        // --- Water (transparent geometry) ---
+        // Uses the terrain shader and mesh layout, but alpha-blends its blue
+        // water texels and does not write depth so terrain beneath remains visible.
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Pipeline"),
+            layout: Some(&terrain_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &terrain_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &terrain_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1651,6 +1672,7 @@ impl State {
             queue,
             config,
             render_pipeline,
+            water_pipeline,
             outline_pipeline,
             sun_pipeline,
             sky_pipeline,
@@ -1699,7 +1721,6 @@ impl State {
             game_state: GameState::Menu,
             has_entered_world: false,
             menu_state: MenuState::default(),
-            reflection_mode: 1,
             is_underwater: 0.0,
             sky_visibility: 1.0,
             remote_players: HashMap::new(),

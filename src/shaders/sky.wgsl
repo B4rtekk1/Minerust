@@ -7,7 +7,7 @@ struct Uniforms {
     is_underwater:  f32,
     _screen_size:   vec2<f32>,
     _water_level:   f32,
-    reflection_mode: f32,
+    _pad_water:     f32,
     moon_position:  vec3<f32>,
     _pad1_moon:     f32,
     moon_intensity: f32,

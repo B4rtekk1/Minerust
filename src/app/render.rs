@@ -396,18 +396,13 @@ impl State {
             bytemuck::cast_slice(&[Uniforms {
                 view_proj: view_proj_array,
                 inv_view_proj: inv_view_proj_array,
-                prev_view_proj: self.previous_view_proj.to_cols_array_2d(),
                 camera_pos: eye_pos.to_array(),
                 time,
-                prev_time: 0.0,
-                frame_index: 0,
-                sssr_history_valid: 0,
-                _pad_sssr: 0,
                 sun_position: [sun_x, sun_y, sun_z],
                 is_underwater,
                 screen_size: [self.config.width as f32, self.config.height as f32],
                 water_level: SEA_LEVEL as f32 - 1.0,
-                reflection_mode: self.reflection_mode as f32,
+                _pad_water: 0.0,
                 moon_position,
                 _pad1_moon: 0.0,
                 moon_intensity,
@@ -556,8 +551,10 @@ impl State {
                 );
             }
 
-            // Static water is rendered with the terrain shader and texture
-            // atlas. It has no wave, reflection, refraction or foam effect.
+            // Water shares the terrain shader and atlas, but uses its own
+            // alpha-blended pipeline so blocks underneath stay visible.
+            opaque_pass.set_pipeline(&self.water_pipeline);
+            opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             opaque_pass.set_bind_group(1, &self.water_quad_bind_group, &[]);
             if self.supports_indirect_count {
                 opaque_pass.multi_draw_indirect_count(

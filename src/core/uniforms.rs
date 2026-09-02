@@ -81,7 +81,6 @@ pub struct Uniforms {
     /// positions from NDC (e.g. in deferred or post-process passes).
     pub inv_view_proj: [[f32; 4]; 4],
 
-
     /// World-space camera position `[x, y, z]`.
     ///
     /// Packed with [`Self::time`] to fill a `vec4` alignment slot.
@@ -91,7 +90,6 @@ pub struct Uniforms {
     ///
     /// Used for animating effects such as water waves, wind, or sky scattering.
     pub time: f32,
-
 
     /// Normalized direction vector toward the sun `[x, y, z]` in world space.
     ///
@@ -114,13 +112,8 @@ pub struct Uniforms {
     /// Used by water shaders and above/below-surface transitions.
     pub water_level: f32,
 
-    /// Selects the active water reflection technique.
-    ///
-    /// Interpreted as an integer enum in shaders:
-    /// - `0.0` — no reflection
-    /// - `1.0` — planar reflection
-    /// - `1.0` — stochastic screen-space reflection (SSSR)
-    pub reflection_mode: f32,
+    /// Padding that aligns the following `vec3` field to 16 bytes for WGSL.
+    pub _pad_water: f32,
 
     /// Normalized direction vector toward the moon `[x, y, z]` in world space.
     ///
@@ -156,12 +149,4 @@ pub struct Uniforms {
 
     /// Explicit padding so the uniform block remains 16-byte aligned.
     pub _pad_uniforms: f32,
-
-    /// SSSR temporal state is appended so legacy shader uniform layouts stay
-    /// binary-compatible until they opt into these fields.
-    pub prev_view_proj: [[f32; 4]; 4],
-    pub prev_time: f32,
-    pub frame_index: u32,
-    pub sssr_history_valid: u32,
-    pub _pad_sssr: u32,
 }

@@ -244,7 +244,6 @@ fn write_clipboard_text(_text: &str) -> bool {
 /// | F3 | Toggle FPS/chunk debug overlay. |
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
-/// | R | Cycle water reflection mode (Off -> SSSR). |
 ///
 /// # Key bindings (menu)
 ///
@@ -549,19 +548,6 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     "Off"
                                 };
                                 log(LogLevel::Info, &format!("Debug overlay: {}", state_name));
-                            }
-
-                            KeyCode::KeyR if pressed => {
-                                // Cycle: 0 = Off, 1 = SSSR. Wraps with modulo
-                                // so adding more modes in the future only
-                                // requires extending the match arm below.
-                                state.reflection_mode = (state.reflection_mode + 1) % 2;
-                                let mode_name = match state.reflection_mode {
-                                    0 => "Off",
-                                    1 => "SSSR",
-                                    _ => "Unknown",
-                                };
-                                log(LogLevel::Info, &format!("Reflection mode: {}", mode_name));
                             }
 
                             // ---- F5: Save world to disk ---------------------

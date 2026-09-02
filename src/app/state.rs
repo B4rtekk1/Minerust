@@ -120,6 +120,8 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Main opaque terrain render pipeline.
     pub render_pipeline: wgpu::RenderPipeline,
+    /// Transparent water render pipeline.
+    pub water_pipeline: wgpu::RenderPipeline,
     /// 3-D block outline overlay pipeline.
     pub outline_pipeline: wgpu::RenderPipeline,
     /// Sun disc render pipeline.
@@ -335,10 +337,6 @@ pub struct State {
     pub terrain_quad_bind_group: wgpu::BindGroup,
     /// Storage bindings for procedural water quad expansion.
     pub water_quad_bind_group: wgpu::BindGroup,
-
-    // -------------------------------------------------------------------------
-    /// Active water reflection mode (`0 = off`, `1 = SSSR`).
-    pub reflection_mode: u32,
 
     // -------------------------------------------------------------------------
     // HUD: coordinate display
