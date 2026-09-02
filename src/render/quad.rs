@@ -14,6 +14,42 @@ pub struct PackedQuad {
 }
 
 impl PackedQuad {
+    /// Builds a terrain descriptor directly, without transient vertex or index
+    /// buffers. `origin` and dimensions are in half-block units relative to
+    /// the owning subchunk.
+    #[inline]
+    pub fn terrain(
+        origin: [u32; 3],
+        face: u8,
+        width: u32,
+        height: u32,
+        material: u8,
+        color: [u8; 3],
+        ao: [u8; 4],
+    ) -> Self {
+        let diagonal =
+            u32::from(u16::from(ao[0]) + u16::from(ao[2]) > u16::from(ao[1]) + u16::from(ao[3]));
+        let ao = ao.iter().enumerate().fold(0u32, |bits, (i, value)| {
+            bits | (u32::from((*value).min(3)) << (i * 2))
+        });
+        let color = u32::from(color[0].min(7))
+            | (u32::from(color[1].min(7)) << 3)
+            | (u32::from(color[2].min(7)) << 6);
+
+        Self {
+            origin_and_face: (origin[0].min(63))
+                | (origin[1].min(63) << 6)
+                | (origin[2].min(63) << 12)
+                | (u32::from(face & 0x7) << 18)
+                | (color << 21)
+                | (diagonal << 30),
+            size_material_ao: width.clamp(1, 63)
+                | (height.clamp(1, 63) << 6)
+                | (u32::from(material) << 12)
+                | (ao << 20),
+        }
+    }
+
     /// Converts one independently emitted legacy quad into its compact form.
     /// `vertices` must be in the source quad's v0..v3 order.
     pub fn from_vertices(vertices: &[Vertex], indices: &[u32], subchunk_origin: [i32; 3]) -> Self {
@@ -57,6 +93,36 @@ impl PackedQuad {
             size_material_ao: width | (height << 6) | (material << 12) | (ao << 20),
         }
     }
+}
+
+/// Appends one terrain quad directly to the compact descriptor stream.
+/// Coordinates are world-space block units; dimensions are half-block units.
+#[inline]
+pub fn emit_packed_quad(
+    quads: &mut Vec<PackedQuad>,
+    subchunk_origin: [i32; 3],
+    origin: [f32; 3],
+    face: u8,
+    width: u32,
+    height: u32,
+    material: u8,
+    color: [u8; 3],
+    ao: [u8; 4],
+) {
+    let half = |value: f32, axis: usize| {
+        let value = ((value - subchunk_origin[axis] as f32) * 2.0).round() as i32;
+        debug_assert!((0..64).contains(&value));
+        value.clamp(0, 63) as u32
+    };
+    quads.push(PackedQuad::terrain(
+        [half(origin[0], 0), half(origin[1], 1), half(origin[2], 2)],
+        face,
+        width,
+        height,
+        material,
+        color,
+        ao,
+    ));
 }
 
 /// Converts the legacy independently-emitted quad stream to descriptors.
@@ -103,6 +169,10 @@ mod tests {
             },
         ];
         let quad = PackedQuad::from_vertices(&vertices, &[0, 1, 3, 1, 2, 3], [0, 0, 0]);
+        let legacy_default = PackedQuad::from_vertices(&vertices, &[0, 1, 2, 0, 2, 3], [0, 0, 0]);
+        let direct = PackedQuad::terrain([2, 5, 6], 3, 1, 2, 42, [7, 3, 0], [0, 1, 2, 3]);
+        assert_eq!(legacy_default.origin_and_face, direct.origin_and_face);
+        assert_eq!(legacy_default.size_material_ao, direct.size_material_ao);
         assert_eq!(quad.origin_and_face & 0x3ffff, 2 | (5 << 6) | (6 << 12));
         assert_eq!(
             (
