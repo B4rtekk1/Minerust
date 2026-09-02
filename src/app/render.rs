@@ -236,10 +236,9 @@ impl State {
     /// 4. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
     ///    the opaque terrain and water indirect managers.
     /// 5. **Opaque pass** – sky dome -> terrain -> remote player models -> sun/moon.
-    ///    Resolves MSAA into `ssr_color_view` for later water reflections.
+    ///    Resolves MSAA into the scene-color target for compositing.
     /// 6. **Depth resolve compute** – resolves the multisampled depth buffer
-    ///    into `ssr_depth_view` (for water refraction) and the first Hi-Z mip
-    ///    level (for next-frame occlusion culling).
+    ///    into the first Hi-Z mip level for next-frame occlusion culling.
     /// 7. **Hi-Z generation** (compute) – downsamples the depth mip chain.
     /// 8. **Transparent pass** – water surfaces, alpha-blended on top of the
     ///    opaque result.  Resolves MSAA into `scene_color_view`.
@@ -529,7 +528,7 @@ impl State {
         // ── Opaque pass ───────────────────────────────────────────────────── //
         // Renders: upsampled sky → terrain chunks → remote player models → sun/moon.
         // Writes to the 4× MSAA color target which is resolved simultaneously
-        // into `ssr_color_view` (used by the water pass for reflections).
+        // into `scene_color_view` for post-processing.
         {
             let mut opaque_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Opaque Pass"),

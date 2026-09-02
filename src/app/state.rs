@@ -87,7 +87,7 @@ impl BlockPlacementState {
 ///   (`render_pipeline`, `sun_pipeline`, etc.).
 /// - **Static geometry buffers** – sun quad, crosshair.
 /// - **Uniforms & bind groups** – shared uniform buffer and per-pass bind groups.
-/// - **Render targets** – depth, MSAA, SSR, scene color, Hi-Z pyramid.
+/// - **Render targets** – depth, MSAA, scene color, Hi-Z pyramid.
 /// - **World & camera** – the shared `World` behind an `RwLock`, camera, and
 ///   input state.
 /// - **Frame timing & stats** – FPS counter, frame time, CPU update time.
@@ -99,7 +99,7 @@ impl BlockPlacementState {
 ///   for background meshing.
 /// - **Indirect rendering** – `IndirectManager` for terrain and water, Hi-Z
 ///   pipeline and bind groups.
-/// - **Post-processing** – composite pipeline and SSR resources.
+/// - **Post-processing** – composite pipeline and its scene-color target.
 pub struct State {
     // -------------------------------------------------------------------------
     // wgpu core
@@ -134,8 +134,8 @@ pub struct State {
     pub crosshair_pipeline: wgpu::RenderPipeline,
     /// Full-screen composite pipeline that resolves MSAA and applies post-FX.
     pub composite_pipeline: wgpu::RenderPipeline,
-    /// Compute pipeline that resolves the MSAA depth buffer into Hi-Z seed
-    /// level 0 and the single-sampled SSR depth texture.
+    /// Compute pipeline that resolves the MSAA depth buffer into the Hi-Z seed
+    /// level 0.
     pub depth_resolve_pipeline: wgpu::ComputePipeline,
 
     // -------------------------------------------------------------------------
@@ -161,12 +161,7 @@ pub struct State {
     pub uniform_buffer: wgpu::Buffer,
     /// Bind group that exposes `uniform_buffer` and the texture atlas to shaders.
     pub uniform_bind_group: wgpu::BindGroup,
-    /// Bind group for the water pass (SSR color/depth textures + sampler).
-    pub water_bind_group: wgpu::BindGroup,
-    /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
-    /// when the window resizes.
-    pub water_bind_group_layout: wgpu::BindGroupLayout,
-    /// Bind group for the composite pass (scene color + SSR resources).
+    /// Bind group for the composite pass (scene color).
     pub composite_bind_group: wgpu::BindGroup,
     /// Bind group for the main-menu background image composite pass.
     pub menu_composite_bind_group: wgpu::BindGroup,
@@ -195,16 +190,6 @@ pub struct State {
     pub menu_background_texture: wgpu::Texture,
     /// View of `menu_background_texture`.
     pub menu_background_view: wgpu::TextureView,
-    /// Color texture used as the SSR source (previous-frame or resolved).
-    pub ssr_color_texture: wgpu::Texture,
-    /// View of `ssr_color_texture`.
-    pub ssr_color_view: wgpu::TextureView,
-    /// Single-sampled depth buffer used by the SSR pass for ray-marching.
-    pub ssr_depth_texture: wgpu::Texture,
-    /// View of `ssr_depth_texture` as an `R32Float` texture.
-    pub ssr_depth_view: wgpu::TextureView,
-    /// Sampler used when reading SSR textures in the water and composite passes.
-    pub ssr_sampler: wgpu::Sampler,
     /// The 16-layer `Texture2DArray` holding all block textures.
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
     #[allow(dead_code)]
@@ -217,14 +202,6 @@ pub struct State {
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub texture_sampler: wgpu::Sampler,
-    /// Neutral flow-map texture used by the water shader.
-    /// Owned by `State` so the texture stays alive as long as the view.
-    #[allow(dead_code)]
-    pub flow_map_texture: wgpu::Texture,
-    /// View of the neutral flow-map texture.
-    pub flow_map_view: wgpu::TextureView,
-    /// Sampler used when reading the flow-map texture in the water shader.
-    pub flow_sampler: wgpu::Sampler,
 
     // -------------------------------------------------------------------------
     // Hi-Z (hierarchical depth) occlusion culling

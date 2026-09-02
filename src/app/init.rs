@@ -102,9 +102,8 @@ impl State {
     ///    `PresentMode::Immediate` (uncapped frame rate) with 4× MSAA.
     /// 4. **Shader compilation** – compiles all WGSL shaders (terrain, water,
     ///    sky, sun, UI, Hi-Z, depth-resolve, composite).
-    /// 5. **Buffers & textures** – allocates the uniform buffer,
-    ///    SSR color/depth targets, MSAA resolve targets, and the
-    ///    hierarchical-Z (Hi-Z) mip chain.
+    /// 5. **Buffers & textures** – allocates the uniform buffer, MSAA resolve
+    ///    targets, and the hierarchical-Z (Hi-Z) mip chain.
     /// 6. **Bind group layouts & bind groups** – wires textures, samplers, and
     ///    buffers to the correct shader bindings for each pipeline.
     /// 7. **Render pipelines** – builds one `RenderPipeline` per pass:
@@ -271,9 +270,7 @@ impl State {
         let msaa_sample_count: u32 = 4;
 
         // A multisampled Depth32Float texture is used for all geometry passes
-        // (terrain, water, sun, sky).  A separate single-sampled depth texture
-        // is used for SSR so that the water shader can sample the opaque scene
-        // depth at full precision.
+        // (terrain, water, sun, sky).
         let depth_texture = Self::create_depth_texture(&device, &config, msaa_sample_count);
         let msaa_texture_view =
             Self::create_msaa_texture(&device, &config, surface_format, msaa_sample_count);
@@ -455,235 +452,6 @@ impl State {
                     },
                 ],
             });
-
-        // ------------------------------------------------------------------ //
-        // SSR (Screen-Space Reflections) targets
-        // ------------------------------------------------------------------ //
-
-        // The terrain pass renders into these textures first.  The water
-        // shader then samples them to produce planar reflections of the scene
-        // above the water surface.
-        let ssr_color_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSR Color Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1, // SSR targets are single-sampled (no MSAA)
-            dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let ssr_color_view = ssr_color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let ssr_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSR Depth Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let ssr_depth_view = ssr_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Nearest-neighbor sampler for SSR lookups; bilinear filtering would
-        // blur the reflected image and cause incorrect depth comparisons.
-        let ssr_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("SSR Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
-        // Neutral flow map so the shader can enable distortion without an
-        // extra asset dependency.
-        let flow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Flow Map Texture"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &flow_map_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[128, 128, 128, 255],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        let flow_map_view = flow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let flow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Flow Sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
-
-        // ------------------------------------------------------------------ //
-        // Water bind group layout & bind group
-        // ------------------------------------------------------------------ //
-
-        // Extends the base uniform/atlas layout with SSR and flow-map bindings:
-        //   8 – SSR color texture (fragment)
-        //   9 – SSR depth texture  (fragment)
-        //   10 – SSR sampler       (fragment)
-        //   11 – flow map texture  (fragment)
-        //   12 – flow sampler      (fragment)
-        let water_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("water_bind_group_layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2Array,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    // SSR color – the opaque scene rendered before the water pass.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 8,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // SSR depth – used to detect where the reflection ray intersects
-                    // the opaque scene for refraction and ray termination.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 9,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // SSR sampler – nearest neighbor for correct texel fetches.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 10,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 11,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 12,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &water_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&texture_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&ssr_color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: wgpu::BindingResource::Sampler(&ssr_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::TextureView(&flow_map_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::Sampler(&flow_sampler),
-                },
-            ],
-            label: Some("water_bind_group"),
-        });
 
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &uniform_bind_group_layout,
@@ -1264,9 +1032,7 @@ impl State {
         // ------------------------------------------------------------------ //
 
         // After the MSAA opaque pass we resolve the multisampled depth buffer
-        // into two single-sampled outputs:
-        //   • `hiz_mips[0]`    – conservative max-depth seed for Hi-Z
-        //   • `ssr_depth_view` – closest-depth copy for water refraction
+        // into `hiz_mips[0]`, the conservative max-depth seed for Hi-Z.
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Resolve Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_resolve.wgsl").into()),
@@ -1287,16 +1053,6 @@ impl State {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::R32Float,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -1732,10 +1488,6 @@ impl State {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&hiz_mips[0]),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
-                },
             ],
         });
 
@@ -1833,16 +1585,6 @@ impl State {
             visible_chunk_columns: Vec::new(),
             visible_chunk_cache_center: (i32::MIN, i32::MIN),
             visible_chunk_columns_dirty: true,
-            ssr_color_texture,
-            ssr_color_view,
-            ssr_depth_texture,
-            ssr_depth_view,
-            ssr_sampler,
-            flow_map_texture,
-            flow_map_view,
-            flow_sampler,
-            water_bind_group,
-            water_bind_group_layout,
             surface_format,
             font_system,
             swash_cache,
@@ -1907,9 +1649,8 @@ impl State {
     /// - `config`       – Current surface configuration; width/height are read
     ///                    from here so the depth texture always matches the
     ///                    swap-chain resolution.
-    /// - `sample_count` – Number of MSAA samples.  Pass `1` for a
-    ///                    single-sampled texture (e.g., SSR targets) or `4`
-    ///                    for the main multisampled depth buffer.
+    /// - `sample_count` – Number of MSAA samples. Pass `4` for the main
+    ///                    multisampled depth buffer.
     ///
     /// # Returns
     /// A `TextureView` wrapping the newly created depth texture.
