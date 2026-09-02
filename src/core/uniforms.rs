@@ -81,6 +81,7 @@ pub struct Uniforms {
     /// positions from NDC (e.g. in deferred or post-process passes).
     pub inv_view_proj: [[f32; 4]; 4],
 
+
     /// World-space camera position `[x, y, z]`.
     ///
     /// Packed with [`Self::time`] to fill a `vec4` alignment slot.
@@ -90,6 +91,7 @@ pub struct Uniforms {
     ///
     /// Used for animating effects such as water waves, wind, or sky scattering.
     pub time: f32,
+
 
     /// Normalized direction vector toward the sun `[x, y, z]` in world space.
     ///
@@ -154,4 +156,12 @@ pub struct Uniforms {
 
     /// Explicit padding so the uniform block remains 16-byte aligned.
     pub _pad_uniforms: f32,
+
+    /// SSSR temporal state is appended so legacy shader uniform layouts stay
+    /// binary-compatible until they opt into these fields.
+    pub prev_view_proj: [[f32; 4]; 4],
+    pub prev_time: f32,
+    pub frame_index: u32,
+    pub sssr_history_valid: u32,
+    pub _pad_sssr: u32,
 }

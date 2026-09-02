@@ -4,6 +4,7 @@ pub mod indirect;
 pub mod mesh;
 pub mod mesh_loader;
 pub mod texture;
+pub mod sssr;
 
 pub mod atlas_map;
 
@@ -15,3 +16,4 @@ pub use mesh::{
 };
 pub use mesh_loader::MeshLoader;
 pub use texture::{generate_texture_atlas, load_texture_atlas_from_file};
+pub use sssr::SssrRenderer;

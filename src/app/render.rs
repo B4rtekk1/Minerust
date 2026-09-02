@@ -396,8 +396,13 @@ impl State {
             bytemuck::cast_slice(&[Uniforms {
                 view_proj: view_proj_array,
                 inv_view_proj: inv_view_proj_array,
+                prev_view_proj: self.previous_view_proj.to_cols_array_2d(),
                 camera_pos: eye_pos.to_array(),
                 time,
+                prev_time: 0.0,
+                frame_index: self.frame_count,
+                sssr_history_valid: 0,
+                _pad_sssr: 0,
                 sun_position: [sun_x, sun_y, sun_z],
                 is_underwater,
                 screen_size: [self.config.width as f32, self.config.height as f32],

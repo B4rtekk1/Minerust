@@ -338,8 +338,13 @@ impl State {
             contents: bytemuck::cast_slice(&[Uniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 camera_pos: [0.0, 0.0, 0.0],
                 time: 0.0,
+                prev_time: 0.0,
+                frame_index: 0,
+                sssr_history_valid: 0,
+                _pad_sssr: 0,
                 sun_position: [0.4, -0.2, 0.3],
                 is_underwater: 0.0,
                 screen_size: [1920.0, 1080.0],
@@ -640,6 +645,19 @@ impl State {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Denoised SSSR result.  Until the dedicated renderer is
+                    // wired into the frame graph this is initialized with the
+                    // opaque resolve, keeping the binding contract valid.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -677,6 +695,10 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: wgpu::BindingResource::Sampler(&flow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&ssr_color_view),
                 },
             ],
             label: Some("water_bind_group"),

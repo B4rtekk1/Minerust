@@ -1,0 +1,5 @@
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var raw: texture_2d<f32>; @group(0) @binding(2) var prev_hist: texture_2d<f32>;
+@group(0) @binding(3) var motion: texture_2d<f32>; @group(0) @binding(4) var material: texture_2d<f32>;
+@group(0) @binding(5) var next_hist: texture_storage_2d<rgba16float,write>; @group(0) @binding(6) var moments: texture_storage_2d<rg16float,write>;
+@compute @workgroup_size(8,8) fn main(@builtin(global_invocation_id) id:vec3<u32>){let s=textureDimensions(raw);if(any(id.xy>=s)){return;}let p=vec2<i32>(id.xy);let cur=textureLoad(raw,p,0);let m=textureLoad(material,p,0);if(m.y<.5){textureStore(next_hist,p,vec4(0.));textureStore(moments,p,vec4(0.));return;}let v=textureLoad(motion,p,0).xy;let pp=clamp(vec2<i32>((vec2<f32>(id.xy)+v*vec2<f32>(s))),vec2(0),vec2<i32>(s)-1);let old=textureLoad(prev_hist,pp,0);let valid=select(0.,1.,u.sssr_history_valid!=0u && old.a>.001);let w=valid*(.86+.1*(1.-m.x))*select(0.,1.,cur.a>.02);let out=mix(cur,old,w);let l=dot(out.rgb,vec3(.2126,.7152,.0722));textureStore(next_hist,p,out);textureStore(moments,p,vec4(l,l*l,0.,0.));}

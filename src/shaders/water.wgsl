@@ -26,12 +26,18 @@ struct Uniforms {
     sky_visibility:  f32,
     menu_blur:       f32,
     _pad_uniforms:   f32,
+    prev_view_proj:  mat4x4<f32>,
+    prev_time:       f32,
+    frame_index:     u32,
+    sssr_history_valid: u32,
+    _pad_sssr:       u32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(8) var scene_color: texture_2d<f32>;
 @group(0) @binding(9) var scene_depth: texture_2d<f32>;
 @group(0) @binding(10) var scene_sampler: sampler;
+@group(0) @binding(13) var sssr_reflection: texture_2d<f32>;
 
 struct PackedQuad { origin_and_face: u32, size_material_ao: u32, color_flags: u32, _reserved: u32, }
 struct SubchunkMeta { world_origin: vec4<i32>, draw_data: vec4<u32>, }
@@ -42,6 +48,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos:   vec3<f32>,
     @location(1) wave_normal: vec3<f32>,
+    @location(2) previous_clip: vec4<f32>,
 };
 
 struct ScreenProjection {
@@ -149,8 +156,37 @@ fn vs_water(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subc
     }
 
     out.clip_position = uniforms.view_proj * vec4<f32>(pos, 1.0);
+    // Wave displacement is evaluated with the former phase too, so temporal
+    // SSSR tracks moving crests instead of treating them as disocclusions.
+    let saved_time = uniforms.time;
+    let phase_delta = (uniforms.prev_time - saved_time) * max(uniforms.wind_speed, 0.15);
+    let previous_pos = pos + vec3<f32>(0.0, sin(dot(pos.xz, wind_basis()[0]) * 0.42 - saved_time * max(uniforms.wind_speed, 0.15) * 0.72 + phase_delta) * 0.030 - sin(dot(pos.xz, wind_basis()[0]) * 0.42 - saved_time * max(uniforms.wind_speed, 0.15) * 0.72) * 0.030, 0.0);
+    out.previous_clip = uniforms.prev_view_proj * vec4<f32>(previous_pos, 1.0);
     out.world_pos = pos;
     out.wave_normal = normal;
+    return out;
+}
+
+struct SurfaceOutput {
+    @location(0) normal: vec4<f32>, @location(1) material: vec4<f32>,
+    @location(2) depth: vec4<f32>, @location(3) motion: vec4<f32>,
+};
+
+// A compact forward G-buffer for SSSR only.  It is deliberately not a
+// deferred renderer: opaque terrain remains on its existing forward path.
+@fragment
+fn fs_surface(in: VertexOutput) -> SurfaceOutput {
+    var out: SurfaceOutput;
+    let v = normalize(uniforms.camera_pos - in.world_pos);
+    var n = detailed_wave_normal(in.world_pos.xz, normalize(in.wave_normal), length(uniforms.camera_pos - in.world_pos));
+    if dot(n, v) < 0.0 { n = -n; }
+    let roughness = clamp(mix(0.06, 0.18, 1.0 - max(dot(v, n), 0.0)) + uniforms.rain_factor * 0.18, 0.02, 0.5);
+    let cur = in.clip_position.xy / max(in.clip_position.w, 0.0001);
+    let prev = in.previous_clip.xy / max(in.previous_clip.w, 0.0001);
+    out.normal = vec4<f32>(n * 0.5 + 0.5, 1.0);
+    out.material = vec4<f32>(roughness, 1.0, 0.0, 1.0);
+    out.depth = vec4<f32>(in.clip_position.z / max(in.clip_position.w, 0.0001), 0.0, 0.0, 1.0);
+    out.motion = vec4<f32>((cur - prev) * 0.5, 0.0, 1.0);
     return out;
 }
 
@@ -322,9 +358,10 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let reflection_dir = normalize(reflect(-view_dir, normal));
     let sky_reflection = sky_reflection_color(reflection_dir, sun_dir, moon_dir);
-    let ssr = trace_screen_reflection(in.world_pos + normal * 0.06, reflection_dir, roughness);
-    let ssr_weight = clamp(ssr.confidence * 1.20, 0.0, 1.0);
-    let reflected_scene = mix(sky_reflection * 0.82, ssr.color, ssr_weight);
+    let reflection_pixel = clamp(vec2<i32>(screen_uv * uniforms.screen_size), vec2<i32>(0), vec2<i32>(uniforms.screen_size) - 1);
+    let sssr = textureLoad(sssr_reflection, reflection_pixel, 0);
+    let ssr_weight = clamp(sssr.a, 0.0, 1.0);
+    let reflected_scene = mix(sky_reflection * 0.82, sssr.rgb, ssr_weight);
 
     let reflection_strength = clamp(0.24 + fresnel * 0.74, 0.0, 0.96);
     if uniforms.reflection_mode >= 0.5 {

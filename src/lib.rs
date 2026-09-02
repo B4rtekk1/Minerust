@@ -68,6 +68,7 @@ pub use render::{
     SubchunkKey, add_greedy_quad, add_quad, build_block_outline, build_crosshair,
     build_player_model, extract_frustum_planes, generate_texture_atlas,
     load_texture_atlas_from_file,
+    SssrRenderer,
 };
 pub use save::{DEFAULT_WORLD_FILE, SavedWorld, load_world, save_world};
 pub use vertex::OutlineVertex;
