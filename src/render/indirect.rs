@@ -77,10 +77,12 @@ pub struct DrawIndirect {
 pub struct SubchunkGpuMeta {
     /// World-space AABB minimum corner (w component unused, set to 0).
     pub aabb_min: [f32; 4],
-    /// World-space AABB maximum corner (w component stores the slot index).
+    /// World-space AABB maximum corner (w component unused).
     pub aabb_max: [f32; 4],
-    /// Packed draw arguments: `[vertex_count, first_vertex, unused, active]`.
-    pub draw_data: [u32; 4],
+    /// Terrain draw arguments: `[vertex_count, first_vertex, unused, active]`.
+    pub terrain_draw_data: [u32; 4],
+    /// Water draw arguments: `[vertex_count, first_vertex, unused, active]`.
+    pub water_draw_data: [u32; 4],
 }
 
 /// Uniform data consumed by the GPU culling compute shader.
@@ -122,8 +124,6 @@ struct SubchunkAlloc {
     quad_offset: u32,
     /// Number of quad descriptors belonging to this subchunk.
     quad_count: u32,
-    /// Slot in the `SubchunkGpuMeta` array assigned to this subchunk.
-    slot_index: usize,
 }
 
 /// A contiguous run of free elements inside a unified buffer.
@@ -154,7 +154,7 @@ pub struct IndirectManager {
     visible_draw_commands_buffer: wgpu::Buffer,
 
     /// Per-slot AABB and draw-argument metadata consumed by the culling shader.
-    subchunk_meta_buffer: wgpu::Buffer,
+    subchunk_meta_buffer: Option<wgpu::Buffer>,
 
     /// Atomic counter incremented by the culling shader for each visible subchunk.
     visible_count_buffer: wgpu::Buffer,
@@ -168,9 +168,11 @@ pub struct IndirectManager {
     next_quad_offset: u32,
     /// Number of subchunks currently allocated.
     active_subchunk_count: u32,
-    /// One past the highest slot index ever assigned; bounds the culling dispatch.
+    /// Shared culling slots. Only the terrain manager owns these; its metadata
+    /// contains draw ranges for both terrain and water.
+    cull_allocations: FxHashMap<SubchunkKey, usize>,
+    /// One past the highest culling slot, bounding the single dispatch.
     max_slot_bound: u32,
-    /// Stack of recycled metadata slot indices ready for reuse.
     free_slots: Vec<usize>,
 
     /// Free-list for index buffer regions, keyed by block size for O(log n) lookup.
@@ -238,11 +240,15 @@ impl IndirectManager {
             mapped_at_creation: false,
         });
 
-        let subchunk_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Subchunk Metadata Buffer"),
-            size: (MAX_SUBCHUNKS * size_of::<SubchunkGpuMeta>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        // Only the terrain manager owns the shared record buffer. Water uses
+        // that same buffer for vertex pulling and no longer allocates a copy.
+        let subchunk_meta_buffer = (label == IndirectBufferBudget::TERRAIN.label()).then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Shared Subchunk Metadata Buffer"),
+                size: (MAX_SUBCHUNKS * size_of::<SubchunkGpuMeta>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         let visible_count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -277,10 +283,8 @@ impl IndirectManager {
         // Bindings:
         //   0 – CullUniforms (uniform)
         //   1 – SubchunkGpuMeta array (read-only storage)
-        //   2 – visible draw commands output (read-write storage)
-        //   3 – visible count atomic (read-write storage)
-        //   4 – Hi-Z texture (non-filtered float)
-        //   5 – Hi-Z sampler (non-filtering)
+        //   2/3 – terrain draw commands and count; 4/5 – water equivalents
+        //   6 – Hi-Z texture (non-filtered float); 7 – Hi-Z sampler
         let cull_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Cull Bind Group Layout"),
@@ -328,6 +332,26 @@ impl IndirectManager {
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -336,7 +360,7 @@ impl IndirectManager {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 5,
+                        binding: 7,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                         count: None,
@@ -380,6 +404,7 @@ impl IndirectManager {
             allocations: FxHashMap::default(),
             next_quad_offset: 0,
             active_subchunk_count: 0,
+            cull_allocations: FxHashMap::default(),
             max_slot_bound: 0,
             // Pre-populate the free-slot stack in reverse so slot 0 is popped first.
             free_slots: {
@@ -404,7 +429,12 @@ impl IndirectManager {
     ///
     /// Must be called whenever the depth pyramid texture or its view changes
     /// (e.g. on window resize), before the next call to [`dispatch_culling`].
-    pub fn update_bind_group(&mut self, device: &wgpu::Device, hiz_view: &wgpu::TextureView) {
+    pub fn update_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        hiz_view: &wgpu::TextureView,
+        water: &IndirectManager,
+    ) {
         self.cull_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Cull Bind Group"),
             layout: &self.cull_bind_group_layout,
@@ -415,7 +445,7 @@ impl IndirectManager {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.subchunk_meta_buffer.as_entire_binding(),
+                    resource: self.subchunk_meta_buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -427,10 +457,18 @@ impl IndirectManager {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(hiz_view),
+                    resource: water.visible_draw_commands_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
+                    resource: water.visible_count_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(hiz_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
                     resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
                 },
             ],
@@ -454,7 +492,7 @@ impl IndirectManager {
         queue: &wgpu::Queue,
         key: SubchunkKey,
         quads: &[PackedQuad],
-        aabb: &AABB,
+        _aabb: &AABB,
     ) -> bool {
         // Empty geometry means the subchunk should be removed.
         if quads.is_empty() {
@@ -473,7 +511,6 @@ impl IndirectManager {
                     },
                 );
             }
-            self.free_slots.push(old_alloc.slot_index);
         }
 
         let quad_count = quads.len() as u32;
@@ -524,21 +561,9 @@ impl IndirectManager {
             }
         };
 
-        let slot_index = match self.free_slots.pop() {
-            Some(idx) => idx,
-            None => {
-                log(
-                    LogLevel::Warning,
-                    "No free metadata slots available; deferring this subchunk upload",
-                );
-                return false;
-            }
-        };
-
         let alloc = SubchunkAlloc {
             quad_offset,
             quad_count,
-            slot_index,
         };
 
         let quad_byte_offset = alloc.quad_offset as u64 * size_of::<PackedQuad>() as u64;
@@ -548,27 +573,12 @@ impl IndirectManager {
             bytemuck::cast_slice(quads),
         );
 
-        // Write the culling metadata for this slot.
-        let subchunk_meta = SubchunkGpuMeta {
-            aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
-            // Slot index is packed into the w component of aabb_max.
-            aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, slot_index as f32],
-            draw_data: [quad_count * 6, alloc.quad_offset * 6, 0, 1],
-        };
-        let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
-        queue.write_buffer(
-            &self.subchunk_meta_buffer,
-            meta_byte_offset as u64,
-            bytemuck::bytes_of(&subchunk_meta),
-        );
-
         // Advance the high-water marks only when no free block was reused.
         if !reused_quad {
             self.next_quad_offset += quad_count;
         }
         self.allocations.insert(key, alloc);
         self.active_subchunk_count = self.allocations.len() as u32;
-        self.max_slot_bound = self.max_slot_bound.max(slot_index as u32 + 1);
         self.maybe_coalesce();
         true
     }
@@ -636,13 +646,6 @@ impl IndirectManager {
                     .get_mut(&key)
                     .expect("live allocation disappeared");
                 alloc.quad_offset = next_offset;
-                let draw_data = [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1];
-                let draw_data_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>() + 32;
-                queue.write_buffer(
-                    &self.subchunk_meta_buffer,
-                    draw_data_offset as u64,
-                    bytemuck::cast_slice(&draw_data),
-                );
                 next_offset += old.quad_count;
             }
             self.next_quad_offset = next_offset;
@@ -667,22 +670,14 @@ impl IndirectManager {
         std::mem::take(&mut self.quad_buffer_rebind_pending)
     }
 
-    /// Returns the metadata slot index assigned to `key`, if it is allocated.
-    pub fn get_slot_index(&self, key: &SubchunkKey) -> Option<usize> {
-        self.allocations.get(key).map(|a| a.slot_index)
-    }
-
-    /// Frees all GPU resources belonging to `key` and zeros its metadata slot.
+    /// Frees geometry belonging to `key`. Shared culling metadata is updated by
+    /// `update_cull_subchunk` after both terrain and water allocations change.
     ///
     /// After this call the slot is returned to the free pool and may be reused
     /// by a subsequent [`upload_subchunk`].  Does nothing if `key` is not
     /// currently allocated.
-    pub fn remove_subchunk(&mut self, queue: &wgpu::Queue, key: SubchunkKey) {
+    pub fn remove_subchunk(&mut self, _queue: &wgpu::Queue, key: SubchunkKey) {
         if let Some(alloc) = self.allocations.remove(&key) {
-            // Zero the metadata slot so the culling shader ignores it.
-            self.zero_metadata_slot(queue, alloc.slot_index);
-            self.free_slots.push(alloc.slot_index);
-
             if alloc.quad_count > 0 {
                 Self::add_free_block(
                     &mut self.free_quad_blocks,
@@ -694,38 +689,77 @@ impl IndirectManager {
             }
 
             self.active_subchunk_count = self.allocations.len() as u32;
-            self.shrink_max_slot_bound_after_free(alloc.slot_index);
             self.maybe_coalesce();
         }
     }
 
-    /// Zeros one metadata slot so the culling shader ignores it.
-    fn zero_metadata_slot(&self, queue: &wgpu::Queue, slot_index: usize) {
-        let subchunk_meta = SubchunkGpuMeta {
-            aabb_min: [0.0; 4],
-            aabb_max: [0.0; 4],
-            draw_data: [0, 0, 0, 0],
+    /// Updates the single shared culling record for `key` after terrain and
+    /// water geometry have both been uploaded or removed.
+    pub fn update_cull_subchunk(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: SubchunkKey,
+        aabb: &AABB,
+        water: &IndirectManager,
+    ) {
+        let terrain_draw = self.allocations.get(&key).map(|alloc| {
+            [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1]
+        }).unwrap_or([0; 4]);
+        let water_draw = water.allocations.get(&key).map(|alloc| {
+            [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1]
+        }).unwrap_or([0; 4]);
+
+        let has_geometry = terrain_draw[3] != 0 || water_draw[3] != 0;
+        let slot_index = if has_geometry {
+            match self.cull_allocations.get(&key) {
+                Some(&slot) => slot,
+                None => match self.free_slots.pop() {
+                    Some(slot) => {
+                        self.cull_allocations.insert(key, slot);
+                        self.max_slot_bound = self.max_slot_bound.max(slot as u32 + 1);
+                        slot
+                    }
+                    None => {
+                        log(LogLevel::Warning, "No free shared culling metadata slots available");
+                        return;
+                    }
+                },
+            }
+        } else if let Some(slot) = self.cull_allocations.remove(&key) {
+            self.free_slots.push(slot);
+            self.max_slot_bound = self.cull_allocations.values().map(|slot| *slot as u32 + 1).max().unwrap_or(0);
+            slot
+        } else {
+            return;
         };
-        let meta_byte_offset = slot_index * size_of::<SubchunkGpuMeta>();
+
+        let meta = if has_geometry {
+            SubchunkGpuMeta {
+                aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
+                aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, 0.0],
+                terrain_draw_data: terrain_draw,
+                water_draw_data: water_draw,
+            }
+        } else {
+            SubchunkGpuMeta::zeroed()
+        };
         queue.write_buffer(
-            &self.subchunk_meta_buffer,
-            meta_byte_offset as u64,
-            bytemuck::bytes_of(&subchunk_meta),
+            self.subchunk_meta_buffer(),
+            (slot_index * size_of::<SubchunkGpuMeta>()) as u64,
+            bytemuck::bytes_of(&meta),
         );
     }
 
-    /// Keeps culling dispatches bounded by the highest currently allocated slot.
-    fn shrink_max_slot_bound_after_free(&mut self, freed_slot: usize) {
-        if self.max_slot_bound != freed_slot as u32 + 1 {
-            return;
-        }
-
-        self.max_slot_bound = self
-            .allocations
-            .values()
-            .map(|alloc| alloc.slot_index as u32 + 1)
-            .max()
-            .unwrap_or(0);
+    /// Removes a shared culling record once both geometry managers have freed it.
+    pub fn remove_cull_subchunk(&mut self, queue: &wgpu::Queue, key: SubchunkKey) {
+        let Some(slot) = self.cull_allocations.remove(&key) else { return; };
+        self.free_slots.push(slot);
+        self.max_slot_bound = self.cull_allocations.values().map(|slot| *slot as u32 + 1).max().unwrap_or(0);
+        queue.write_buffer(
+            self.subchunk_meta_buffer(),
+            (slot * size_of::<SubchunkGpuMeta>()) as u64,
+            bytemuck::bytes_of(&SubchunkGpuMeta::zeroed()),
+        );
     }
 
     /// Merges adjacent free blocks in `blocks` to reduce fragmentation.
@@ -808,23 +842,19 @@ impl IndirectManager {
     /// returns the caller must re-upload all subchunks from scratch.
     pub fn clear_gpu_data(&mut self, queue: &wgpu::Queue) {
         // Zero every live metadata slot so stale entries don't survive.
-        for alloc in self.allocations.values() {
-            let subchunk_meta = SubchunkGpuMeta {
-                aabb_min: [0.0; 4],
-                aabb_max: [0.0; 4],
-                draw_data: [0, 0, 0, 0],
-            };
-            let meta_byte_offset = alloc.slot_index * size_of::<SubchunkGpuMeta>();
+        for slot in self.cull_allocations.values() {
+            let meta_byte_offset = slot * size_of::<SubchunkGpuMeta>();
             queue.write_buffer(
-                &self.subchunk_meta_buffer,
+                self.subchunk_meta_buffer(),
                 meta_byte_offset as u64,
-                bytemuck::bytes_of(&subchunk_meta),
+                bytemuck::bytes_of(&SubchunkGpuMeta::zeroed()),
             );
         }
 
         self.allocations.clear();
         self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
+        self.cull_allocations.clear();
         self.max_slot_bound = 0;
         self.free_quad_blocks.clear();
 
@@ -834,8 +864,8 @@ impl IndirectManager {
 
     /// Uploads cull uniforms and dispatches the main camera culling compute pass.
     ///
-    /// Clears `visible_count_buffer` and the visible command buffer before
-    /// dispatching so that only subchunks that pass culling this frame are drawn.
+    /// Clears both visible-count and command buffers before dispatching so that
+    /// only subchunks that pass culling this frame are drawn.
     /// One workgroup of 64 threads is launched per 64 subchunk slots.
     ///
     /// Does nothing if no subchunks are currently allocated or if the bind
@@ -844,12 +874,18 @@ impl IndirectManager {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
+        water: &IndirectManager,
         view_proj: &glam::Mat4,
         frustum_planes: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
         hiz_size: [f32; 2],
         screen_size: [f32; 2],
     ) {
+        queue.write_buffer(&water.visible_count_buffer, 0, &0u32.to_le_bytes());
+        if !self.cull_allocations.is_empty() {
+            let bytes = self.max_slot_bound as u64 * size_of::<DrawIndirect>() as u64;
+            encoder.clear_buffer(&water.visible_draw_commands_buffer, 0, Some(bytes));
+        }
         self.dispatch_culling_into(
             encoder,
             queue,
@@ -883,7 +919,7 @@ impl IndirectManager {
     ) {
         queue.write_buffer(count_buffer, 0, &0u32.to_le_bytes());
 
-        if self.active_subchunk_count == 0 {
+        if self.cull_allocations.is_empty() {
             return;
         }
 
@@ -923,7 +959,7 @@ impl IndirectManager {
 
     /// Returns metadata indexed by `first_instance` in the draw command.
     pub fn subchunk_meta_buffer(&self) -> &wgpu::Buffer {
-        &self.subchunk_meta_buffer
+        self.subchunk_meta_buffer.as_ref().expect("only the shared terrain culler owns metadata")
     }
 
     /// Returns a reference to the visible (post-cull) indirect draw command buffer.
@@ -955,6 +991,7 @@ impl IndirectManager {
         self.allocations.clear();
         self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
+        self.cull_allocations.clear();
         self.max_slot_bound = 0;
         self.free_slots.clear();
         self.free_slots.extend((0..MAX_SUBCHUNKS).rev());

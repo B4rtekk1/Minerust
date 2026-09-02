@@ -1388,7 +1388,7 @@ impl State {
         // and a compute shader that populates them after the Hi-Z occlusion
         // cull step.  One manager for opaque terrain, one for water.
         let mut indirect_manager = IndirectManager::new(&device);
-        let mut water_indirect_manager =
+        let water_indirect_manager =
             IndirectManager::with_budget(&device, IndirectBufferBudget::WATER);
 
         // ------------------------------------------------------------------ //
@@ -1529,10 +1529,9 @@ impl State {
             ],
         });
 
-        // Give both indirect managers access to the Hi-Z texture so the GPU
-        // cull shader can sample it during the indirect dispatch.
-        indirect_manager.update_bind_group(&device, &hiz_view);
-        water_indirect_manager.update_bind_group(&device, &hiz_view);
+        // One cull bind group reads shared metadata and writes both command
+        // streams, so the AABB/Hi-Z test runs once per subchunk.
+        indirect_manager.update_bind_group(&device, &hiz_view, &water_indirect_manager);
         let terrain_quad_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Terrain Quad Vertex Pulling Bind Group"),
             layout: &quad_bind_group_layout,
@@ -1557,9 +1556,7 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: water_indirect_manager
-                        .subchunk_meta_buffer()
-                        .as_entire_binding(),
+                    resource: indirect_manager.subchunk_meta_buffer().as_entire_binding(),
                 },
             ],
         });

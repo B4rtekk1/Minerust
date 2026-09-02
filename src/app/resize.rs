@@ -221,12 +221,9 @@ impl State {
                     })
                     .collect();
 
-                // Rewire the indirect-draw managers so their cull compute
-                // shaders sample the new Hi-Z texture on the next frame.
+                // Rewire the shared cull pass to sample the new Hi-Z texture.
                 self.indirect_manager
-                    .update_bind_group(&self.device, &new_hiz_view);
-                self.water_indirect_manager
-                    .update_bind_group(&self.device, &new_hiz_view);
+                    .update_bind_group(&self.device, &new_hiz_view, &self.water_indirect_manager);
 
                 // Commit all new Hi-Z resources to State, dropping the old ones.
                 self.hiz_texture = hiz_texture;

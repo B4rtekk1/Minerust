@@ -404,15 +404,7 @@ impl State {
         self.indirect_manager.dispatch_culling(
             &mut encoder,
             &self.queue,
-            &view_proj,
-            &frustum_planes_array,
-            self.camera.position.into(),
-            hiz_size_f,
-            [self.config.width as f32, self.config.height as f32],
-        );
-        self.water_indirect_manager.dispatch_culling(
-            &mut encoder,
-            &self.queue,
+            &self.water_indirect_manager,
             &view_proj,
             &frustum_planes_array,
             self.camera.position.into(),

@@ -1,7 +1,8 @@
 struct SubchunkMeta {
     aabb_min: vec4<f32>,
     aabb_max: vec4<f32>,
-    draw_data: vec4<u32>,
+    terrain_draw_data: vec4<u32>,
+    water_draw_data: vec4<u32>,
 }
 
 struct DrawIndirect {
@@ -27,15 +28,21 @@ var<uniform> cull_uniforms: CullUniforms;
 var<storage, read> subchunks: array<SubchunkMeta>;
 
 @group(0) @binding(2)
-var<storage, read_write> draw_commands: array<DrawIndirect>;
+var<storage, read_write> terrain_draw_commands: array<DrawIndirect>;
 
 @group(0) @binding(3)
-var<storage, read_write> visible_count: atomic<u32>;
+var<storage, read_write> terrain_visible_count: atomic<u32>;
 
 @group(0) @binding(4)
-var hiz_texture: texture_2d<f32>;
+var<storage, read_write> water_draw_commands: array<DrawIndirect>;
 
 @group(0) @binding(5)
+var<storage, read_write> water_visible_count: atomic<u32>;
+
+@group(0) @binding(6)
+var hiz_texture: texture_2d<f32>;
+
+@group(0) @binding(7)
 var hiz_sampler: sampler;
 
 const FRUSTUM_CULL_MARGIN: f32 = 2.0;
@@ -140,7 +147,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let subchunk = subchunks[idx];
 
-    if subchunk.draw_data.w == 0u {
+    if subchunk.terrain_draw_data.w == 0u && subchunk.water_draw_data.w == 0u {
         return;
     }
 
@@ -155,9 +162,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let slot = atomicAdd(&visible_count, 1u);
-    draw_commands[slot].vertex_count   = subchunk.draw_data.x;
-    draw_commands[slot].instance_count = 1u;
-    draw_commands[slot].first_vertex   = subchunk.draw_data.y;
-    draw_commands[slot].first_instance = idx;
+    if subchunk.terrain_draw_data.w != 0u {
+        let slot = atomicAdd(&terrain_visible_count, 1u);
+        terrain_draw_commands[slot].vertex_count   = subchunk.terrain_draw_data.x;
+        terrain_draw_commands[slot].instance_count = 1u;
+        terrain_draw_commands[slot].first_vertex   = subchunk.terrain_draw_data.y;
+        terrain_draw_commands[slot].first_instance = idx;
+    }
+    if subchunk.water_draw_data.w != 0u {
+        let slot = atomicAdd(&water_visible_count, 1u);
+        water_draw_commands[slot].vertex_count   = subchunk.water_draw_data.x;
+        water_draw_commands[slot].instance_count = 1u;
+        water_draw_commands[slot].first_vertex   = subchunk.water_draw_data.y;
+        water_draw_commands[slot].first_instance = idx;
+    }
 }

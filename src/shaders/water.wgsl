@@ -34,7 +34,7 @@ struct Uniforms {
 @group(0) @binding(10) var scene_sampler: sampler;
 
 struct PackedQuad { origin_and_face: u32, size_material_ao: u32, }
-struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, draw_data: vec4<u32>, }
+struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, terrain_draw_data: vec4<u32>, water_draw_data: vec4<u32>, }
 @group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
 @group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
