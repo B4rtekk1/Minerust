@@ -677,7 +677,9 @@ impl ChunkGenerator {
         // Every macro landform participates in the final density shape.
         let river = self.river_channel_strength(noise) * (1.0 - mountain_strength * 0.78);
         let lake = self.lake_strength(noise);
-        let valley = self.valley_strength(noise);
+        // PV supplies the primary valleys; the independent valley field is
+        // only a subtle local accent rather than a second terrain system.
+        let valley = self.valley_strength(noise) * 0.25;
         let plateau = self.plateau_strength(noise);
         let ocean_factor = ((-continentalness - 0.42) / 0.58).clamp(0.0, 1.0);
         let island = self.island_strength(noise) * ocean_factor;
@@ -697,23 +699,52 @@ impl ChunkGenerator {
         let continental = (CONTINENTAL_SPLINE.sample(continentalness) - SEA_LEVEL as f64) / 64.0;
         let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
         let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        let eroded = lerp(-0.035, 0.055, pv.max(0.0));
-        let rough = lerp(-0.075, 0.40, pv.max(0.0));
-        continental + inland * lerp(eroded, rough, roughness)
+        continental + inland * self.pv_offset(pv, roughness)
     }
 
     fn shape_factor(&self, continentalness: f64, erosion: f64, pv: f64) -> f64 {
         let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
         let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        let flat = lerp(0.76, 0.92, pv.max(0.0));
-        let rugged = lerp(0.96, 1.62, pv.max(0.0));
-        lerp(0.72, lerp(flat, rugged, roughness), inland)
+        let eroded = self.pv_factor(pv, 0.76, 0.92);
+        let rugged = self.pv_factor(pv, 0.96, 1.62);
+        lerp(0.72, lerp(eroded, rugged, roughness), inland)
     }
 
     fn shape_jaggedness(&self, continentalness: f64, erosion: f64, pv: f64, ridged: f64) -> f64 {
         let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
         let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
         inland * roughness * pv.max(0.0) * (0.10 + (ridged + 1.0) * 0.12)
+    }
+
+    /// Piecewise PV spline: negative bands are valleys and lowlands, while
+    /// positive bands progress through hills into sharp peaks.
+    fn pv_offset(&self, pv: f64, roughness: f64) -> f64 {
+        if pv < -0.65 {
+            lerp(-0.18, -0.30, roughness)
+        } else if pv < -0.20 {
+            lerp(-0.08, -0.14, roughness)
+        } else if pv < 0.25 {
+            lerp(-0.02, 0.04, roughness)
+        } else if pv < 0.65 {
+            lerp(0.04, 0.22, roughness)
+        } else {
+            lerp(0.08, 0.45, roughness)
+        }
+    }
+
+    fn pv_factor(&self, pv: f64, smooth: f64, rugged: f64) -> f64 {
+        let band: f64 = if pv < -0.65 {
+            0.72
+        } else if pv < -0.20 {
+            0.84
+        } else if pv < 0.25 {
+            1.0
+        } else if pv < 0.65 {
+            1.12
+        } else {
+            1.28
+        };
+        lerp(smooth, rugged, ((band - 0.72) / 0.56).clamp(0.0, 1.0))
     }
 
     /// Terrain geometry is intentionally independent of the selected land
