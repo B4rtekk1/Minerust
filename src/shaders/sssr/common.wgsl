@@ -11,7 +11,11 @@ struct Uniforms {
 
 fn oct_decode(e: vec2<f32>) -> vec3<f32> {
     var n = vec3<f32>(e * 2.0 - 1.0, 1.0 - abs(e.x * 2.0 - 1.0) - abs(e.y * 2.0 - 1.0));
-    if n.z < 0.0 { n.xy = (1.0 - abs(n.yx)) * sign(n.xy); }
+    if n.z < 0.0 {
+        // WGSL does not permit assignment to a swizzle (`n.xy`).
+        let folded = (1.0 - abs(n.yx)) * sign(n.xy);
+        n = vec3<f32>(folded, n.z);
+    }
     return normalize(n);
 }
 fn reconstruct_world(uv: vec2<f32>, depth: f32, inv: mat4x4<f32>) -> vec3<f32> {

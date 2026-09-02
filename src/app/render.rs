@@ -399,9 +399,9 @@ impl State {
                 prev_view_proj: self.previous_view_proj.to_cols_array_2d(),
                 camera_pos: eye_pos.to_array(),
                 time,
-                prev_time: 0.0,
-                frame_index: self.frame_count,
-                sssr_history_valid: 0,
+                prev_time: self.previous_sssr_time,
+                frame_index: self.sssr.frame as u32,
+                sssr_history_valid: self.sssr.valid as u32,
                 _pad_sssr: 0,
                 sun_position: [sun_x, sun_y, sun_z],
                 is_underwater,
@@ -613,6 +613,15 @@ impl State {
                 let mip_height = (self.hiz_size[1] / div).max(1);
                 hiz_pass.dispatch_workgroups((mip_width + 15) / 16, (mip_height + 15) / 16, 1);
             }
+
+            self.sssr.record(
+                &self.queue,
+                &mut encoder,
+                &self.ssr_depth_texture,
+                &self.water_indirect_manager,
+                &self.water_quad_bind_group,
+                self.supports_indirect_count,
+            );
         }
 
         // ── Transparent (water) pass ──────────────────────────────────────── //
@@ -1288,6 +1297,7 @@ impl State {
             self.previous_hiz_camera_pos = eye_pos;
             self.previous_hiz_forward = camera_forward;
             self.hiz_history_valid = true;
+            self.previous_sssr_time = time;
         }
         Ok(())
     }

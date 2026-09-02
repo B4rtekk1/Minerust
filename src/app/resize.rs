@@ -101,7 +101,9 @@ impl State {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::R32Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             self.ssr_depth_view = self
@@ -170,6 +172,30 @@ impl State {
                     },
                 ],
                 label: Some("water_bind_group"),
+            });
+
+            // SSSR owns resolution-dependent surface/history targets, so it
+            // is rebuilt as one coherent set and the final water texture is
+            // rebound afterwards.
+            let water_quad_layout = self.water_pipeline.get_bind_group_layout(1);
+            self.sssr = minerust::SssrRenderer::new(
+                &self.device, &self.queue, [self.config.width, self.config.height],
+                &self.uniform_buffer, &water_quad_layout, &self.ssr_color_view, &self.ssr_depth_view,
+            );
+            self.previous_sssr_time = 0.0;
+            self.water_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("water_bind_group_sssr"), layout: &self.water_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.texture_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.texture_sampler) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.ssr_color_view) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssr_sampler) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.flow_map_view) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.flow_sampler) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&self.sssr.reflection_view) },
+                ],
             });
 
             // ── Depth-resolve bind group ──────────────────────────────────── //

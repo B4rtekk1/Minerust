@@ -494,7 +494,9 @@ impl State {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let ssr_depth_view = ssr_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1550,6 +1552,25 @@ impl State {
                 },
             ],
         });
+        let sssr = minerust::SssrRenderer::new(
+            &device, &queue, [config.width, config.height], &uniform_buffer,
+            &quad_bind_group_layout, &ssr_color_view, &ssr_depth_view,
+        );
+        // Replace the provisional binding-13 source with the denoised output.
+        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Bind Group (SSSR)"), layout: &water_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&texture_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&texture_sampler) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&ssr_color_view) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&ssr_depth_view) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&ssr_sampler) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&flow_map_view) },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&flow_sampler) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&sssr.reflection_view) },
+            ],
+        });
 
         // ------------------------------------------------------------------ //
         // Hierarchical-Z (Hi-Z) occlusion buffer
@@ -1832,6 +1853,8 @@ impl State {
             hiz_history_valid: false,
             depth_resolve_pipeline,
             depth_resolve_bind_group,
+            sssr,
+            previous_sssr_time: 0.0,
             supports_indirect_count,
             hotbar_slot: 0,
             hotbar_vertex_buffer: None,

@@ -12,6 +12,7 @@ use crate::multiplayer::protocol::Packet;
 use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, GpuFaceMesher, IndirectManager, InputState, World};
+use minerust::SssrRenderer;
 
 const MESH_UPLOAD_RING_REGIONS: usize = 3;
 const INITIAL_MESH_UPLOAD_REGION_SIZE: u64 = 8 * 1024 * 1024;
@@ -170,6 +171,10 @@ pub struct State {
     pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
+    /// Stochastic SSR resources and compute pipelines owned independently of
+    /// the occlusion Hi-Z pyramid.
+    pub sssr: SssrRenderer,
+    pub previous_sssr_time: f32,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
