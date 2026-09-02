@@ -181,12 +181,17 @@ fn fs_surface(in: VertexOutput) -> SurfaceOutput {
     var n = detailed_wave_normal(in.world_pos.xz, normalize(in.wave_normal), length(uniforms.camera_pos - in.world_pos));
     if dot(n, v) < 0.0 { n = -n; }
     let roughness = clamp(mix(0.06, 0.18, 1.0 - max(dot(v, n), 0.0)) + uniforms.rain_factor * 0.18, 0.02, 0.5);
-    let cur = in.clip_position.xy / max(in.clip_position.w, 0.0001);
-    let prev = in.previous_clip.xy / max(in.previous_clip.w, 0.0001);
+    // In the fragment stage, builtin position is in framebuffer space: xy are
+    // pixel coordinates and z is the rasterizer-produced depth in [0, 1].
+    // `previous_clip` remains a user varying in clip space.
+    let current_uv = in.clip_position.xy / uniforms.screen_size;
+    let prev_ndc = in.previous_clip.xy / max(in.previous_clip.w, 0.0001);
+    let previous_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
     out.normal = vec4<f32>(n * 0.5 + 0.5, 1.0);
     out.material = vec4<f32>(roughness, 1.0, 0.0, 1.0);
-    out.depth = vec4<f32>(in.clip_position.z / max(in.clip_position.w, 0.0001), 0.0, 0.0, 1.0);
-    out.motion = vec4<f32>((cur - prev) * 0.5, 0.0, 1.0);
+    out.depth = vec4<f32>(in.clip_position.z, 0.0, 0.0, 1.0);
+    // Temporal reprojection uses current UV + motion to find the prior UV.
+    out.motion = vec4<f32>(previous_uv - current_uv, 0.0, 1.0);
     return out;
 }
 

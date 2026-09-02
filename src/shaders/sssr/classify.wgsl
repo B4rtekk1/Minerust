@@ -9,7 +9,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
  let size=textureDimensions(normal_tex); if any(id.xy>=size){return;} let p=vec2<i32>(id.xy);
  let m=textureLoad(material_tex,p,0); textureStore(raw,p,vec4<f32>(0.0));
  if(m.y < .5 || u.reflection_mode < .5){return;}
- let rough=m.x; let rate=select(1u,2u,rough>.08); let rate2=select(rate,4u,rough>.18);
- if ((id.x % rate2)!=0u || (id.y % rate2)!=0u || rough>.42){return;}
+ // Keep one ray per water pixel while validating the raw intersection pass.
+ // Variable-rate classification needs reconstruction in the temporal stage.
  let i=atomicAdd(&ray_count,1u); rays[i]=id.y*size.x+id.x;
 }
