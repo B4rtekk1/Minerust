@@ -252,6 +252,10 @@ impl State {
                             binding: 1,
                             resource: wgpu::BindingResource::TextureView(&self.hiz_mips[0]),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
+                        },
                     ],
                 });
         }
