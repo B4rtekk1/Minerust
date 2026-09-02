@@ -7,7 +7,7 @@ struct Uniforms {
     is_underwater:  f32,
     _screen_size:   vec2<f32>,
     _water_level:   f32,
-    reflection_mode: f32,
+    _pad_water:     f32,
     moon_position:  vec3<f32>,
     _pad1_moon:     f32,
     moon_intensity: f32,
@@ -84,13 +84,18 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
-// Bazowy noise sinusoidalny (używany w fbm)
+// Smooth value noise. Unlike a sum of visible sine bands, this keeps cloud
+// silhouettes irregular and avoids the repeating "wavy" pattern at the horizon.
 fn base_noise(p: vec2<f32>) -> f32 {
-    let a = sin(dot(p, vec2<f32>(1.3, 1.7)) + 0.3) * 0.5 + 0.5;
-    let b = sin(dot(p, vec2<f32>(2.1, 1.2)) + 1.7) * 0.5 + 0.5;
-    let c = sin(dot(p, vec2<f32>(3.7, 2.9)) + 2.6) * 0.5 + 0.5;
-    let d = sin(dot(p, vec2<f32>(5.4, 4.1)) + 4.2) * 0.5 + 0.5;
-    return a * 0.34 + b * 0.26 + c * 0.22 + d * 0.18;
+    let cell = floor(p);
+    var f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    let a = hash21(cell);
+    let b = hash21(cell + vec2<f32>(1.0, 0.0));
+    let c = hash21(cell + vec2<f32>(0.0, 1.0));
+    let d = hash21(cell + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 // Fraktalny fbm — 5 oktaw; znacznie organiczniejszy wygląd chmur
@@ -210,7 +215,6 @@ fn sun_glow(view_dir: vec3<f32>, ap: AtmosParams) -> vec3<f32> {
 // Chmury z fbm (organiczniejszy wygląd) + stopniowe ściemnianie nocą
 // ---------------------------------------------------------------------------
 fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
-    // Stopniowe wygaszanie zamiast hard-return przy nocy
     let cloud_vis = clamp(ap.day * 1.4 + ap.dusk * 0.8 + ap.night * 0.12, 0.0, 1.0);
     if cloud_vis <= 0.001 { return vec3<f32>(0.0); }
 
@@ -221,14 +225,11 @@ fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
     let lat   = view_dir.y * 0.5 + 0.5;
     let p     = vec2<f32>(lon * 5.2 + time * 0.0025, lat * 2.2);
     let drift = vec2<f32>(time * 0.008, time * 0.003);
-
-    // fbm zamiast prostego base_noise — znacznie bardziej organiczne chmury
     let n       = fbm(p + drift * 0.18);
     let n2      = fbm(p * 1.8 - drift * 0.8);
 
-    // Stale pokrycie chmur; sky_visibility jest używane niżej do maskowania
-    // nieba w zamkniętych przestrzeniach, bez zmiany samego wzoru chmur.
-    let cov_thresh = 0.72;
+    let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
+    let cov_thresh = mix(0.72, 0.48, rain);
     let coverage = smoothstep(cov_thresh, cov_thresh + 0.28, n * 0.70 + n2 * 0.30);
     let wisps    = smoothstep(0.52, 0.78, fbm(p * 2.9 + drift * 1.3));
     let layer    = coverage * band * band;
@@ -238,16 +239,18 @@ fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
     let horizon_warm = vec3<f32>(1.0, 0.74, 0.50);
     let cloud_day    = vec3<f32>(0.90, 0.93, 0.97);
     let cloud_dim = vec3<f32>(0.48, 0.54, 0.65);
-    let cloud_night  = vec3<f32>(0.06, 0.08, 0.14);  // oświetlenie księżycowe
+    let cloud_night  = vec3<f32>(0.06, 0.08, 0.14);
+    let cloud_storm  = vec3<f32>(0.22, 0.26, 0.31);
     let dusk_tint    = mix(vec3<f32>(1.0, 0.64, 0.42), vec3<f32>(0.78, 0.36, 0.48), lat);
 
     var tint  = mix(cloud_dim, cloud_day, ap.day);
     tint      = mix(tint, cloud_night, ap.night * 0.85);
     tint      = mix(tint, dusk_tint,  ap.dusk * 0.75);
+    tint      = mix(tint, cloud_storm, rain * 0.88);
     tint     += horizon_warm * (1.0 - smoothstep(0.0, 0.20, abs(view_dir.y))) * ap.dusk * 0.16;
 
     return tint * layer * cloud_vis
-        * (0.24 + 0.34 * ap.day + sun_light * 0.20)
+        * (0.24 + 0.34 * ap.day + sun_light * 0.20) * mix(1.0, 1.32, rain)
         * (0.82 + wisps * 0.18);
 }
 
@@ -419,7 +422,10 @@ fn moon_disk(view_dir: vec3<f32>, ap: AtmosParams) -> vec3<f32> {
 }
 
 fn rainbow(view_dir: vec3<f32>, ap: AtmosParams) -> vec3<f32> {
-    let vis = smoothstep(0.02, 0.18, ap.sun_h) * smoothstep(0.55, 0.35, ap.sun_h);
+    let rain_vis = smoothstep(0.04, 0.42, uniforms.rain_factor)
+        * (1.0 - smoothstep(0.72, 1.0, uniforms.rain_factor));
+    let vis = smoothstep(0.02, 0.18, ap.sun_h)
+        * (1.0 - smoothstep(0.35, 0.55, ap.sun_h)) * rain_vis;
     if vis < 0.001 { return vec3<f32>(0.0); }
 
     let anti_sun  = normalize(vec3<f32>(-ap.sun_dir.x, ap.sun_dir.y, -ap.sun_dir.z));
@@ -469,17 +475,25 @@ fn fs_sky(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let open_sky = clamp(uniforms.sky_visibility, 0.0, 1.0)
         * select(0.0, 1.0, uniforms.camera_pos.y >= 0.0);
-    let night_sky = ap.night * open_sky;
+    let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
+    let celestial_visibility = open_sky * mix(1.0, 0.08, rain);
+    let night_sky = ap.night * celestial_visibility;
 
     var sky = atmospheric_gradient(view_dir, ap);
     sky    += atmospheric_scatter(view_dir, ap);
     sky    += horizon_haze(view_dir, ap);
-    sky    += sun_glow(view_dir, ap) * open_sky;
+    // Overcast weather keeps a brighter horizon and a darker zenith, matching
+    // the terrain fog while retaining enough contrast to read cloud layers.
+    let overcast_h = pow(clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0), 0.72);
+    let overcast = mix(vec3<f32>(0.43, 0.47, 0.51), vec3<f32>(0.15, 0.18, 0.23), overcast_h);
+    sky = mix(sky, overcast, rain * 0.74);
+
+    sky    += sun_glow(view_dir, ap) * celestial_visibility;
     sky    += cloud_layer(view_dir, ap, uniforms.time) * open_sky;
     sky    += star_field(view_dir, uniforms.time, night_sky);
     sky    += shooting_stars(view_dir, uniforms.time, night_sky);
     sky    += aurora(view_dir, uniforms.time, night_sky);
-    sky    += moon_disk(view_dir, ap) * open_sky;
+    sky    += moon_disk(view_dir, ap) * celestial_visibility;
     sky    += rainbow(view_dir, ap) * open_sky;
 
     if ap.dusk > 0.01 {

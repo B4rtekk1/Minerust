@@ -1,5 +1,66 @@
 use bytemuck::{Pod, Zeroable};
 
+/// Mutable GPU bookkeeping for one voxel subchunk.
+///
+/// The face-extraction compute pass uses this layout when writing persistent
+/// [`crate::core::quad::PackedQuad`] descriptors.  `quad_capacity` is supplied
+/// by the CPU allocator; the shader never writes past that range.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct GpuSubchunk {
+    pub voxel_offset: u32,
+    pub quad_offset: u32,
+    pub quad_count: u32,
+    pub quad_capacity: u32,
+    pub flags: u32,
+}
+
+/// One deferred copy from a frame upload staging buffer to a GPU buffer.
+///
+/// The source offset points into [`UploadBatch::data`]. All offsets and sizes
+/// are kept four-byte aligned, as required by `copy_buffer_to_buffer`.
+pub struct PendingCopy {
+    pub source_offset: u64,
+    pub destination: wgpu::Buffer,
+    pub destination_offset: u64,
+    pub size: u64,
+}
+
+/// CPU-side upload accumulator for one frame.
+///
+/// Mesh descriptors and their metadata are appended to one contiguous byte
+/// buffer. At the end of the frame update it is written once to a staging-ring
+/// region, then copied into the individual GPU buffers by a command encoder.
+#[derive(Default)]
+pub struct UploadBatch {
+    pub data: Vec<u8>,
+    pub copies: Vec<PendingCopy>,
+}
+
+impl UploadBatch {
+    /// Appends `data` and schedules its copy into `destination`.
+    pub fn push(&mut self, destination: &wgpu::Buffer, destination_offset: u64, data: &[u8]) {
+        debug_assert_eq!(destination_offset % wgpu::COPY_BUFFER_ALIGNMENT, 0);
+        debug_assert_eq!(data.len() as u64 % wgpu::COPY_BUFFER_ALIGNMENT, 0);
+
+        let alignment = wgpu::COPY_BUFFER_ALIGNMENT as usize;
+        let source_offset = (self.data.len() + alignment - 1) & !(alignment - 1);
+        self.data.resize(source_offset, 0);
+        self.data.extend_from_slice(data);
+        self.copies.push(PendingCopy {
+            source_offset: source_offset as u64,
+            destination: destination.clone(),
+            destination_offset,
+            size: data.len() as u64,
+        });
+    }
+
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.copies.clear();
+    }
+}
+
 /// Per-frame uniform data uploaded to the GPU at the start of each render pass.
 ///
 /// All matrices are stored in column-major order to match WGSL/GLSL conventions.
@@ -51,12 +112,10 @@ pub struct Uniforms {
     /// Used by water shaders and above/below-surface transitions.
     pub water_level: f32,
 
-    /// Selects the active water reflection technique.
+    /// Selects the active water-reflection technique.
     ///
-    /// Interpreted as an integer enum in shaders:
-    /// - `0.0` — no reflection
-    /// - `1.0` — planar reflection
-    /// - `1.0` — stochastic screen-space reflection (SSSR)
+    /// Kept in this slot to match the WGSL `Uniforms` layout used by the
+    /// current terrain and water renderers.
     pub reflection_mode: f32,
 
     /// Normalized direction vector toward the moon `[x, y, z]` in world space.

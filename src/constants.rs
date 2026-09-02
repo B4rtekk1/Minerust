@@ -1,4 +1,4 @@
-use crate::logger::{LogLevel, log};
+use crate::logger::{log, LogLevel};
 
 pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 16;
@@ -30,6 +30,16 @@ pub const ATLAS_SIZE: u32 = 4;
 
 pub const MAX_CHUNKS_PER_FRAME: usize = 8;
 pub const MAX_MESH_BUILDS_PER_FRAME: usize = 8;
+/// Maximum number of finished chunk columns committed to `World` in one
+/// frame. Generation remains asynchronous; this only spreads the expensive
+/// main-thread insertion, neighbour invalidation and visibility-cache rebuild
+/// over consecutive frames.
+pub const MAX_CHUNK_COMMITS_PER_FRAME: usize = 2;
+/// Maximum number of completed mesh results committed/uploaded per frame.
+/// A GPU face-mesh dispatch currently creates and submits a command buffer per
+/// result, so keeping this small prevents a completed-worker burst from
+/// stalling the render thread.
+pub const MAX_MESH_COMMITS_PER_FRAME: usize = 2;
 pub const ASYNC_WORKER_COUNT: usize = 4;
 
 pub const PLAYER_HEIGHT: f32 = 1.8;
