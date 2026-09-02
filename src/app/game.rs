@@ -629,8 +629,12 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                                             for ly in 0..SUBCHUNK_HEIGHT as usize {
                                                                 for lz in 0..CHUNK_SIZE as usize {
                                                                     if n < block_data.len() {
-                                                                        subchunk.blocks[lx][ly]
-                                                                            [lz] = block_data[n];
+                                                                        subchunk.set_block_raw(
+                                                                            lx as i32,
+                                                                            ly as i32,
+                                                                            lz as i32,
+                                                                            block_data[n],
+                                                                        );
                                                                         n += 1;
                                                                     }
                                                                 }

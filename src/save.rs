@@ -52,7 +52,7 @@ impl SavedWorld {
                 for lx in 0..CHUNK_SIZE as usize {
                     for ly in 0..SUBCHUNK_HEIGHT as usize {
                         for lz in 0..CHUNK_SIZE as usize {
-                            blocks.push(subchunk.blocks[lx][ly][lz]);
+                            blocks.push(subchunk.get_block(lx as i32, ly as i32, lz as i32));
                         }
                     }
                 }

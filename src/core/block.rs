@@ -6,9 +6,10 @@ use crate::constants::*;
 ///
 /// [`BlockType::Air`] is the default and represents empty space. Every other
 /// variant is a placeable, solid, or fluid block. The enum is `Copy` and fits
-/// in a single byte, making it cheap to store in the large 3-D arrays inside
-/// [`SubChunk`](crate::core::chunk::SubChunk).
+/// in a single byte, making it cheap to store in dense
+/// [`SubChunk`](crate::core::chunk::SubChunk) buffers.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum BlockType {
     /// Empty space. The default block for uninitialised chunks.
     #[default]

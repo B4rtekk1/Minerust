@@ -4,6 +4,20 @@ use crate::constants::*;
 use crate::core::block::BlockType;
 use crate::frustum::AABB;
 
+/// Number of blocks in one sub-chunk.
+pub const SUBCHUNK_BLOCK_COUNT: usize =
+    CHUNK_SIZE as usize * SUBCHUNK_HEIGHT as usize * CHUNK_SIZE as usize;
+
+/// Compact backing storage for a [`SubChunk`].
+///
+/// Newly created sub-chunks use `Uniform(Air)` and therefore do not allocate a
+/// 4 KiB block buffer. The buffer is materialized only when a write makes one
+/// block differ from the uniform value.
+pub enum SubChunkStorage {
+    Uniform(BlockType),
+    Dense(Box<[BlockType; SUBCHUNK_BLOCK_COUNT]>),
+}
+
 /// A fixed-height vertical slice of a [`Chunk`].
 ///
 /// The world is divided vertically into sub-chunks of height [`SUBCHUNK_HEIGHT`].
@@ -15,8 +29,8 @@ use crate::frustum::AABB;
 /// `[0, SUBCHUNK_HEIGHT)` on Y. Out-of-bounds reads return [`BlockType::Air`];
 /// out-of-bounds writes are silently ignored.
 pub struct SubChunk {
-    /// 3-D block array indexed as `blocks[x][y][z]` in local sub-chunk space.
-    pub blocks: [[[BlockType; CHUNK_SIZE as usize]; SUBCHUNK_HEIGHT as usize]; CHUNK_SIZE as usize],
+    /// Block storage indexed in x-major, then y, then z order.
+    storage: SubChunkStorage,
 
     /// `true` when every block in this sub-chunk is [`BlockType::Air`].
     ///
@@ -77,8 +91,7 @@ impl SubChunk {
         let world_z = chunk_z * CHUNK_SIZE;
 
         SubChunk {
-            blocks: [[[BlockType::Air; CHUNK_SIZE as usize]; SUBCHUNK_HEIGHT as usize];
-                CHUNK_SIZE as usize],
+            storage: SubChunkStorage::Uniform(BlockType::Air),
             is_empty: true,
             is_fully_opaque: false,
             mesh_dirty: true,
@@ -102,7 +115,7 @@ impl SubChunk {
     /// rather than panicking, making neighbor lookups safe without prior bounds checks.
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
-            self.blocks[x as usize][y as usize][z as usize]
+            self.block_at(Self::block_index(x as usize, y as usize, z as usize))
         } else {
             BlockType::Air
         }
@@ -116,10 +129,9 @@ impl SubChunk {
     /// a full scan is needed (e.g. after bulk edits).
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
-            if self.blocks[x as usize][y as usize][z as usize] == block {
+            if !self.write_block(Self::block_index(x as usize, y as usize, z as usize), block) {
                 return;
             }
-            self.blocks[x as usize][y as usize][z as usize] = block;
             self.mark_mesh_dirty();
             if block != BlockType::Air {
                 self.is_empty = false;
@@ -139,7 +151,7 @@ impl SubChunk {
     /// metadata is rebuilt once at the end via [`Chunk::rebuild_metadata`].
     pub fn set_block_raw(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
-            self.blocks[x as usize][y as usize][z as usize] = block;
+            self.write_block(Self::block_index(x as usize, y as usize, z as usize), block);
         }
     }
 
@@ -147,18 +159,20 @@ impl SubChunk {
     ///
     /// Prefer this over relying solely on the incremental flag when blocks may
     /// have been removed in bulk (e.g. world generation overwriting an existing
-    /// sub-chunk). Returns early on the first non-air block found.
+    /// sub-chunk). Uniform dense buffers are compacted back to `Uniform`.
     pub fn check_empty(&mut self) {
-        self.is_empty = true;
-        for x in 0..CHUNK_SIZE as usize {
-            for y in 0..SUBCHUNK_HEIGHT as usize {
-                for z in 0..CHUNK_SIZE as usize {
-                    if self.blocks[x][y][z] != BlockType::Air {
-                        self.is_empty = false;
-                        return;
-                    }
-                }
+        let uniform = match &self.storage {
+            SubChunkStorage::Uniform(block) => Some(*block),
+            SubChunkStorage::Dense(blocks) => {
+                let first = blocks[0];
+                blocks.iter().all(|&block| block == first).then_some(first)
             }
+        };
+        if let Some(block) = uniform {
+            self.storage = SubChunkStorage::Uniform(block);
+            self.is_empty = block == BlockType::Air;
+        } else {
+            self.is_empty = false;
         }
     }
 
@@ -168,17 +182,69 @@ impl SubChunk {
     /// [`BlockType::is_solid_opaque`]. Returns early on the first non-opaque
     /// block found. Call after generation or bulk edits that may change opacity.
     pub fn check_fully_opaque(&mut self) {
-        for x in 0..CHUNK_SIZE as usize {
-            for y in 0..SUBCHUNK_HEIGHT as usize {
-                for z in 0..CHUNK_SIZE as usize {
-                    if !self.blocks[x][y][z].is_solid_opaque() {
-                        self.is_fully_opaque = false;
-                        return;
-                    }
-                }
+        self.is_fully_opaque = match &self.storage {
+            SubChunkStorage::Uniform(block) => block.is_solid_opaque(),
+            SubChunkStorage::Dense(blocks) => blocks.iter().all(BlockType::is_solid_opaque),
+        };
+    }
+
+    fn block_index(x: usize, y: usize, z: usize) -> usize {
+        (x * SUBCHUNK_HEIGHT as usize + y) * CHUNK_SIZE as usize + z
+    }
+
+    fn block_at(&self, index: usize) -> BlockType {
+        match &self.storage {
+            SubChunkStorage::Uniform(block) => *block,
+            SubChunkStorage::Dense(blocks) => blocks[index],
+        }
+    }
+
+    /// Writes a validated flat index and returns whether its value changed.
+    fn write_block(&mut self, index: usize, block: BlockType) -> bool {
+        match &mut self.storage {
+            SubChunkStorage::Uniform(current) if *current == block => false,
+            SubChunkStorage::Uniform(current) => {
+                let mut dense = Box::new([*current; SUBCHUNK_BLOCK_COUNT]);
+                dense[index] = block;
+                self.storage = SubChunkStorage::Dense(dense);
+                true
+            }
+            SubChunkStorage::Dense(blocks) if blocks[index] == block => false,
+            SubChunkStorage::Dense(blocks) => {
+                blocks[index] = block;
+                true
             }
         }
-        self.is_fully_opaque = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_subchunk_does_not_allocate_dense_storage() {
+        let subchunk = SubChunk::new(0, 0, 0);
+        assert!(matches!(
+            subchunk.storage,
+            SubChunkStorage::Uniform(BlockType::Air)
+        ));
+    }
+
+    #[test]
+    fn different_write_materializes_and_empty_scan_compacts() {
+        let mut subchunk = SubChunk::new(0, 0, 0);
+        subchunk.set_block_raw(1, 2, 3, BlockType::Stone);
+        assert!(matches!(subchunk.storage, SubChunkStorage::Dense(_)));
+        assert_eq!(subchunk.get_block(1, 2, 3), BlockType::Stone);
+
+        subchunk.set_block_raw(1, 2, 3, BlockType::Air);
+        subchunk.check_empty();
+        assert!(subchunk.is_empty);
+        assert!(matches!(
+            subchunk.storage,
+            SubChunkStorage::Uniform(BlockType::Air)
+        ));
     }
 }
 
