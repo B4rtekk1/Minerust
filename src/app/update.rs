@@ -1,9 +1,10 @@
 use std::time::Instant;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME,
-    MAX_CHUNKS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT,
+    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME, MAX_CHUNKS_PER_FRAME,
+    MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, SubchunkKey,
 };
+use rustc_hash::FxHashSet;
 
 use crate::multiplayer::network::update_network;
 use crate::ui;
@@ -379,6 +380,34 @@ impl State {
                 newly_inserted_chunks.push((cx, cz));
             }
 
+            // Chunk columns committed together often share neighbors.  Build the
+            // complete invalidation set first, then advance each mesh revision
+            // exactly once so in-flight worker results are not needlessly made
+            // stale several times within this frame.
+            let mut dirty_this_frame = FxHashSet::default();
+            for &(cx, cz) in &newly_inserted_chunks {
+                for sy in 0..NUM_SUBCHUNKS {
+                    for (dirty_cx, dirty_cz) in [
+                        (cx, cz),
+                        (cx - 1, cz),
+                        (cx + 1, cz),
+                        (cx, cz - 1),
+                        (cx, cz + 1),
+                    ] {
+                        dirty_this_frame.insert(SubchunkKey {
+                            chunk_x: dirty_cx,
+                            chunk_z: dirty_cz,
+                            subchunk_y: sy,
+                        });
+                    }
+                }
+            }
+            for key in dirty_this_frame {
+                if let Some(chunk) = world.chunks.get_mut(&(key.chunk_x, key.chunk_z)) {
+                    chunk.subchunks[key.subchunk_y as usize].mark_mesh_dirty();
+                }
+            }
+
             if let Some((bx, by, bz)) = write_ops.block_break {
                 world.set_block_player(bx, by, bz, BlockType::Air);
                 if let Some(tx) = &self.network_tx {
@@ -429,12 +458,6 @@ impl State {
 
             if !newly_inserted_chunks.is_empty() || !removed_chunks.is_empty() {
                 self.visible_chunk_columns_dirty = true;
-            }
-
-            // A new chunk only changes X/Z boundaries, so dirty the affected
-            // subchunks directly instead of iterating every edge block.
-            for (cx, cz) in newly_inserted_chunks {
-                self.mark_chunk_column_and_neighbors_dirty(cx, cz);
             }
 
             self.remove_chunk_gpu_data(&removed_chunks);
@@ -489,24 +512,6 @@ impl State {
                     .remove_subchunk(&self.queue, key);
                 // Both geometry allocations are gone; remove their shared cull record.
                 self.indirect_manager.remove_cull_subchunk(&self.queue, key);
-            }
-        }
-    }
-
-    /// Marks the inserted chunk column and its four horizontal neighbors dirty
-    /// with a single world write lock.
-    fn mark_chunk_column_and_neighbors_dirty(&mut self, cx: i32, cz: i32) {
-        let mut world = self.world.write();
-
-        for sy in 0..NUM_SUBCHUNKS as usize {
-            if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
-                chunk.subchunks[sy].mark_mesh_dirty();
-            }
-
-            for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
-                if let Some(chunk) = world.chunks.get_mut(&(nx, nz)) {
-                    chunk.subchunks[sy].mark_mesh_dirty();
-                }
             }
         }
     }
