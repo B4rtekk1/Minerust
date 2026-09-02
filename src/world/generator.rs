@@ -25,6 +25,50 @@ const RIVER_THRESHOLD_MAX: f32 = 0.935;
 const LAKE_THRESHOLD: f32 = -0.69;
 
 static CONTINENTAL_SPLINE: Lazy<TerrainSpline> = Lazy::new(TerrainSpline::continental);
+static PV_OFFSET_ERODED: Lazy<TerrainSpline> = Lazy::new(|| {
+    TerrainSpline::new(&[
+        (-1.0, -0.18),
+        (-0.65, -0.12),
+        (-0.20, -0.06),
+        (0.0, 0.0),
+        (0.25, 0.04),
+        (0.65, 0.12),
+        (1.0, 0.22),
+    ])
+});
+static PV_OFFSET_RUGGED: Lazy<TerrainSpline> = Lazy::new(|| {
+    TerrainSpline::new(&[
+        (-1.0, -0.30),
+        (-0.65, -0.24),
+        (-0.20, -0.14),
+        (0.0, 0.04),
+        (0.25, 0.16),
+        (0.65, 0.32),
+        (1.0, 0.45),
+    ])
+});
+static PV_FACTOR_ERODED: Lazy<TerrainSpline> = Lazy::new(|| {
+    TerrainSpline::new(&[
+        (-1.0, 0.76),
+        (-0.65, 0.80),
+        (-0.20, 0.86),
+        (0.0, 0.90),
+        (0.25, 0.94),
+        (0.65, 1.02),
+        (1.0, 1.10),
+    ])
+});
+static PV_FACTOR_RUGGED: Lazy<TerrainSpline> = Lazy::new(|| {
+    TerrainSpline::new(&[
+        (-1.0, 0.96),
+        (-0.65, 1.02),
+        (-0.20, 1.10),
+        (0.0, 1.18),
+        (0.25, 1.30),
+        (0.65, 1.50),
+        (1.0, 1.62),
+    ])
+});
 #[derive(Clone, Copy)]
 struct TerrainShape {
     /// Vertical translation of the density field in normalized Y space.
@@ -705,9 +749,7 @@ impl ChunkGenerator {
     fn shape_factor(&self, continentalness: f64, erosion: f64, pv: f64) -> f64 {
         let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
         let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        let eroded = self.pv_factor(pv, 0.76, 0.92);
-        let rugged = self.pv_factor(pv, 0.96, 1.62);
-        lerp(0.72, lerp(eroded, rugged, roughness), inland)
+        lerp(0.72, self.pv_factor(pv, roughness), inland)
     }
 
     fn shape_jaggedness(&self, continentalness: f64, erosion: f64, pv: f64, ridged: f64) -> f64 {
@@ -719,32 +761,19 @@ impl ChunkGenerator {
     /// Piecewise PV spline: negative bands are valleys and lowlands, while
     /// positive bands progress through hills into sharp peaks.
     fn pv_offset(&self, pv: f64, roughness: f64) -> f64 {
-        if pv < -0.65 {
-            lerp(-0.18, -0.30, roughness)
-        } else if pv < -0.20 {
-            lerp(-0.08, -0.14, roughness)
-        } else if pv < 0.25 {
-            lerp(-0.02, 0.04, roughness)
-        } else if pv < 0.65 {
-            lerp(0.04, 0.22, roughness)
-        } else {
-            lerp(0.08, 0.45, roughness)
-        }
+        lerp(
+            PV_OFFSET_ERODED.sample(pv),
+            PV_OFFSET_RUGGED.sample(pv),
+            roughness,
+        )
     }
 
-    fn pv_factor(&self, pv: f64, smooth: f64, rugged: f64) -> f64 {
-        let band: f64 = if pv < -0.65 {
-            0.72
-        } else if pv < -0.20 {
-            0.84
-        } else if pv < 0.25 {
-            1.0
-        } else if pv < 0.65 {
-            1.12
-        } else {
-            1.28
-        };
-        lerp(smooth, rugged, ((band - 0.72) / 0.56).clamp(0.0, 1.0))
+    fn pv_factor(&self, pv: f64, roughness: f64) -> f64 {
+        lerp(
+            PV_FACTOR_ERODED.sample(pv),
+            PV_FACTOR_RUGGED.sample(pv),
+            roughness,
+        )
     }
 
     /// Terrain geometry is intentionally independent of the selected land
