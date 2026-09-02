@@ -136,7 +136,10 @@ impl State {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: self.indirect_manager.subchunk_meta_buffer().as_entire_binding(),
+                            resource: self
+                                .indirect_manager
+                                .subchunk_meta_buffer()
+                                .as_entire_binding(),
                         },
                     ],
                 });
@@ -192,9 +195,7 @@ impl State {
         }
 
         // --- 3. Chunk streaming ---
-        let completed_chunks = self
-            .chunk_loader
-            .poll_results(MAX_CHUNK_COMMITS_PER_FRAME);
+        let completed_chunks = self.chunk_loader.poll_results(MAX_CHUNK_COMMITS_PER_FRAME);
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;

@@ -2,7 +2,7 @@ use crate::constants::*;
 use crate::core::biome::Biome;
 use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
-use crate::render::quad::{emit_packed_quad, PackedQuad};
+use crate::render::quad::{PackedQuad, emit_packed_quad};
 use crate::world::generator::ChunkGenerator;
 use parking_lot::RwLock;
 use rand::random;

@@ -18,7 +18,7 @@ impl State {
     /// |---|---|
     /// | Surface configuration | Swap-chain must match the new pixel dimensions. |
     /// | Depth texture (MSAA) | Multisampled depth must match the color target size. |
-/// | MSAA color texture | Render target size changed. |
+    /// | MSAA color texture | Render target size changed. |
     /// | Half-resolution sky texture + bind group | Procedural sky target must follow surface size. |
     /// | `depth_resolve_bind_group` | References the new multisampled depth view. |
     /// | `glyphon` viewport | Text renderer needs the physical resolution for HiDPI. |
@@ -222,8 +222,11 @@ impl State {
                     .collect();
 
                 // Rewire the shared cull pass to sample the new Hi-Z texture.
-                self.indirect_manager
-                    .update_bind_group(&self.device, &new_hiz_view, &self.water_indirect_manager);
+                self.indirect_manager.update_bind_group(
+                    &self.device,
+                    &new_hiz_view,
+                    &self.water_indirect_manager,
+                );
 
                 // Commit all new Hi-Z resources to State, dropping the old ones.
                 self.hiz_texture = hiz_texture;

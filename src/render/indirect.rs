@@ -5,7 +5,7 @@ use crate::constants::{CHUNK_UNLOAD_DISTANCE, NUM_SUBCHUNKS};
 use crate::render::frustum::AABB;
 use crate::render::quad::PackedQuad;
 
-use crate::logger::{log, LogLevel};
+use crate::logger::{LogLevel, log};
 use std::collections::BTreeMap;
 
 /// Maximum number of subchunks that can be tracked simultaneously.
@@ -702,12 +702,16 @@ impl IndirectManager {
         aabb: &AABB,
         water: &IndirectManager,
     ) {
-        let terrain_draw = self.allocations.get(&key).map(|alloc| {
-            [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1]
-        }).unwrap_or([0; 4]);
-        let water_draw = water.allocations.get(&key).map(|alloc| {
-            [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1]
-        }).unwrap_or([0; 4]);
+        let terrain_draw = self
+            .allocations
+            .get(&key)
+            .map(|alloc| [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1])
+            .unwrap_or([0; 4]);
+        let water_draw = water
+            .allocations
+            .get(&key)
+            .map(|alloc| [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1])
+            .unwrap_or([0; 4]);
 
         let has_geometry = terrain_draw[3] != 0 || water_draw[3] != 0;
         let slot_index = if has_geometry {
@@ -720,14 +724,22 @@ impl IndirectManager {
                         slot
                     }
                     None => {
-                        log(LogLevel::Warning, "No free shared culling metadata slots available");
+                        log(
+                            LogLevel::Warning,
+                            "No free shared culling metadata slots available",
+                        );
                         return;
                     }
                 },
             }
         } else if let Some(slot) = self.cull_allocations.remove(&key) {
             self.free_slots.push(slot);
-            self.max_slot_bound = self.cull_allocations.values().map(|slot| *slot as u32 + 1).max().unwrap_or(0);
+            self.max_slot_bound = self
+                .cull_allocations
+                .values()
+                .map(|slot| *slot as u32 + 1)
+                .max()
+                .unwrap_or(0);
             slot
         } else {
             return;
@@ -752,9 +764,16 @@ impl IndirectManager {
 
     /// Removes a shared culling record once both geometry managers have freed it.
     pub fn remove_cull_subchunk(&mut self, queue: &wgpu::Queue, key: SubchunkKey) {
-        let Some(slot) = self.cull_allocations.remove(&key) else { return; };
+        let Some(slot) = self.cull_allocations.remove(&key) else {
+            return;
+        };
         self.free_slots.push(slot);
-        self.max_slot_bound = self.cull_allocations.values().map(|slot| *slot as u32 + 1).max().unwrap_or(0);
+        self.max_slot_bound = self
+            .cull_allocations
+            .values()
+            .map(|slot| *slot as u32 + 1)
+            .max()
+            .unwrap_or(0);
         queue.write_buffer(
             self.subchunk_meta_buffer(),
             (slot * size_of::<SubchunkGpuMeta>()) as u64,
@@ -959,7 +978,9 @@ impl IndirectManager {
 
     /// Returns metadata indexed by `first_instance` in the draw command.
     pub fn subchunk_meta_buffer(&self) -> &wgpu::Buffer {
-        self.subchunk_meta_buffer.as_ref().expect("only the shared terrain culler owns metadata")
+        self.subchunk_meta_buffer
+            .as_ref()
+            .expect("only the shared terrain culler owns metadata")
     }
 
     /// Returns a reference to the visible (post-cull) indirect draw command buffer.

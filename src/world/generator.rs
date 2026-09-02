@@ -9,8 +9,16 @@ use crate::world::spline::TerrainSpline;
 
 const BLEND_RADIUS: i32 = 11;
 const BLEND_SIGMA_SQ: f64 = (BLEND_RADIUS as f64 / 2.0) * (BLEND_RADIUS as f64 / 2.0);
-const BLEND_BUF_SIZE: usize = CHUNK_SIZE as usize + BLEND_RADIUS as usize * 2;
+/// Extra columns retained around a chunk after height smoothing.  Surface
+/// material selection needs a real neighbour on every side to calculate a
+/// slope; clamping to the chunk edge creates visible seams between chunks.
+const HEIGHT_MAP_BORDER: i32 = 1;
+// The noise buffer needs both the blend kernel margin and the retained slope
+// border, otherwise an edge slope sample would read beyond the buffer.
+const BLEND_BUF_SIZE: usize =
+    CHUNK_SIZE as usize + (BLEND_RADIUS as usize + HEIGHT_MAP_BORDER as usize) * 2;
 const BLEND_BUF_LEN: usize = BLEND_BUF_SIZE * BLEND_BUF_SIZE;
+const SMOOTHED_HEIGHT_MAP_SIZE: usize = CHUNK_SIZE as usize + HEIGHT_MAP_BORDER as usize * 2;
 const TERRAIN_WARP_FREQ: f32 = 0.005;
 const TERRAIN_WARP_Z_OFFSET: f32 = 200.0;
 const TERRAIN_WARP_AMPLITUDE: f32 = 72.0;
@@ -249,7 +257,8 @@ impl ChunkGenerator {
         //   Old: one biome/height noise batch per kernel sample and column.
         //   New: one padded buffer per chunk, then cheap arithmetic for blending.
         let buf_size = BLEND_BUF_SIZE;
-        let buf_offset = BLEND_RADIUS; // local index 0 == world (base - BLEND_RADIUS)
+        let buf_offset = BLEND_RADIUS + HEIGHT_MAP_BORDER;
+        // local index 0 == world (base - blend radius - retained slope border)
 
         let mut buf_biome = [Biome::Plains; BLEND_BUF_LEN];
         let mut buf_height = [0.0_f64; BLEND_BUF_LEN];
@@ -273,6 +282,29 @@ impl ChunkGenerator {
         // radius, cutting arithmetic without changing the blend profile.
         let mut biome_map = [[Biome::Plains; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
         let mut height_map = [[0i32; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
+        // Keep a one-column border of *smoothed* heights.  This costs only
+        // arithmetic (all noise is already in `buf_height`) and makes the
+        // slope at a chunk edge depend on the same world columns no matter
+        // which chunk is generated first.
+        let mut smoothed_height_map = [[0i32; SMOOTHED_HEIGHT_MAP_SIZE]; SMOOTHED_HEIGHT_MAP_SIZE];
+
+        for sample_x in -HEIGHT_MAP_BORDER..=(CHUNK_SIZE - 1 + HEIGHT_MAP_BORDER) {
+            for sample_z in -HEIGHT_MAP_BORDER..=(CHUNK_SIZE - 1 + HEIGHT_MAP_BORDER) {
+                let mut total_height = 0.0_f64;
+                let mut total_weight = 0.0_f64;
+
+                for sample in BLEND_SAMPLES.iter() {
+                    let bx = (sample_x + buf_offset + sample.dx) as usize;
+                    let bz = (sample_z + buf_offset + sample.dz) as usize;
+                    total_height += buf_height[bx * buf_size + bz] * sample.weight;
+                    total_weight += sample.weight;
+                }
+
+                smoothed_height_map[(sample_x + HEIGHT_MAP_BORDER) as usize]
+                    [(sample_z + HEIGHT_MAP_BORDER) as usize] =
+                    ((total_height / total_weight) as i32).clamp(1, WORLD_HEIGHT - 20);
+            }
+        }
 
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
@@ -281,18 +313,8 @@ impl ChunkGenerator {
                 let cz_buf = (lz + buf_offset) as usize;
                 biome_map[lx as usize][lz as usize] = buf_biome[cx_buf * buf_size + cz_buf];
 
-                let mut total_height = 0.0_f64;
-                let mut total_weight = 0.0_f64;
-
-                for sample in BLEND_SAMPLES.iter() {
-                    let bx = (lx + buf_offset + sample.dx) as usize;
-                    let bz = (lz + buf_offset + sample.dz) as usize;
-                    total_height += buf_height[bx * buf_size + bz] * sample.weight;
-                    total_weight += sample.weight;
-                }
-
-                height_map[lx as usize][lz as usize] =
-                    ((total_height / total_weight) as i32).clamp(1, WORLD_HEIGHT - 20);
+                height_map[lx as usize][lz as usize] = smoothed_height_map
+                    [(lx + HEIGHT_MAP_BORDER) as usize][(lz + HEIGHT_MAP_BORDER) as usize];
             }
         }
 
@@ -308,9 +330,10 @@ impl ChunkGenerator {
                             continue;
                         }
 
-                        let nx = (lx + dx).clamp(0, CHUNK_SIZE - 1) as usize;
-                        let nz = (lz + dz).clamp(0, CHUNK_SIZE - 1) as usize;
-                        max_delta = max_delta.max((center_height - height_map[nx][nz]).abs());
+                        let nx = (lx + HEIGHT_MAP_BORDER + dx) as usize;
+                        let nz = (lz + HEIGHT_MAP_BORDER + dz) as usize;
+                        max_delta =
+                            max_delta.max((center_height - smoothed_height_map[nx][nz]).abs());
                     }
                 }
 

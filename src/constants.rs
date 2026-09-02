@@ -1,4 +1,4 @@
-use crate::logger::{log, LogLevel};
+use crate::logger::{LogLevel, log};
 
 pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 16;
