@@ -139,35 +139,30 @@ impl TerrainSpline {
     /// output into a base block height.
     ///
     /// The curve rises steeply from the ocean floor (~25 blocks) through the
-    /// coast (~58 blocks) to the lowlands (~68 blocks) and continues climbing
-    /// to extreme mountain peaks at 200 blocks for the highest continental
-    /// values.  These heights are the *starting point* before erosion and
-    /// peaks-and-valleys offsets are applied.
+    /// coast (~61 blocks) to gentle continental interiors (~85 blocks).
+    /// Continentalness deliberately does *not* create mountains on its own:
+    /// those come from its combination with low erosion and peaks/valleys.
     ///
     /// | Input  | Output (blocks) | Description        |
     /// |--------|-----------------|--------------------|
-    /// | −1.05  | 25              | Deep ocean floor   |
-    /// | −0.50  | 40              | Open ocean         |
-    /// | −0.20  | 58              | Coast / Beach      |
-    /// | −0.10  | 62              | Shore              |
+    /// | −1.00  | 28              | Deep ocean floor   |
+    /// | −0.70  | 38              | Open ocean         |
+    /// | −0.45  | 50              | Shallow ocean      |
+    /// | −0.20  | 61              | Coast              |
     /// |  0.00  | 68              | Lowlands           |
-    /// |  0.20  | 76              | Plains             |
-    /// |  0.40  | 90              | Hills              |
-    /// |  0.60  | 120             | Highlands          |
-    /// |  0.80  | 160             | Mountains          |
-    /// |  1.00  | 200             | Extreme mountains  |
+    /// |  0.30  | 72              | Inland             |
+    /// |  0.60  | 78              | Highland base      |
+    /// |  1.00  | 85              | Continental core   |
     pub fn continental() -> Self {
         Self::new(&[
-            (-1.05, 25.0), // Deep ocean floor
-            (-0.5, 40.0),  // Ocean
-            (-0.2, 58.0),  // Coast/Beach
-            (-0.1, 62.0),  // Shore
-            (0.0, 68.0),   // Lowlands
-            (0.2, 76.0),   // Plains
-            (0.4, 90.0),   // Hills
-            (0.6, 120.0),  // Highlands
-            (0.8, 160.0),  // Mountains
-            (1.0, 200.0),  // Extreme mountains
+            (-1.0, 28.0),
+            (-0.7, 38.0),
+            (-0.45, 50.0),
+            (-0.2, 61.0),
+            (0.0, 68.0),
+            (0.3, 72.0),
+            (0.6, 78.0),
+            (1.0, 85.0),
         ])
     }
 
