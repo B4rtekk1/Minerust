@@ -19,7 +19,8 @@ const DENSITY_XZ_SAMPLES: usize = (CHUNK_SIZE / DENSITY_CELL_SIZE + 1) as usize;
 const DENSITY_Y_SAMPLES: usize = (WORLD_HEIGHT / DENSITY_CELL_SIZE + 1) as usize;
 const DENSITY_LATTICE_LEN: usize = DENSITY_XZ_SAMPLES * DENSITY_Y_SAMPLES * DENSITY_XZ_SAMPLES;
 const TERRAIN_WARP_Z_OFFSET: f32 = 200.0;
-const TERRAIN_WARP_AMPLITUDE: f32 = 72.0;
+const MACRO_WARP_AMPLITUDE: f32 = 220.0;
+const REGIONAL_WARP_AMPLITUDE: f32 = 45.0;
 const RIVER_THRESHOLD_MIN: f32 = 0.875;
 const RIVER_THRESHOLD_MAX: f32 = 0.935;
 const LAKE_THRESHOLD: f32 = -0.69;
@@ -76,6 +77,7 @@ struct TerrainShape {
     /// Terrain response to Y/depth; larger values form steeper relief.
     factor: f64,
     jaggedness: f64,
+    density3d_strength: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +109,7 @@ struct TerrainNoiseSample {
     erosion: f64,
     biome_erosion: f32,
     ridged: f64,
+    mountain_chain: f64,
     biome_peaks_valleys: f32,
     weirdness: f64,
     plateau: f64,
@@ -524,19 +527,33 @@ impl ChunkGenerator {
     fn terrain_warp(&self, x: i32, z: i32) -> (f32, f32) {
         let fx = x as f32;
         let fz = z as f32;
-        let wx = fx + self.noise_warp_x.get_noise_2d(fx, fz) * TERRAIN_WARP_AMPLITUDE;
-        let wz = fz
+        let macro_x = fx
+            + self.noise_warp_x.get_noise_2d(fx * 0.25, fz * 0.25)
+                * MACRO_WARP_AMPLITUDE;
+        let macro_z = fz
             + self
                 .noise_warp_z
-                .get_noise_2d(fx + TERRAIN_WARP_Z_OFFSET, fz + TERRAIN_WARP_Z_OFFSET)
-                * TERRAIN_WARP_AMPLITUDE;
+                .get_noise_2d(
+                    (fx + TERRAIN_WARP_Z_OFFSET) * 0.25,
+                    (fz + TERRAIN_WARP_Z_OFFSET) * 0.25,
+                )
+                * MACRO_WARP_AMPLITUDE;
+
+        let wx = macro_x
+            + self.noise_warp_x.get_noise_2d(macro_x, macro_z) * REGIONAL_WARP_AMPLITUDE;
+        let wz = macro_z
+            + self.noise_warp_z.get_noise_2d(
+                macro_x + TERRAIN_WARP_Z_OFFSET,
+                macro_z + TERRAIN_WARP_Z_OFFSET,
+            ) * REGIONAL_WARP_AMPLITUDE;
 
         (wx, wz)
     }
 
     fn sample_terrain_noise(&self, x: i32, z: i32) -> TerrainNoiseSample {
         let (wx, wz) = self.terrain_warp(x, z);
-        let biome_continental = self.noise_continents.get_noise_2d(wx, wz);
+        let continental = self.noise_continents.get_noise_2d(wx, wz) as f64;
+        let erosion = self.noise_erosion.get_noise_2d(wx, wz) as f64;
         let river_noise = self.noise_river.get_noise_2d(wx, wz);
         let river_width = self.noise_river_width.get_noise_2d(wx + 250.0, wz - 250.0);
         let river_threshold = lerp(
@@ -547,8 +564,8 @@ impl ChunkGenerator {
 
         let weirdness = self.noise_weirdness.get_noise_2d(wx, wz) as f64;
         TerrainNoiseSample {
-            continental: self.noise_continents.get_noise_2d(wx, wz) as f64,
-            biome_continental,
+            continental,
+            biome_continental: continental as f32,
             terrain: self.noise_terrain.get_noise_2d(wx, wz) as f64,
             temperature: self.noise_temperature.get_noise_2d(wx, wz),
             moisture: self.noise_moisture.get_noise_2d(wx, wz),
@@ -556,9 +573,10 @@ impl ChunkGenerator {
             river_threshold,
             lake: self.noise_lake.get_noise_2d(wx, wz),
             island: self.noise_island.get_noise_2d(wx, wz),
-            erosion: self.noise_erosion.get_noise_2d(wx, wz) as f64,
-            biome_erosion: self.noise_erosion.get_noise_2d(wx, wz),
+            erosion,
+            biome_erosion: erosion as f32,
             ridged: self.noise_ridged.get_noise_2d(wx, wz) as f64,
+            mountain_chain: self.noise_ridged.get_noise_2d(wx * 0.18, wz * 0.18) as f64,
             biome_peaks_valleys: peaks_and_valleys(weirdness) as f32,
             weirdness,
             plateau: self.noise_plateau.get_noise_2d(wx, wz) as f64,
@@ -603,7 +621,7 @@ impl ChunkGenerator {
     /// Nearest-point selection makes climate extension data-driven: adding a
     /// biome no longer means growing a fragile chain of terrain conditionals.
     fn select_land_biome(&self, climate: Climate) -> Biome {
-        const POINTS: [BiomePoint; 7] = [
+        const POINTS: [BiomePoint; 8] = [
             BiomePoint {
                 biome: Biome::Plains,
                 climate: Climate {
@@ -622,6 +640,16 @@ impl ChunkGenerator {
                     continentalness: 0.22,
                     erosion: 0.10,
                     weirdness: 0.0,
+                },
+            },
+            BiomePoint {
+                biome: Biome::Mountains,
+                climate: Climate {
+                    temperature: -0.10,
+                    humidity: 0.10,
+                    continentalness: 0.72,
+                    erosion: -0.72,
+                    weirdness: 0.45,
                 },
             },
             BiomePoint {
@@ -711,19 +739,30 @@ impl ChunkGenerator {
         let continentalness = noise.continental;
         let erosion = noise.erosion;
         let pv = peaks_and_valleys(noise.weirdness);
+        let land = smoothstep(((continentalness + 0.24) / 0.42).clamp(0.0, 1.0));
         let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
-        let low_erosion = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        let mountain_strength = inland * low_erosion * pv.max(0.0);
-        let mut offset = self.shape_offset(continentalness, erosion, pv);
-        let mut factor = self.shape_factor(continentalness, erosion, pv);
-        let mut jaggedness = self.shape_jaggedness(continentalness, erosion, pv, noise.ridged);
+        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
+        let chain = smoothstep(((noise.mountain_chain - 0.28) / 0.42).clamp(0.0, 1.0));
+        let peak_mask = smoothstep(((pv - 0.12) / 0.58).clamp(0.0, 1.0));
+        let mountain_strength = land * inland * roughness * chain * peak_mask;
+
+        // Nested response: continentalness selects the base level, erosion
+        // selects the relief amplitude, and PV chooses valley/slope/ridge.
+        let base = (CONTINENTAL_SPLINE.sample(continentalness) - SEA_LEVEL as f64) / 64.0;
+        let pv_profile = self.pv_offset(pv, roughness);
+        let amplitude = land * (0.10 + inland * 0.90) * (0.18 + roughness * 0.82);
+        let ridge = noise.ridged.max(0.0).powi(2) * mountain_strength;
+        let mut offset = base + pv_profile * amplitude + ridge * 0.32;
+        let mut factor = lerp(0.72, self.pv_factor(pv, roughness), inland);
+        let mut jaggedness = self.shape_jaggedness(continentalness, erosion, pv, noise.ridged)
+            * (0.35 + chain * 0.65);
 
         // Every macro landform participates in the final density shape.
         let river = self.river_channel_strength(noise) * (1.0 - mountain_strength * 0.78);
         let lake = self.lake_strength(noise);
         // PV supplies the primary valleys; the independent valley field is
         // only a subtle local accent rather than a second terrain system.
-        let valley = self.valley_strength(noise) * 0.25;
+        let valley = self.valley_strength(noise) * 0.18;
         let plateau = self.plateau_strength(noise);
         let ocean_factor = ((-continentalness - 0.42) / 0.58).clamp(0.0, 1.0);
         let island = self.island_strength(noise) * ocean_factor;
@@ -731,25 +770,14 @@ impl ChunkGenerator {
         offset += island * 0.60 + plateau * 0.05;
         factor *= 1.0 - river * 0.18 - lake * 0.10 + plateau * 0.08;
         jaggedness *= 1.0 - river * 0.70 - lake * 0.65;
-        offset += noise.terrain * (0.025 + mountain_strength * 0.045);
+        offset += noise.terrain * (0.018 + mountain_strength * 0.035);
         TerrainShape {
             offset,
             factor,
             jaggedness,
+            density3d_strength: (0.04 + mountain_strength * 0.62 + peak_mask * chain * 0.12)
+                .clamp(0.04, 0.78),
         }
-    }
-
-    fn shape_offset(&self, continentalness: f64, erosion: f64, pv: f64) -> f64 {
-        let continental = (CONTINENTAL_SPLINE.sample(continentalness) - SEA_LEVEL as f64) / 64.0;
-        let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
-        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        continental + inland * self.pv_offset(pv, roughness)
-    }
-
-    fn shape_factor(&self, continentalness: f64, erosion: f64, pv: f64) -> f64 {
-        let inland = ((continentalness + 0.12) / 0.72).clamp(0.0, 1.0);
-        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        lerp(0.72, self.pv_factor(pv, roughness), inland)
     }
 
     fn shape_jaggedness(&self, continentalness: f64, erosion: f64, pv: f64, ridged: f64) -> f64 {
@@ -1041,7 +1069,7 @@ impl ChunkGenerator {
             self.noise_terrain
                 .get_noise_3d(x as f32 + 1900.0, y as f32 + 700.0, z as f32 - 1900.0)
                 as f64;
-        4.0 * quarter_negative(shaped) + base_3d * 0.34
+        4.0 * quarter_negative(shaped) + base_3d * shape.density3d_strength
     }
 
     fn y_gradient(&self, y: i32) -> f64 {
@@ -1085,9 +1113,11 @@ impl ChunkGenerator {
         lz: i32,
         macro_height: i32,
     ) -> i32 {
-        // The preliminary surface is merely a fallback. The final top comes
-        // from density and may be anywhere in the world vertical range.
-        for y in (1..WORLD_HEIGHT).rev() {
+        // The final crossing normally stays close to the macro height. Keep a
+        // bounded fallback window instead of scanning the whole column.
+        let min_y = (macro_height - 72).max(1);
+        let max_y = (macro_height + 72).min(WORLD_HEIGHT - 1);
+        for y in (min_y..=max_y).rev() {
             if self.sample_density_lattice(lattice, lx, y, lz) > 0.0 {
                 return y + 1;
             }
