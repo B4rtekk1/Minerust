@@ -1,8 +1,9 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashSet};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::core::chunk::Chunk;
 use crate::world::generator::ChunkGenerator;
@@ -31,7 +32,7 @@ pub struct ChunkGenRequest {
 
 impl PartialEq for ChunkGenRequest {
     fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority
+        self.priority == other.priority && self.cx == other.cx && self.cz == other.cz
     }
 }
 
@@ -47,8 +48,19 @@ impl Ord for ChunkGenRequest {
     /// Reverses the natural integer ordering so that a **min-priority**
     /// (closest chunk) is treated as the *maximum* by `BinaryHeap`.
     fn cmp(&self, other: &Self) -> Ordering {
-        other.priority.cmp(&self.priority)
+        // Reverse the numeric priority for a min-priority heap, then use
+        // coordinates as a deterministic tie-breaker.
+        other
+            .priority
+            .cmp(&self.priority)
+            .then_with(|| other.cx.cmp(&self.cx))
+            .then_with(|| other.cz.cmp(&self.cz))
     }
+}
+
+struct RequestQueue {
+    requests: BinaryHeap<ChunkGenRequest>,
+    shutdown: bool,
 }
 
 /// The completed result of a chunk generation request.
@@ -79,12 +91,8 @@ pub struct ChunkGenResult {
 ///  poll_results()  ←──────────────────────────────────────────────┘
 /// ```
 ///
-/// Two bounded `crossbeam` channels of capacity 256 decouple the caller from
-/// the workers:
-///
-/// - **Request channel** (`request_tx` → `request_rx`): the main thread sends
-///   [`ChunkGenRequest`] values; workers receive and process them in FIFO order.
-/// - **Result channel** (`result_tx` → `result_rx`): workers send
+/// A shared [`BinaryHeap`] gives requests to workers in priority order. The
+/// result channel is bounded at 256 entries; workers send
 ///   [`ChunkGenResult`] values back; the main thread drains them each frame via
 ///   [`poll_results`].
 ///
@@ -95,18 +103,16 @@ pub struct ChunkGenResult {
 /// # Worker lifecycle
 ///
 /// Each worker owns its own [`ChunkGenerator`] (seeded identically from the
-/// world seed) and loops on `rx.recv()`, blocking when the queue is empty and
-/// exiting when the sender is dropped (channel disconnect).
+/// world seed), waits while the priority queue is empty, and exits when the
+/// loader is dropped.
 ///
 /// # Backpressure
 ///
-/// Both channels are bounded at 256 entries.  If the request channel is full,
-/// [`request_chunk`] silently drops the request (removing it from `pending`)
-/// rather than blocking the game loop.  The caller is expected to re-issue
-/// stale requests on the next frame.
+/// The request heap is capped at 256 pending entries. Additional requests are
+/// ignored until results are committed, keeping the game loop non-blocking.
 pub struct ChunkLoader {
-    /// Sender half of the request channel; cloned into each worker at startup.
-    request_tx: Sender<ChunkGenRequest>,
+    /// Shared priority queue consumed by all generation workers.
+    request_queue: Arc<(Mutex<RequestQueue>, Condvar)>,
     /// Receiver half of the result channel; polled each frame by the main thread.
     result_rx: Receiver<ChunkGenResult>,
     /// Set of chunk columns that have been submitted and not yet received.
@@ -128,23 +134,26 @@ impl ChunkLoader {
     /// Creates a loader with exactly `num_workers` background threads.
     ///
     /// Each worker thread:
-    /// 1. Clones the shared `request_rx` receiver (crossbeam channels are
-    ///    multi-consumer safe).
+    /// 1. Waits on the shared priority queue and pops its closest request.
     /// 2. Constructs an independent [`ChunkGenerator`] from `seed` so no
     ///    generator state is shared between threads.
-    /// 3. Enters a blocking `rx.recv()` loop, generating chunks on demand and
-    ///    sending results back via `result_tx`.
-    /// 4. Exits when `request_rx` is disconnected (i.e., when `ChunkLoader`
-    ///    is dropped and `request_tx` is released).
+    /// 3. Generates chunks on demand and sends results back via `result_tx`.
+    /// 4. Exits when `ChunkLoader` signals shutdown.
     ///
     /// # Panics
     /// Panics if any worker thread cannot be spawned.
     pub fn with_worker_count(num_workers: usize, seed: u32) -> Self {
-        let (request_tx, request_rx) = bounded::<ChunkGenRequest>(256);
         let (result_tx, result_rx) = bounded::<ChunkGenResult>(256);
+        let request_queue = Arc::new((
+            Mutex::new(RequestQueue {
+                requests: BinaryHeap::new(),
+                shutdown: false,
+            }),
+            Condvar::new(),
+        ));
 
         for worker_id in 0..num_workers {
-            let rx = request_rx.clone();
+            let request_queue = Arc::clone(&request_queue);
             let tx = result_tx.clone();
             // Each worker owns its own generator — no mutex needed.
             let generator = ChunkGenerator::new(seed);
@@ -153,24 +162,30 @@ impl ChunkLoader {
                 .name(format!("chunk-gen-{}", worker_id))
                 .spawn(move || {
                     loop {
-                        match rx.recv() {
-                            Ok(req) => {
-                                let chunk = generator.generate_chunk(req.cx, req.cz);
-                                // If the result channel is disconnected (main thread
-                                // dropped ChunkLoader), exit cleanly.
-                                if tx
-                                    .send(ChunkGenResult {
-                                        cx: req.cx,
-                                        cz: req.cz,
-                                        chunk,
-                                    })
-                                    .is_err()
-                                {
-                                    break;
-                                }
+                        let req = {
+                            let (lock, wakeup) = &*request_queue;
+                            let mut queue = lock.lock().expect("chunk request queue poisoned");
+                            while queue.requests.is_empty() && !queue.shutdown {
+                                queue = wakeup.wait(queue).expect("chunk request queue poisoned");
                             }
-                            // Channel disconnected — main thread shut down.
-                            Err(_) => break,
+                            if queue.shutdown {
+                                break;
+                            }
+                            queue.requests.pop().expect("non-empty chunk request queue")
+                        };
+
+                        let chunk = generator.generate_chunk(req.cx, req.cz);
+                        // If the result channel is disconnected (main thread
+                        // dropped ChunkLoader), exit cleanly.
+                        if tx
+                            .send(ChunkGenResult {
+                                cx: req.cx,
+                                cz: req.cz,
+                                chunk,
+                            })
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                 })
@@ -178,7 +193,7 @@ impl ChunkLoader {
         }
 
         ChunkLoader {
-            request_tx,
+            request_queue,
             result_rx,
             pending: HashSet::new(),
             worker_count: num_workers,
@@ -192,25 +207,20 @@ impl ChunkLoader {
     ///
     /// The request is silently ignored if:
     /// - `(cx, cz)` is already in the `pending` set (deduplication).
-    /// - The request channel is full (backpressure; caller should retry next frame).
-    ///
-    /// When the channel is full the chunk is removed from `pending` immediately
-    /// so a future call can re-submit it without hitting the duplicate guard.
+    /// - The pending request cap has been reached.
     pub fn request_chunk(&mut self, cx: i32, cz: i32, priority: i32) {
         if self.pending.contains(&(cx, cz)) {
             return; // already in flight
         }
 
-        self.pending.insert((cx, cz));
-
-        if self
-            .request_tx
-            .try_send(ChunkGenRequest { cx, cz, priority })
-            .is_err()
-        {
-            // Channel full — roll back the pending entry so the caller can retry.
-            self.pending.remove(&(cx, cz));
+        if self.pending.len() >= 256 {
+            return;
         }
+        self.pending.insert((cx, cz));
+        let (lock, wakeup) = &*self.request_queue;
+        let mut queue = lock.lock().expect("chunk request queue poisoned");
+        queue.requests.push(ChunkGenRequest { cx, cz, priority });
+        wakeup.notify_one();
     }
 
     /// Submits multiple chunk requests in a single call, sorted by priority
@@ -236,18 +246,7 @@ impl ChunkLoader {
             if self.pending.len() >= 256 {
                 break;
             }
-            self.pending.insert((*cx, *cz));
-            if self
-                .request_tx
-                .try_send(ChunkGenRequest {
-                    cx: *cx,
-                    cz: *cz,
-                    priority: *priority,
-                })
-                .is_err()
-            {
-                self.pending.remove(&(*cx, *cz));
-            }
+            self.request_chunk(*cx, *cz, *priority);
         }
     }
 
@@ -341,5 +340,15 @@ impl ChunkLoader {
     /// Returns the number of worker threads managed by this loader.
     pub fn worker_count(&self) -> usize {
         self.worker_count
+    }
+}
+
+impl Drop for ChunkLoader {
+    fn drop(&mut self) {
+        let (lock, wakeup) = &*self.request_queue;
+        if let Ok(mut queue) = lock.lock() {
+            queue.shutdown = true;
+            wakeup.notify_all();
+        }
     }
 }

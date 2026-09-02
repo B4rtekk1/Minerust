@@ -277,6 +277,7 @@ impl State {
         let depth_texture = Self::create_depth_texture(&device, &config, msaa_sample_count);
         let msaa_texture_view =
             Self::create_msaa_texture(&device, &config, surface_format, msaa_sample_count);
+        let (sky_texture, sky_view) = Self::create_sky_texture(&device, &config, surface_format);
 
         // ------------------------------------------------------------------ //
         // Shader compilation
@@ -319,9 +320,12 @@ impl State {
         });
         let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sky Shader"),
-            // Procedural sky dome rendered at the far plane; uses
-            // `LessEqual` depth compare so it appears behind all geometry.
+            // Procedural sky rendered into a low-resolution background target.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sky.wgsl").into()),
+        });
+        let sky_upsample_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Sky Upsample Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sky_upsample.wgsl").into()),
         });
 
         // ------------------------------------------------------------------ //
@@ -1087,9 +1091,8 @@ impl State {
         });
 
         // --- Sky dome ---
-        // Uses `LessEqual` so it renders at depth = 1.0 (the far plane) and
-        // appears behind every piece of geometry.  No depth writes so it does
-        // not occlude anything.
+        // The expensive procedural shader runs only into a half-resolution,
+        // single-sampled target. It is bilinearly upsampled before terrain.
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sky Pipeline"),
             layout: Some(&pipeline_layout),
@@ -1116,20 +1119,8 @@ impl State {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                // `LessEqual` rather than `Less` because the sky sits at
-                // exactly depth 1.0 and we want it to pass rather than fail.
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
         });
 
@@ -1478,6 +1469,97 @@ impl State {
             multiview_mask: None,
         });
 
+        let sky_upsample_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Sky Upsample Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let sky_upsample_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Sky Upsample Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let sky_upsample_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Sky Upsample Bind Group"),
+            layout: &sky_upsample_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sky_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sky_upsample_sampler),
+                },
+            ],
+        });
+        let sky_upsample_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Sky Upsample Pipeline Layout"),
+                bind_group_layouts: &[&sky_upsample_bind_group_layout],
+                immediate_size: 0,
+            });
+        let sky_upsample_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Sky Upsample Pipeline"),
+                layout: Some(&sky_upsample_pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &sky_upsample_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sky_upsample_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                // This upsample runs inside the opaque pass, which also owns
+                // the scene depth attachment. The pipeline must declare the
+                // same format even though the background neither reads nor
+                // writes depth.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: msaa_sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+            });
+
         // ------------------------------------------------------------------ //
         // Indirect draw managers
         // ------------------------------------------------------------------ //
@@ -1680,6 +1762,7 @@ impl State {
             outline_pipeline,
             sun_pipeline,
             sky_pipeline,
+            sky_upsample_pipeline,
             crosshair_pipeline,
             sun_vertex_buffer,
             sun_index_buffer,
@@ -1691,6 +1774,9 @@ impl State {
             uniform_bind_group,
             depth_texture,
             msaa_texture_view,
+            sky_texture,
+            sky_view,
+            sky_upsample_bind_group,
             world,
             mesh_loader,
             mesh_upload_ring,
@@ -1889,5 +1975,31 @@ impl State {
             view_formats: &[],
         });
         msaa_texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Allocates the single-sampled procedural-sky target at half of the
+    /// surface dimensions. Keeping both axes at least one avoids invalid
+    /// targets during the smallest valid window sizes.
+    pub fn create_sky_texture(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Half Resolution Sky Texture"),
+            size: wgpu::Extent3d {
+                width: config.width.div_ceil(2).max(1),
+                height: config.height.div_ceil(2).max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
     }
 }

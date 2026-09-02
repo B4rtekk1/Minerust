@@ -2,10 +2,13 @@ use crate::core::quad::PackedQuad;
 use crate::world::World;
 use crate::world::generator::ChunkGenerator;
 use crate::world::terrain::SubchunkMeshSnapshot;
-use crossbeam_channel::{Receiver, Sender, bounded};
-use std::collections::HashSet;
-use std::sync::Arc;
+use crossbeam_channel::{Receiver, bounded};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashSet};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+
+const MAX_QUEUED_MESH_REQUESTS: usize = 256;
 
 /// A request to build the terrain and water meshes for one subchunk.
 pub struct MeshRequest {
@@ -15,6 +18,43 @@ pub struct MeshRequest {
     pub cz: i32,
     /// Vertical index of the subchunk within its chunk column.
     pub sy: i32,
+    /// Lower values are processed first. This is the squared distance from
+    /// the player's current subchunk, in subchunk units.
+    pub priority: i64,
+}
+
+impl PartialEq for MeshRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+            && self.cx == other.cx
+            && self.cz == other.cz
+            && self.sy == other.sy
+    }
+}
+
+impl Eq for MeshRequest {}
+
+impl PartialOrd for MeshRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MeshRequest {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max-heap, therefore reverse the distance ordering.
+        other
+            .priority
+            .cmp(&self.priority)
+            .then_with(|| other.cx.cmp(&self.cx))
+            .then_with(|| other.cz.cmp(&self.cz))
+            .then_with(|| other.sy.cmp(&self.sy))
+    }
+}
+
+struct MeshRequestQueue {
+    requests: BinaryHeap<MeshRequest>,
+    shutdown: bool,
 }
 
 /// The completed mesh data produced by a worker thread for one subchunk.
@@ -44,12 +84,14 @@ pub struct MeshResult {
 /// at a time.
 ///
 /// # Channel capacities
-/// Both the request and result channels are bounded to 256 entries.  If the
-/// request channel is full, [`request_mesh`] silently drops the request; the
-/// caller is expected to retry on a future frame.
+/// Workers pull requests from a shared min-priority heap. This is important
+/// while the player is moving: a newly visible subchunk may overtake older,
+/// distant work that has not started yet. Completed results use a bounded
+/// channel to apply backpressure to the workers. The heap is capped at 256;
+/// when full, a closer request replaces its farthest queued entry.
 pub struct MeshLoader {
-    /// Sending half of the request channel shared with all worker threads.
-    request_tx: Sender<MeshRequest>,
+    /// Shared priority queue consumed by all mesh workers.
+    request_queue: Arc<(Mutex<MeshRequestQueue>, Condvar)>,
     /// Receiving half of the result channel; workers write completed meshes here.
     result_rx: Receiver<MeshResult>,
     /// Set of subchunk keys `(cx, cz, sy)` that have been queued but not yet
@@ -68,12 +110,18 @@ impl MeshLoader {
     /// # Panics
     /// Panics if any worker thread cannot be spawned.
     pub fn new(world: Arc<parking_lot::RwLock<World>>, worker_count: usize) -> Self {
-        let (request_tx, request_rx) = bounded::<MeshRequest>(256);
         let (result_tx, result_rx) = bounded::<MeshResult>(256);
+        let request_queue = Arc::new((
+            Mutex::new(MeshRequestQueue {
+                requests: BinaryHeap::new(),
+                shutdown: false,
+            }),
+            Condvar::new(),
+        ));
         let seed = world.read().seed;
 
         for i in 0..worker_count {
-            let rx = request_rx.clone();
+            let request_queue = Arc::clone(&request_queue);
             let tx = result_tx.clone();
             let world = Arc::clone(&world);
             let generator = ChunkGenerator::new(seed);
@@ -81,8 +129,18 @@ impl MeshLoader {
             thread::Builder::new()
                 .name(format!("mesh-worker-{}", i))
                 .spawn(move || {
-                    // Block until a request arrives; exit when the sender is dropped.
-                    while let Ok(req) = rx.recv() {
+                    loop {
+                        let req = {
+                            let (lock, wakeup) = &*request_queue;
+                            let mut queue = lock.lock().expect("mesh request queue poisoned");
+                            while queue.requests.is_empty() && !queue.shutdown {
+                                queue = wakeup.wait(queue).expect("mesh request queue poisoned");
+                            }
+                            if queue.shutdown {
+                                break;
+                            }
+                            queue.requests.pop().expect("non-empty mesh request queue")
+                        };
                         let snapshot = {
                             // Hold the read lock only while copying the padded
                             // block cache needed for meshing.
@@ -125,7 +183,7 @@ impl MeshLoader {
         }
 
         Self {
-            request_tx,
+            request_queue,
             result_rx,
             pending: HashSet::new(),
         }
@@ -136,27 +194,36 @@ impl MeshLoader {
     /// Does nothing if the subchunk is already in the pending set, preventing
     /// redundant in-flight work for the same subchunk.
     ///
-    /// Returns `true` if the subchunk was queued or was already pending.
-    /// Returns `false` if the request channel is currently full; callers should
-    /// retry on a future frame.
-    pub fn request_mesh(&mut self, cx: i32, cz: i32, sy: i32) -> bool {
+    /// `priority` is a squared distance score; lower values run first.
+    /// Returns `true` if the subchunk was queued or was already pending, and
+    /// `false` if it is no closer than the current bounded queue.
+    pub fn request_mesh(&mut self, cx: i32, cz: i32, sy: i32, priority: i64) -> bool {
         let key = (cx, cz, sy);
         if self.pending.contains(&key) {
             return true;
         }
-        match self.request_tx.try_send(MeshRequest { cx, cz, sy }) {
-            Ok(_) => {
-                self.pending.insert(key);
-                true
+        let (lock, wakeup) = &*self.request_queue;
+        let mut queue = lock.lock().expect("mesh request queue poisoned");
+        if queue.requests.len() >= MAX_QUEUED_MESH_REQUESTS {
+            let farthest = queue
+                .requests
+                .iter()
+                .max_by_key(|request| request.priority)
+                .expect("full mesh request queue has an entry");
+            if priority >= farthest.priority {
+                return false;
             }
-            Err(_) => {
-                // The request channel is full. The subchunk is intentionally
-                // not inserted into `pending` here so the caller can retry it
-                // on the next frame once the workers drain the backlog.
-                //log(crate::logger::LogLevel::Warning, &format!("Mesh request channel full — dropping request for subchunk ({cx}, {cz}, {sy})"));
-                false
-            }
+
+            let evicted_key = (farthest.cx, farthest.cz, farthest.sy);
+            queue
+                .requests
+                .retain(|request| (request.cx, request.cz, request.sy) != evicted_key);
+            self.pending.remove(&evicted_key);
         }
+        queue.requests.push(MeshRequest { cx, cz, sy, priority });
+        self.pending.insert(key);
+        wakeup.notify_one();
+        true
     }
 
     /// Returns the next completed mesh result without blocking, or `None` if
@@ -178,5 +245,32 @@ impl MeshLoader {
     /// but its result has not yet been collected.
     pub fn is_pending(&self, cx: i32, cz: i32, sy: i32) -> bool {
         self.pending.contains(&(cx, cz, sy))
+    }
+}
+
+impl Drop for MeshLoader {
+    fn drop(&mut self) {
+        let (lock, wakeup) = &*self.request_queue;
+        if let Ok(mut queue) = lock.lock() {
+            queue.shutdown = true;
+            wakeup.notify_all();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closest_request_is_popped_first() {
+        let mut queue = BinaryHeap::new();
+        queue.push(MeshRequest { cx: 4, cz: 0, sy: 0, priority: 16 });
+        queue.push(MeshRequest { cx: 1, cz: 0, sy: 0, priority: 1 });
+        queue.push(MeshRequest { cx: 2, cz: 0, sy: 0, priority: 4 });
+
+        assert_eq!(queue.pop().unwrap().priority, 1);
+        assert_eq!(queue.pop().unwrap().priority, 4);
+        assert_eq!(queue.pop().unwrap().priority, 16);
     }
 }

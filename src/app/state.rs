@@ -128,6 +128,8 @@ pub struct State {
     pub sun_pipeline: wgpu::RenderPipeline,
     /// Sky background render pipeline.
     pub sky_pipeline: wgpu::RenderPipeline,
+    /// Full-screen bilinear upsample from the half-resolution sky target.
+    pub sky_upsample_pipeline: wgpu::RenderPipeline,
     /// Screen-space crosshair render pipeline.
     pub crosshair_pipeline: wgpu::RenderPipeline,
     /// Full-screen composite pipeline that resolves MSAA and applies post-FX.
@@ -170,6 +172,8 @@ pub struct State {
     pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
+    /// Bind group used to sample the half-resolution procedural sky.
+    pub sky_upsample_bind_group: wgpu::BindGroup,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
@@ -178,6 +182,10 @@ pub struct State {
     pub depth_texture: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
+    /// Single-sampled half-resolution render target for the procedural sky.
+    pub sky_texture: wgpu::Texture,
+    /// View of `sky_texture` used for both rendering and upsampling.
+    pub sky_view: wgpu::TextureView,
     /// Intermediate scene color texture rendered into before compositing.
     pub scene_color_texture: wgpu::Texture,
     /// View of `scene_color_texture`.

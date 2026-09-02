@@ -3,7 +3,8 @@ use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, Uniforms, Vertex, World,
+    BlockType, CHUNK_SIZE, DEFAULT_FOV, RENDER_DISTANCE, SEA_LEVEL, SUBCHUNK_HEIGHT, Uniforms,
+    Vertex, World,
     build_block_outline, build_player_model, extract_frustum_planes,
 };
 
@@ -15,12 +16,6 @@ use super::init::frustum_planes_to_array;
 use super::state::State;
 
 const MAX_DIRTY_MESH_REQUESTS_PER_FRAME: usize = 128;
-const MAX_DIRTY_MESH_QUEUE_INSPECTIONS_PER_FRAME: usize = 1024;
-/// A larger step means the existing Hi-Z pyramid no longer safely describes
-/// the camera view (for example after a teleport).
-const HIZ_RESET_POSITION_DISTANCE: f32 = 16.0;
-/// Large camera rotations have the same temporal mismatch as teleports.
-const HIZ_RESET_ROTATION_RADIANS: f32 = 15.0_f32.to_radians();
 
 /// Computes which faces of the highlighted block should be outlined.
 ///
@@ -148,21 +143,40 @@ impl State {
     }
 
     fn request_dirty_meshes(&mut self, player_cx: i32, player_cz: i32) {
-        let mut inspected = 0usize;
+        // The dirty queue is filled by generation workers and HashMap scans,
+        // neither of which has a meaningful spatial order. Re-rank the whole
+        // local batch every frame so a subchunk next to the player cannot be
+        // stranded behind a long FIFO tail of distant terrain.
+        let mut queued: Vec<_> = std::mem::take(&mut self.dirty_mesh_queue)
+            .into_iter()
+            .collect();
+        self.dirty_mesh_queued.clear();
+
+        let player_sy = (self.camera.position.y / SUBCHUNK_HEIGHT as f32).floor() as i32;
+        let priority = |(cx, cz, sy): &(i32, i32, i32)| {
+            let dx = i64::from(*cx - player_cx);
+            let dy = i64::from(*sy - player_sy);
+            let dz = i64::from(*cz - player_cz);
+            dx * dx + dy * dy + dz * dz
+        };
+        queued.retain(|(cx, cz, _)| {
+            (cx - player_cx).abs() <= RENDER_DISTANCE
+                && (cz - player_cz).abs() <= RENDER_DISTANCE
+        });
+        queued.sort_unstable_by_key(priority);
+
         let mut requested = 0usize;
-        let queue_len = self.dirty_mesh_queue.len();
-        let max_inspections = queue_len.min(MAX_DIRTY_MESH_QUEUE_INSPECTIONS_PER_FRAME);
-
-        while inspected < max_inspections && requested < MAX_DIRTY_MESH_REQUESTS_PER_FRAME {
-            let Some((cx, cz, sy)) = self.dirty_mesh_queue.pop_front() else {
+        let mut remainder_start = queued.len();
+        for (index, (cx, cz, sy)) in queued.iter().copied().enumerate() {
+            if requested == MAX_DIRTY_MESH_REQUESTS_PER_FRAME {
+                remainder_start = index;
                 break;
-            };
-            self.dirty_mesh_queued.remove(&(cx, cz, sy));
-            inspected += 1;
+            }
 
-            if (cx - player_cx).abs() > RENDER_DISTANCE || (cz - player_cz).abs() > RENDER_DISTANCE
-            {
-                self.enqueue_dirty_subchunk(cx, cz, sy);
+            // An in-flight request already has its priority fixed at the
+            // worker queue. Do not let it consume this frame's submission
+            // budget; all other queued requests can still be ranked normally.
+            if self.mesh_loader.is_pending(cx, cz, sy) {
                 continue;
             }
 
@@ -188,12 +202,22 @@ impl State {
                 continue;
             }
 
-            if self.mesh_loader.request_mesh(cx, cz, sy) {
+            if self.mesh_loader.request_mesh(cx, cz, sy, priority(&(cx, cz, sy))) {
                 requested += 1;
             } else {
-                self.enqueue_dirty_subchunk(cx, cz, sy);
+                // The loader is full of higher-priority work. Keep this
+                // subchunk and the remaining tail for the next frame.
+                remainder_start = index;
                 break;
             }
+        }
+
+        // Preserve the lower-priority tail for a future frame. Entries beyond
+        // the render radius are intentionally omitted: their mesh_dirty flag
+        // remains set and the visible-column scan queues them again when the
+        // player gets close enough.
+        for &(cx, cz, sy) in &queued[remainder_start..] {
+            self.enqueue_dirty_subchunk(cx, cz, sy);
         }
     }
 
@@ -373,21 +397,15 @@ impl State {
         let camera_forward = self.camera.look_direction();
         let is_underwater = self.is_underwater;
 
-        // Hi-Z was rasterized from the previous camera transform.  Its AABB
-        // projection must use that same transform; current planes still drive
-        // frustum culling.  Discard temporal history for discontinuous camera
-        // changes, while the first new pyramid is being generated, and after a
-        // resize (which clears `hiz_history_valid`).
-        let camera_moved_far = eye_pos.distance_squared(self.previous_hiz_camera_pos)
-            > HIZ_RESET_POSITION_DISTANCE * HIZ_RESET_POSITION_DISTANCE;
-        let camera_rotated_far = camera_forward
-            .dot(self.previous_hiz_forward)
-            .clamp(-1.0, 1.0)
-            < HIZ_RESET_ROTATION_RADIANS.cos();
-        let occlusion_enabled = render_world_scene
-            && self.hiz_history_valid
-            && !camera_moved_far
-            && !camera_rotated_far;
+        // Hi-Z occlusion currently rejects whole coarse terrain clusters that
+        // are in fact visible (most apparent as large, distant terrain holes).
+        // Keep frustum and distance culling, but disable this unsafe temporal
+        // visibility test until the cluster-depth test is made conservative.
+        // Do not feed temporal Hi-Z visibility into the draw list yet.  A
+        // single false negative at this coarse level removes every subchunk
+        // in the cluster, which looks like a hole in the terrain.  Frustum
+        // and distance culling still run in the same GPU pass.
+        let occlusion_enabled = false;
 
         // ── Upload uniforms ───────────────────────────────────────────────── //
         self.queue.write_buffer(
@@ -482,8 +500,34 @@ impl State {
             self.supports_indirect_count,
         );
 
+        // ── Half-resolution sky pass ─────────────────────────────────────── //
+        // The sky is ALU-heavy but changes slowly and is only a background.
+        // Render it single-sampled at 1/2 resolution, then bilinearly expand
+        // it into the MSAA scene target before drawing geometry.
+        {
+            let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Half Resolution Sky Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.sky_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            sky_pass.set_pipeline(&self.sky_pipeline);
+            sky_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            sky_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
+            sky_pass.set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            sky_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
         // ── Opaque pass ───────────────────────────────────────────────────── //
-        // Renders: sky dome → terrain chunks → remote player models → sun/moon.
+        // Renders: upsampled sky → terrain chunks → remote player models → sun/moon.
         // Writes to the 4× MSAA color target which is resolved simultaneously
         // into `ssr_color_view` (used by the water pass for reflections).
         {
@@ -519,15 +563,10 @@ impl State {
                 ..Default::default()
             });
 
-            // --- Sky dome ---
-            // Uses LessEqual depth compare so it renders at depth 1.0 without
-            // being clipped, and the same quad geometry as the sun billboard.
-            opaque_pass.set_pipeline(&self.sky_pipeline);
-            opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
-            opaque_pass
-                .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            opaque_pass.draw_indexed(0..6, 0, 0..1);
+            // --- Sky upsample ---
+            opaque_pass.set_pipeline(&self.sky_upsample_pipeline);
+            opaque_pass.set_bind_group(0, &self.sky_upsample_bind_group, &[]);
+            opaque_pass.draw(0..3, 0..1);
 
             // --- Terrain chunks (indirect) ---
             // `multi_draw_indirect[_count]` emits one draw call per

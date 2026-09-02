@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME, MAX_MESH_BUILDS_PER_FRAME,
-    NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, UploadBatch,
+    BlockType, UploadBatch, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNKS_PER_FRAME,
+    MAX_CHUNK_COMMITS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT,
 };
 
 use crate::multiplayer::network::update_network;
@@ -66,7 +66,13 @@ impl State {
             };
             let subchunk = &mut chunk.subchunks[sy as usize];
             if subchunk.mesh_version != result.mesh_version {
-                return; // A newer block edit or neighbor change invalidated this mesh.
+                // The result was built from an obsolete neighbour/block
+                // snapshot.  Keep it dirty and put it back in the scheduler;
+                // otherwise it can remain invisible until some unrelated
+                // visibility-cache rebuild happens to enqueue it again.
+                drop(world);
+                self.enqueue_dirty_subchunk(cx, cz, sy);
+                return;
             }
             let aabb = subchunk.aabb;
             subchunk.num_indices = gpu_face_count
@@ -152,7 +158,7 @@ impl State {
     /// 6. **Digging** – accumulate break progress for the targeted block.
     /// 7. **World write** – insert newly generated chunks, break blocks, and
     ///    evict out-of-range chunks (all in a single write-lock window).
-    /// 8. **Mesh uploads** – drain up to `MAX_MESH_BUILDS_PER_FRAME` completed
+    /// 8. **Mesh uploads** – drain up to `MAX_MESH_COMMITS_PER_FRAME` completed
     ///    mesh results from the background workers.
     pub fn update(&mut self) {
         // --- 1. Network ---
@@ -174,7 +180,10 @@ impl State {
         }
 
         // --- 3. Chunk streaming ---
-        let completed_chunks = self.chunk_loader.poll_results(MAX_CHUNKS_PER_FRAME);
+        // Generation finishes on workers, but inserting a chunk also invalidates
+        // neighbouring meshes and the visible-column cache.  Commit only a
+        // small bounded batch so workers cannot turn into a render-thread hitch.
+        let completed_chunks = self.chunk_loader.poll_results(MAX_CHUNK_COMMITS_PER_FRAME);
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
@@ -443,7 +452,7 @@ impl State {
         // Drain completed mesh results up to the per-frame cap so a burst of
         // ready meshes doesn't cause a single-frame GPU upload spike.
         let mut mesh_uploads = UploadBatch::default();
-        for _ in 0..MAX_MESH_BUILDS_PER_FRAME {
+        for _ in 0..MAX_MESH_COMMITS_PER_FRAME {
             if let Some(result) = self.mesh_loader.poll_result() {
                 self.update_subchunk_mesh(&mut mesh_uploads, result);
             } else {

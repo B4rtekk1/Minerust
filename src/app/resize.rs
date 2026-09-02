@@ -18,7 +18,8 @@ impl State {
     /// |---|---|
     /// | Surface configuration | Swap-chain must match the new pixel dimensions. |
     /// | Depth texture (MSAA) | Multisampled depth must match the color target size. |
-    /// | MSAA color texture | Render target size changed. |
+/// | MSAA color texture | Render target size changed. |
+    /// | Half-resolution sky texture + bind group | Procedural sky target must follow surface size. |
     /// | SSR color texture + view | SSR reads scene pixels 1:1; must stay in sync. |
     /// | SSR depth texture + view | Same reason – used for refraction depth lookups. |
     /// | SSR sampler | Recreated alongside its textures for clarity. |
@@ -63,6 +64,33 @@ impl State {
                 self.surface_format,
                 msaa_sample_count,
             );
+            let (sky_texture, sky_view) =
+                Self::create_sky_texture(&self.device, &self.config, self.surface_format);
+            let sky_upsample_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Sky Upsample Sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            self.sky_upsample_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Sky Upsample Bind Group"),
+                    layout: &self.sky_upsample_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&sky_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&sky_upsample_sampler),
+                        },
+                    ],
+                });
+            self.sky_texture = sky_texture;
+            self.sky_view = sky_view;
 
             // ── SSR (Screen-Space Reflections) targets ────────────────────── //
             // Both the color and depth SSR textures must be single-sampled
@@ -169,32 +197,6 @@ impl State {
                 ],
                 label: Some("water_bind_group"),
             });
-
-            // ── Depth-resolve bind group ──────────────────────────────────── //
-            // The depth-resolve compute shader reads the multisampled depth
-            // texture and writes both single-sampled outputs.  The bind group
-            // must reference the freshly-created depth and output views.
-            // Layout is retrieved from the pipeline to avoid storing a
-            // redundant handle on `State`.
-            self.depth_resolve_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Depth Resolve Bind Group"),
-                    layout: &self.depth_resolve_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.depth_texture),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.hiz_mips[0]),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
-                        },
-                    ],
-                });
 
             // ── glyphon viewport ──────────────────────────────────────────── //
             // The text renderer uses the physical resolution to convert between
@@ -374,6 +376,30 @@ impl State {
                 self.hiz_mips = new_hiz_mips;
                 self.hiz_bind_groups = new_hiz_bind_groups;
             }
+
+            // ── Depth-resolve bind group ──────────────────────────────────── //
+            // Build this after a potential Hi-Z rebuild.  Creating it earlier
+            // would leave binding 1 pointing at the pre-resize mip-0 view,
+            // while culling sampled the newly-created Hi-Z texture.
+            self.depth_resolve_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Depth Resolve Bind Group"),
+                    layout: &self.depth_resolve_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.depth_texture),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.hiz_mips[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
+                        },
+                    ],
+                });
         }
     }
 }
