@@ -297,6 +297,10 @@ impl State {
             // Main opaque geometry pass: texture atlas lookup and lighting.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
+        let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Water Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water.wgsl").into()),
+        });
         let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("UI Shader"),
             // Renders flat UI geometry (crosshair, hotbar) in screen space with
@@ -870,20 +874,20 @@ impl State {
         });
 
         // --- Water (transparent geometry) ---
-        // Uses the terrain shader and mesh layout, but alpha-blends its blue
-        // water texels and does not write depth so terrain beneath remains visible.
+        // Uses its own simple blue shader and does not write depth so terrain
+        // beneath remains visible through its alpha-blended surface.
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Water Pipeline"),
             layout: Some(&terrain_pipeline_layout),
             cache: None,
             vertex: wgpu::VertexState {
-                module: &terrain_shader,
+                module: &water_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &terrain_shader,
+                module: &water_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
