@@ -774,7 +774,13 @@ impl ChunkGenerator {
         let plateau = self.plateau_strength(noise);
         let ocean_factor = ((-continentalness - 0.42) / 0.58).clamp(0.0, 1.0);
         let island = self.island_strength(noise) * ocean_factor;
-        offset -= river * 0.12 + lake * 0.17 + valley * 0.15;
+        // Rivers need enough incision to actually meet the water table.  The
+        // previous shallow carve could classify a column as `River` while
+        // leaving solid ground above sea level, producing dry sandy lines.
+        // Keep the extra cut tied to the broad land mask so high mountain
+        // ridges still interrupt a river naturally instead of becoming a
+        // perfectly level canal.
+        offset -= river * (0.16 + land * 0.10) + lake * 0.17 + valley * 0.15;
         offset += island * 0.60 + plateau * 0.05;
         factor *= 1.0 - river * 0.18 - lake * 0.10 + plateau * 0.08;
         jaggedness *= 1.0 - river * 0.70 - lake * 0.65;
@@ -1405,7 +1411,11 @@ impl ChunkGenerator {
     ) {
         let base_x = cx * CHUNK_SIZE;
         let base_z = cz * CHUNK_SIZE;
-        let margin = 3;
+        // Small trees have a two-block crown.  Reserving only that much space
+        // removes the conspicuous six-block-wide vegetation-free bands where
+        // adjacent chunks meet, while large trees are handled separately
+        // below because their crowns need the original three-block margin.
+        let margin = 2;
 
         for lx in margin..(CHUNK_SIZE - margin) {
             for lz in margin..(CHUNK_SIZE - margin) {
@@ -1463,8 +1473,12 @@ impl ChunkGenerator {
                         if hash % 100 < tree_spawn_chance {
                             let ground = chunk.get_block(lx, height - 1, lz);
                             if matches!(ground, BlockType::Grass | BlockType::Dirt) {
-                                let is_large =
-                                    hash % 7 == 0 && matches!(biome, Biome::Forest | Biome::Swamp);
+                                let is_large = hash % 7 == 0
+                                    && matches!(biome, Biome::Forest | Biome::Swamp)
+                                    && lx >= 3
+                                    && lx < CHUNK_SIZE - 3
+                                    && lz >= 3
+                                    && lz < CHUNK_SIZE - 3;
                                 if self.can_place_tree(chunk, lx, height, lz, is_large) {
                                     self.place_tree(
                                         chunk, lx, height, lz, world_x, world_z, biome, is_large,
@@ -1603,11 +1617,17 @@ impl ChunkGenerator {
             chunk.set_block_raw(lx, y + dy, lz, BlockType::Wood);
         }
 
-        let leaf_start = if is_large { 4 } else { 3 };
+        let leaf_start = if is_large { 3 } else { 2 };
         let leaf_radius = if is_large { 3 } else { 2 };
 
+        // A rounded, seed-varied crown reads much more like a living tree
+        // than the former stack of identical square leaf layers.  The trunk
+        // remains deterministic, so a column always generates identically
+        // regardless of chunk-loading order.
         for dy in leaf_start..=trunk_height {
-            let radius = if dy >= trunk_height - 1 {
+            let from_base = dy - leaf_start;
+            let from_top = trunk_height - dy;
+            let radius = if from_base == 0 || from_top == 0 {
                 leaf_radius - 1
             } else {
                 leaf_radius
@@ -1621,21 +1641,18 @@ impl ChunkGenerator {
                         if ny < WORLD_HEIGHT {
                             let existing = chunk.get_block(nx, ny, nz);
                             if existing == BlockType::Air || existing == BlockType::Leaves {
-                                let corner_skip = match biome {
-                                    Biome::Swamp => {
-                                        dx.abs() == radius
-                                            && dz.abs() == radius
-                                            && self.position_hash(world_x + dx, world_z + dz) % 3
-                                                != 0
-                                    }
-                                    _ => {
-                                        dx.abs() == radius
-                                            && dz.abs() == radius
-                                            && self.position_hash(world_x + dx, world_z + dz) % 2
-                                                == 0
-                                    }
-                                };
-                                if !corner_skip {
+                                let distance = dx.abs() + dz.abs();
+                                let edge_hash =
+                                    self.position_hash_3d(world_x + dx, ny, world_z + dz);
+                                // Preserve a full inner crown; only its edge
+                                // is broken up. Swamp trees retain a slightly
+                                // wider, more ragged canopy.
+                                let edge_limit = radius + if biome == Biome::Swamp { 1 } else { 0 };
+                                let keep_leaf = distance <= edge_limit
+                                    && (distance < edge_limit
+                                        || edge_hash % if biome == Biome::Swamp { 4 } else { 3 }
+                                            != 0);
+                                if keep_leaf {
                                     chunk.set_block_raw(nx, ny, nz, BlockType::Leaves);
                                 }
                             }
