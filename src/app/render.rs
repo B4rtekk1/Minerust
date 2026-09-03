@@ -15,6 +15,12 @@ use crate::ui::menu::{GameState, MenuField, MenuHit, MenuLayout};
 use super::init::frustum_planes_to_array;
 use super::state::State;
 
+#[derive(Debug)]
+pub enum RenderError {
+    Surface(wgpu::CurrentSurfaceTexture),
+    Text,
+}
+
 /// Computes which faces of the highlighted block should be outlined.
 ///
 /// The outline follows the same face-visibility rules as block meshing so the
@@ -165,12 +171,16 @@ impl State {
     ///     swap-chain texture is presented.
     ///
     /// # Errors
-    /// Returns `Err(wgpu::SurfaceError)` when the swap-chain texture cannot
+    /// Returns an error when the swap-chain texture cannot
     /// be acquired (e.g., the window is minimized or the surface is lost).
     /// The caller should handle `Lost` / `Outdated` by calling `resize`.
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self) -> Result<(), RenderError> {
         // ── Acquire swap-chain texture ────────────────────────────────────── //
-        let output = self.surface.get_current_texture()?;
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            status => return Err(RenderError::Surface(status)),
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -933,14 +943,14 @@ impl State {
                     self.subchunks_rendered
                 );
                 self.fps_buffer.set_text(
-                    &mut self.font_system,
                     &fps_text,
                     &Attrs::new().family(Family::SansSerif),
                     Shaping::Advanced,
                     None,
                 );
+                self.fps_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
                 self.fps_buffer.set_size(
-                    &mut self.font_system,
                     Some(self.config.width as f32),
                     Some(self.config.height as f32),
                 );
@@ -951,7 +961,6 @@ impl State {
                 let block = crate::ui::ui::HOTBAR_SLOTS[self.hotbar_slot];
                 let label = block.display_name();
                 self.hotbar_label_buffer.set_text(
-                    &mut self.font_system,
                     label,
                     &Attrs::new()
                         .family(Family::SansSerif)
@@ -959,8 +968,9 @@ impl State {
                     Shaping::Advanced,
                     None,
                 );
+                self.hotbar_label_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
                 self.hotbar_label_buffer.set_size(
-                    &mut self.font_system,
                     Some(self.config.width as f32),
                     Some(self.config.height as f32),
                 );
@@ -998,7 +1008,6 @@ impl State {
                 for (i, label) in labels.iter().enumerate() {
                     let buffer = &mut self.player_label_buffers[i];
                     buffer.set_text(
-                        &mut self.font_system,
                         &label.username,
                         &Attrs::new()
                             .family(Family::SansSerif)
@@ -1006,8 +1015,8 @@ impl State {
                         Shaping::Advanced,
                         None,
                     );
+                    buffer.shape_until_scroll(&mut self.font_system, false);
                     buffer.set_size(
-                        &mut self.font_system,
                         Some(self.config.width as f32),
                         Some(self.config.height as f32),
                     );
@@ -1179,7 +1188,7 @@ impl State {
                 )
                 .map_err(|e| {
                     log(LogLevel::Error, &format!("Failed to prepare text: {:?}", e));
-                    wgpu::SurfaceError::Lost
+                    RenderError::Text
                 })?;
 
             // Render all glyphs in a single pass on top of everything else.
@@ -1200,13 +1209,13 @@ impl State {
                 .render(&self.text_atlas, &self.viewport, &mut pass)
                 .map_err(|e| {
                     log(LogLevel::Error, &format!("Failed to render text: {:?}", e));
-                    wgpu::SurfaceError::Lost
+                    RenderError::Text
                 })?;
         }
 
         // ── Submit & present ──────────────────────────────────────────────── //
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.queue.present(output);
         Ok(())
     }
 
@@ -1215,27 +1224,27 @@ impl State {
         let layout = MenuLayout::new(self.config.width, self.config.height);
 
         self.menu_connect_button_buffer.set_text(
-            &mut self.font_system,
             "MULTIPLAYER",
             &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
         );
+        self.menu_connect_button_buffer
+            .shape_until_scroll(&mut self.font_system, false);
         self.menu_connect_button_buffer.set_size(
-            &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );
 
         self.menu_singleplayer_button_buffer.set_text(
-            &mut self.font_system,
             "NEW WORLD",
             &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
         );
+        self.menu_singleplayer_button_buffer
+            .shape_until_scroll(&mut self.font_system, false);
         self.menu_singleplayer_button_buffer.set_size(
-            &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );
@@ -1245,14 +1254,14 @@ impl State {
             _ => "RENDER MODE: INSTANT",
         };
         self.menu_render_mode_button_buffer.set_text(
-            &mut self.font_system,
             render_mode_text,
             &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
         );
+        self.menu_render_mode_button_buffer
+            .shape_until_scroll(&mut self.font_system, false);
         self.menu_render_mode_button_buffer.set_size(
-            &mut self.font_system,
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );
@@ -1265,14 +1274,14 @@ impl State {
             self.menu_state.server_address.clone()
         };
         self.menu_server_address_input_buffer.set_text(
-            &mut self.font_system,
             &server_address_text,
             &Attrs::new().family(Family::Name("Google Sans")),
             Shaping::Advanced,
             None,
         );
+        self.menu_server_address_input_buffer
+            .shape_until_scroll(&mut self.font_system, false);
         self.menu_server_address_input_buffer.set_size(
-            &mut self.font_system,
             Some((layout.server_address_input.w - 24.0).max(32.0)),
             Some(layout.server_address_input.h),
         );

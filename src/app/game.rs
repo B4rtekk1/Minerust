@@ -19,6 +19,7 @@ use crate::logger::{LogLevel, log};
 use crate::ui::menu::GameState;
 
 use super::performance::process_cpu_time_ms;
+use super::render::RenderError;
 use super::server::run_dedicated_server;
 use super::state::State;
 
@@ -386,10 +387,15 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         // Surface lost (e.g., window un-minimized on some
                         // platforms): trigger a resize to reconfigure the
                         // swap-chain with the current window dimensions.
-                        Err(wgpu::SurfaceError::Lost) => state.resize(state.window.inner_size()),
+                        Err(RenderError::Surface(wgpu::CurrentSurfaceTexture::Lost))
+                        | Err(RenderError::Surface(wgpu::CurrentSurfaceTexture::Outdated)) => {
+                            state.resize(state.window.inner_size())
+                        }
                         // GPU out of memory: nothing reasonable to do here,
                         // so exit cleanly rather than panic.
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                        Err(RenderError::Surface(wgpu::CurrentSurfaceTexture::Validation)) => {
+                            elwt.exit()
+                        }
                         Err(e) => log(LogLevel::Error, &format!("Render error: {:?}", e)),
                     }
 

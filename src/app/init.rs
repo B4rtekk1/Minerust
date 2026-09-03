@@ -139,9 +139,12 @@ impl State {
         // Vulkan because DX12 typically yields better frame times there.
         let backend = wgpu::Backends::all();
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: backend,
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         // The surface must be created before adapter selection so that wgpu
@@ -161,6 +164,7 @@ impl State {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect("Failed to find a suitable GPU adapter");
@@ -258,6 +262,7 @@ impl State {
                 .unwrap_or(surface_caps.alpha_modes[0]),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Srgb,
         };
         surface.configure(&device, &config);
 
@@ -680,21 +685,27 @@ impl State {
         // Terrain / sky / sun / crosshair all share the same uniform layout.
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout],
+            bind_group_layouts: &[Some(&uniform_bind_group_layout)],
             immediate_size: 0,
         });
 
         let terrain_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Terrain Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout, &quad_bind_group_layout],
+                bind_group_layouts: &[
+                    Some(&uniform_bind_group_layout),
+                    Some(&quad_bind_group_layout),
+                ],
                 immediate_size: 0,
             });
 
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Water Pipeline Layout"),
-                bind_group_layouts: &[&water_bind_group_layout, &quad_bind_group_layout],
+                bind_group_layouts: &[
+                    Some(&water_bind_group_layout),
+                    Some(&quad_bind_group_layout),
+                ],
                 immediate_size: 0,
             });
 
@@ -732,8 +743,8 @@ impl State {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -754,7 +765,7 @@ impl State {
                     module: &terrain_shader,
                     entry_point: Some("vs_legacy"),
                     compilation_options: Default::default(),
-                    buffers: &[Vertex::desc()],
+                    buffers: &[Some(Vertex::desc())],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &terrain_shader,
@@ -774,8 +785,8 @@ impl State {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -819,8 +830,8 @@ impl State {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false, // read-only depth test
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false), // read-only depth test
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -843,7 +854,7 @@ impl State {
                 module: &outline_shader,
                 entry_point: Some("vs_outline"),
                 compilation_options: Default::default(),
-                buffers: &[OutlineVertex::desc()],
+                buffers: &[Some(OutlineVertex::desc())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &outline_shader,
@@ -863,8 +874,8 @@ impl State {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -888,7 +899,7 @@ impl State {
                 module: &ui_shader,
                 entry_point: Some("vs_ui"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &ui_shader,
@@ -926,7 +937,7 @@ impl State {
                 module: &sun_shader,
                 entry_point: Some("vs_sun"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &sun_shader,
@@ -946,8 +957,8 @@ impl State {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -971,7 +982,7 @@ impl State {
                 module: &sky_shader,
                 entry_point: Some("vs_sky"),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &sky_shader,
@@ -991,10 +1002,10 @@ impl State {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
+                depth_write_enabled: Some(false),
                 // `LessEqual` rather than `Less` because the sky sits at
                 // exactly depth 1.0 and we want it to pass rather than fail.
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1192,7 +1203,7 @@ impl State {
         let depth_resolve_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Depth Resolve Pipeline Layout"),
-                bind_group_layouts: &[&depth_resolve_bind_group_layout],
+                bind_group_layouts: &[Some(&depth_resolve_bind_group_layout)],
                 immediate_size: 0,
             });
         let depth_resolve_pipeline =
@@ -1319,7 +1330,7 @@ impl State {
         let composite_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Composite Pipeline Layout"),
-                bind_group_layouts: &[&composite_bind_group_layout],
+                bind_group_layouts: &[Some(&composite_bind_group_layout)],
                 immediate_size: 0,
             });
         let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1447,7 +1458,7 @@ impl State {
             layout: Some(
                 &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Hi-Z Pipeline Layout"),
-                    bind_group_layouts: &[&hiz_bind_group_layout],
+                    bind_group_layouts: &[Some(&hiz_bind_group_layout)],
                     immediate_size: 0,
                 }),
             ),
