@@ -18,6 +18,11 @@ const DENSITY_CELL_SIZE: i32 = 4;
 const DENSITY_XZ_SAMPLES: usize = (CHUNK_SIZE / DENSITY_CELL_SIZE + 1) as usize;
 const DENSITY_Y_SAMPLES: usize = (WORLD_HEIGHT / DENSITY_CELL_SIZE + 1) as usize;
 const DENSITY_LATTICE_LEN: usize = DENSITY_XZ_SAMPLES * DENSITY_Y_SAMPLES * DENSITY_XZ_SAMPLES;
+/// Cave fields contain the most expensive 3-D noise in chunk generation.
+/// Keep their lattice independently tunable from terrain-density sampling.
+const CAVE_XZ_SAMPLES: usize = (CHUNK_SIZE / CAVE_CELL_SIZE + 1) as usize;
+const CAVE_Y_SAMPLES: usize = (WORLD_HEIGHT / CAVE_CELL_SIZE + 1) as usize;
+const CAVE_LATTICE_LEN: usize = CAVE_XZ_SAMPLES * CAVE_Y_SAMPLES * CAVE_XZ_SAMPLES;
 const TERRAIN_WARP_Z_OFFSET: f32 = 200.0;
 const MACRO_WARP_AMPLITUDE: f32 = 220.0;
 const REGIONAL_WARP_AMPLITUDE: f32 = 45.0;
@@ -344,9 +349,8 @@ impl ChunkGenerator {
         // merely the macro-height estimate used to construct the field.
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
-                let macro_height = height_map[lx as usize][lz as usize];
                 height_map[lx as usize][lz as usize] =
-                    self.density_surface_height(&density_lattice, lx, lz, macro_height);
+                    self.density_surface_height(&density_lattice, lx, lz);
             }
         }
         // Surface rules must see the final density surface. At chunk edges the
@@ -387,6 +391,9 @@ impl ChunkGenerator {
                     self.is_cave_entrance(world_x, world_z, height_map[lx as usize][lz as usize]);
             }
         }
+        // The expensive domain-warped cave field is sampled once per coarse
+        // cell corner. Endpoints lie on chunk boundaries, preventing seams.
+        let cave_lattice = self.build_cave_lattice(base_x, base_z, &density_lattice);
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 let world_x = base_x + lx;
@@ -396,10 +403,20 @@ impl ChunkGenerator {
                 let slope = slope_map[lx as usize][lz as usize];
 
                 let is_entrance = cave_entrance_map[lx as usize][lz as usize];
-                for y in 0..WORLD_HEIGHT {
+                // `surface_height` is the highest positive terrain-density
+                // crossing in this column. Above it only empty space can
+                // exist; retaining sea level covers ocean and lake water.
+                let max_y = surface_height.max(SEA_LEVEL).min(WORLD_HEIGHT - 1);
+                for y in 0..=max_y {
                     let terrain_density = self.sample_density_lattice(&density_lattice, lx, y, lz);
-                    let cave_density =
-                        self.cave_density(world_x, y, world_z, surface_height, is_entrance);
+                    let cave_density = self.sample_cave_lattice(
+                        &cave_lattice,
+                        lx,
+                        y,
+                        lz,
+                        surface_height,
+                        is_entrance,
+                    );
                     let is_solid = terrain_density.min(cave_density) > 0.0;
 
                     if is_solid {
@@ -1089,6 +1106,40 @@ impl ChunkGenerator {
         (ix * DENSITY_Y_SAMPLES + iy) * DENSITY_XZ_SAMPLES + iz
     }
 
+    fn cave_index(ix: usize, iy: usize, iz: usize) -> usize {
+        (ix * CAVE_Y_SAMPLES + iy) * CAVE_XZ_SAMPLES + iz
+    }
+
+    fn build_cave_lattice(
+        &self,
+        base_x: i32,
+        base_z: i32,
+        density_lattice: &[f64; DENSITY_LATTICE_LEN],
+    ) -> [f64; CAVE_LATTICE_LEN] {
+        let mut lattice = [1.0; CAVE_LATTICE_LEN];
+
+        for ix in 0..CAVE_XZ_SAMPLES {
+            for iz in 0..CAVE_XZ_SAMPLES {
+                let lx = ix as i32 * CAVE_CELL_SIZE;
+                let lz = iz as i32 * CAVE_CELL_SIZE;
+                let x = base_x + lx;
+                let z = base_z + lz;
+                // The final lattice row/column is outside this chunk, but is
+                // required as its shared interpolation endpoint.
+                let surface_height = self.density_surface_height(density_lattice, lx, lz);
+                let is_entrance = self.is_cave_entrance(x, z, surface_height);
+
+                for iy in 0..CAVE_Y_SAMPLES {
+                    let y = iy as i32 * CAVE_CELL_SIZE;
+                    lattice[Self::cave_index(ix, iy, iz)] =
+                        self.cave_density(x, y, z, surface_height, is_entrance);
+                }
+            }
+        }
+
+        lattice
+    }
+
     fn build_density_lattice(
         &self,
         base_x: i32,
@@ -1157,23 +1208,73 @@ impl ChunkGenerator {
         lerp(a, b, ty)
     }
 
+    fn sample_cave_lattice(
+        &self,
+        lattice: &[f64; CAVE_LATTICE_LEN],
+        lx: i32,
+        y: i32,
+        lz: i32,
+        surface_height: i32,
+        is_entrance: bool,
+    ) -> f64 {
+        // A local guard prevents interpolation from a lower cell opening the
+        // surface, and avoids all interpolation for sky voxels.
+        if y <= 4 || y >= surface_height {
+            return 1.0;
+        }
+
+        let ix = (lx / CAVE_CELL_SIZE) as usize;
+        let iy = (y / CAVE_CELL_SIZE) as usize;
+        let iz = (lz / CAVE_CELL_SIZE) as usize;
+        let tx = (lx.rem_euclid(CAVE_CELL_SIZE) as f64) / CAVE_CELL_SIZE as f64;
+        let ty = (y.rem_euclid(CAVE_CELL_SIZE) as f64) / CAVE_CELL_SIZE as f64;
+        let tz = (lz.rem_euclid(CAVE_CELL_SIZE) as f64) / CAVE_CELL_SIZE as f64;
+        let x1 = (ix + 1).min(CAVE_XZ_SAMPLES - 1);
+        let y1 = (iy + 1).min(CAVE_Y_SAMPLES - 1);
+        let z1 = (iz + 1).min(CAVE_XZ_SAMPLES - 1);
+        let at = |x, yy, z| lattice[Self::cave_index(x, yy, z)];
+        let a = lerp(
+            lerp(at(ix, iy, iz), at(x1, iy, iz), tx),
+            lerp(at(ix, iy, z1), at(x1, iy, z1), tx),
+            tz,
+        );
+        let b = lerp(
+            lerp(at(ix, y1, iz), at(x1, y1, iz), tx),
+            lerp(at(ix, y1, z1), at(x1, y1, z1), tx),
+            tz,
+        );
+        let interpolated = lerp(a, b, ty);
+
+        // Retain the exact near-surface protection of the former per-voxel
+        // path, including the smaller opening margin for valid entrances.
+        let min_surface_dist = if is_entrance {
+            let t = ((surface_height - y) as f32 / 18.0).clamp(0.0, 1.0);
+            (2.0 + t * 10.0) as i32
+        } else {
+            18
+        };
+        if y >= surface_height - min_surface_dist {
+            1.0
+        } else {
+            interpolated
+        }
+    }
+
     fn density_surface_height(
         &self,
         lattice: &[f64; DENSITY_LATTICE_LEN],
         lx: i32,
         lz: i32,
-        macro_height: i32,
     ) -> i32 {
-        // The final crossing normally stays close to the macro height. Keep a
-        // bounded fallback window instead of scanning the whole column.
-        let min_y = (macro_height - 72).max(1);
-        let max_y = (macro_height + 72).min(WORLD_HEIGHT - 1);
-        for y in (min_y..=max_y).rev() {
+        // This full column scan establishes an exact upper bound for emitted
+        // terrain blocks. It is cheap trilinear interpolation and lets the
+        // final voxel pass skip all permanently empty sky voxels.
+        for y in (1..WORLD_HEIGHT).rev() {
             if self.sample_density_lattice(lattice, lx, y, lz) > 0.0 {
                 return y + 1;
             }
         }
-        macro_height
+        1
     }
 
     // ── Block type assignment ─────────────────────────────────────────────── //

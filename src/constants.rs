@@ -2,6 +2,9 @@ use crate::logger::{LogLevel, log};
 
 pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 16;
+/// Spacing of the interpolated cave-density lattice. A value of four reduces
+/// expensive cave-noise evaluations to one per 4×4×4 voxel cell.
+pub const CAVE_CELL_SIZE: i32 = 4;
 pub const SUBCHUNK_HEIGHT: i32 = 16;
 pub const NUM_SUBCHUNKS: i32 = WORLD_HEIGHT / SUBCHUNK_HEIGHT;
 pub const RENDER_DISTANCE: i32 = 32;
