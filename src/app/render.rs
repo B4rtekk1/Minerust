@@ -110,6 +110,142 @@ fn build_menu_input_box(
 }
 
 impl State {
+    /// Uploads the material/occupancy clipmap when its 16-block-aligned origin
+    /// changes.  Keeping this separate from mesh uploads makes GI correct for
+    /// greedy-meshed interiors and newly streamed chunks alike.
+    fn update_ddgi_voxel_clipmap(&mut self) {
+        const SIDE: i32 = 256;
+        let camera_x = self.camera.position.x.floor() as i32;
+        let camera_z = self.camera.position.z.floor() as i32;
+        let origin = (
+            camera_x.div_euclid(16) * 16 - SIDE / 2,
+            0,
+            camera_z.div_euclid(16) * 16 - SIDE / 2,
+        );
+        if self.ddgi.voxel_origin == origin {
+            return;
+        }
+
+        let mut materials = vec![0u8; (SIDE * SIDE * SIDE) as usize];
+        {
+            let world = self.world.read();
+            for z in 0..SIDE {
+                for y in 0..SIDE {
+                    let row = ((z * SIDE + y) * SIDE) as usize;
+                    for x in 0..SIDE {
+                        // BlockType is repr(u8); its discriminants are also the
+                        // stable material IDs consumed by ddgi.wgsl.
+                        materials[row + x as usize] =
+                            world.get_block(origin.0 + x, y, origin.2 + z) as u8;
+                    }
+                }
+            }
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.ddgi.voxel_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &materials,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SIDE as u32),
+                rows_per_image: Some(SIDE as u32),
+            },
+            wgpu::Extent3d {
+                width: SIDE as u32,
+                height: SIDE as u32,
+                depth_or_array_layers: SIDE as u32,
+            },
+        );
+        // A scroll invalidates probe history. Clearing both ping-pong buffers
+        // avoids irradiance from the previous world region leaking into view.
+        let zeros = vec![0u8; (24 * 16 * 24 * 2 * 7 * 16) as usize];
+        self.queue
+            .write_buffer(&self.ddgi.probe_buffers[0], 0, &zeros);
+        self.queue
+            .write_buffer(&self.ddgi.probe_buffers[1], 0, &zeros);
+        self.ddgi.active_probe_set = 0;
+        self.ddgi.voxel_origin = origin;
+    }
+
+    fn update_ddgi(&mut self, encoder: &mut wgpu::CommandEncoder, sun_dir: Vec3) -> usize {
+        self.update_ddgi_voxel_clipmap();
+        let camera = self.camera.eye_position();
+        // Probe [0,0,0] is snapped to the grid.  The near grid spans 92 blocks;
+        // the second, 10-block cascade supplies stable medium-scale bounce.
+        let near_spacing = 4.0;
+        let far_spacing = 10.0;
+        let near_origin = [
+            (camera.x / near_spacing).floor() * near_spacing - 46.0,
+            (camera.y / near_spacing).floor() * near_spacing - 30.0,
+            (camera.z / near_spacing).floor() * near_spacing - 46.0,
+            near_spacing,
+        ];
+        let far_origin = [
+            (camera.x / far_spacing).floor() * far_spacing - 115.0,
+            (camera.y / far_spacing).floor() * far_spacing - 75.0,
+            (camera.z / far_spacing).floor() * far_spacing - 115.0,
+            far_spacing,
+        ];
+        let probe_origins = [
+            (
+                near_origin[0] as i32,
+                near_origin[1] as i32,
+                near_origin[2] as i32,
+            ),
+            (
+                far_origin[0] as i32,
+                far_origin[1] as i32,
+                far_origin[2] as i32,
+            ),
+        ];
+        if self.ddgi.probe_origins != probe_origins {
+            // The correct long-term solution is toroidal probe scrolling.  A
+            // conservative reset is preferable to reusing lighting at a wrong
+            // world position while that optimization is still pending.
+            let zeros = vec![0u8; (24 * 16 * 24 * 2 * 7 * 16) as usize];
+            self.queue
+                .write_buffer(&self.ddgi.probe_buffers[0], 0, &zeros);
+            self.queue
+                .write_buffer(&self.ddgi.probe_buffers[1], 0, &zeros);
+            self.ddgi.active_probe_set = 0;
+            self.ddgi.probe_origins = probe_origins;
+        }
+        let config = [
+            near_origin,
+            far_origin,
+            [
+                self.ddgi.voxel_origin.0 as f32,
+                0.0,
+                self.ddgi.voxel_origin.2 as f32,
+                self.frame_count as f32,
+            ],
+            [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+        ];
+        self.queue
+            .write_buffer(&self.ddgi.config_buffer, 0, bytemuck::cast_slice(&config));
+
+        let read_set = self.ddgi.active_probe_set;
+        let write_set = 1 - read_set;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Cascaded Voxel DDGI"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ddgi.compute_pipeline);
+            pass.set_bind_group(0, &self.ddgi.config_bind_group, &[]);
+            pass.set_bind_group(1, &self.ddgi.voxel_bind_group, &[]);
+            pass.set_bind_group(2, &self.ddgi.compute_bind_groups[read_set], &[]);
+            pass.set_bind_group(3, &self.ddgi.compute_write_bind_groups[read_set], &[]);
+            pass.dispatch_workgroups((24 * 16 * 24 * 2 + 63) / 64, 1, 1);
+        }
+        self.ddgi.active_probe_set = write_set;
+        write_set
+    }
+
     fn rebuild_visible_chunk_cache(&mut self, player_cx: i32, player_cz: i32) {
         if !self.visible_chunk_columns_dirty
             && self.visible_chunk_cache_center == (player_cx, player_cz)
@@ -370,6 +506,14 @@ impl State {
         );
         self.frame_profile.uniform_upload_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
+        // Probe updates run before rasterization, so the terrain pass samples
+        // the freshly written ping-pong buffer in this same command buffer.
+        let ddgi_probe_set = if render_world_scene {
+            self.update_ddgi(&mut encoder, sun_dir)
+        } else {
+            self.ddgi.active_probe_set
+        };
+
         // ── Frustum planes (main camera) ──────────────────────────────────── //
         // Six half-space planes derived from the combined view-projection
         // matrix, used both for CPU-side mesh gating and the GPU cull shader.
@@ -516,6 +660,7 @@ impl State {
             opaque_pass.set_pipeline(&self.render_pipeline);
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             opaque_pass.set_bind_group(1, &self.terrain_quad_bind_group, &[]);
+            opaque_pass.set_bind_group(2, &self.ddgi.terrain_bind_groups[ddgi_probe_set], &[]);
             if self.supports_indirect_count {
                 opaque_pass.multi_draw_indirect_count(
                     self.indirect_manager.draw_commands(),

@@ -17,6 +17,26 @@ use rustc_hash::FxHashSet;
 
 pub(super) const MSAA_SAMPLE_COUNT: u32 = 4;
 
+/// GPU resources for the two cascaded voxel-DDGI volumes.  Probe sets are
+/// ping-ponged so the compute pass never reads and writes the same history.
+pub struct DdgiResources {
+    pub voxel_texture: wgpu::Texture,
+    pub config_buffer: wgpu::Buffer,
+    pub config_bind_group: wgpu::BindGroup,
+    pub voxel_bind_group: wgpu::BindGroup,
+    pub probe_buffers: [wgpu::Buffer; 2],
+    pub compute_pipeline: wgpu::ComputePipeline,
+    pub compute_bind_groups: [wgpu::BindGroup; 2],
+    pub compute_write_bind_groups: [wgpu::BindGroup; 2],
+    pub terrain_bind_groups: [wgpu::BindGroup; 2],
+    pub active_probe_set: usize,
+    /// World-space minimum corner of the uploaded voxel volume.
+    pub voxel_origin: (i32, i32, i32),
+    /// Origins associated with the current probe history.  Until ring-buffer
+    /// scrolling is introduced, an origin change resets history conservatively.
+    pub probe_origins: [(i32, i32, i32); 2],
+}
+
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
 #[derive(Default)]
 pub struct BlockPlacementState {
@@ -315,6 +335,8 @@ pub struct State {
     pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
+    /// Cascaded irradiance probes and the voxel clipmap queried by their DDA rays.
+    pub ddgi: DdgiResources,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
