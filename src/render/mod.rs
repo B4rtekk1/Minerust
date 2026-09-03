@@ -10,7 +10,8 @@ pub mod atlas_map;
 pub use frustum::{AABB, extract_frustum_planes};
 pub use indirect::{DrawIndirect, IndirectBufferBudget, IndirectManager, SubchunkKey};
 pub use mesh::{
-    add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_player_model,
+    add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_item_model,
+    build_player_model,
 };
 pub use mesh_loader::MeshLoader;
 pub use quad::{PackedQuad, pack_quad_stream};

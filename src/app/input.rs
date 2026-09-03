@@ -99,6 +99,9 @@ impl State {
         self.input = Default::default();
         self.digging = Default::default();
         self.placement = Default::default();
+        self.inventory = Default::default();
+        self.item_entities.clear();
+        self.next_entity_id = 1;
         self.camera = minerust::Camera::new(spawn);
         self.game_start_time = std::time::Instant::now();
         self.last_frame = std::time::Instant::now();

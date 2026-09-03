@@ -397,6 +397,12 @@ pub struct State {
     pub digging: DiggingState,
     /// Repeat-placement tracker used while the right mouse button is held.
     pub placement: BlockPlacementState,
+    /// Player-owned item stacks. World drops are inserted here only on pickup.
+    pub inventory: minerust::Inventory,
+    /// Dropped item stacks currently simulated in the world.
+    pub item_entities: Vec<minerust::ItemEntity>,
+    /// Monotonic ID source for locally spawned item entities.
+    pub next_entity_id: minerust::EntityId,
     /// The OS window; shared with the event loop and network thread.
     pub window: Arc<Window>,
     /// Whether the cursor is captured (hidden and locked to the window center).

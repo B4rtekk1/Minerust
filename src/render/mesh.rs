@@ -1,3 +1,4 @@
+use crate::core::block::BlockType;
 use crate::core::vertex::{OutlineVertex, Vertex};
 
 /// Adds a single quad (two triangles) to the vertex and index buffers.
@@ -400,6 +401,56 @@ pub fn build_block_outline(
 ///
 /// # Returns
 /// A tuple of `(vertices, indices)` ready to be uploaded to the GPU.
+/// Builds a compact, slowly rotating textured cube for a dropped item.
+/// The model deliberately uses the regular dynamic-model path so it is lit,
+/// fogged and depth-tested exactly like remote players.
+pub fn build_item_model(position: [f32; 3], block: BlockType, yaw: f32) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    let half = 0.18;
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    let corners = [
+        (-half, -half, -half), (half, -half, -half), (half, half, -half), (-half, half, -half),
+        (-half, -half, half), (half, -half, half), (half, half, half), (-half, half, half),
+    ];
+    let transformed: Vec<[f32; 3]> = corners
+        .iter()
+        .map(|&(dx, dy, dz)| [
+            position[0] + dx * cos_yaw - dz * sin_yaw,
+            position[1] + dy,
+            position[2] + dx * sin_yaw + dz * cos_yaw,
+        ])
+        .collect();
+    // Corner order follows the player model's outward-facing winding.
+    let faces = [
+        ([4, 5, 6, 7], [0.0, 0.0, 1.0], 5),
+        ([1, 0, 3, 2], [0.0, 0.0, -1.0], 4),
+        ([5, 1, 2, 6], [1.0, 0.0, 0.0], 1),
+        ([0, 4, 7, 3], [-1.0, 0.0, 0.0], 0),
+        ([7, 6, 2, 3], [0.0, 1.0, 0.0], 3),
+        ([0, 1, 5, 4], [0.0, -1.0, 0.0], 2),
+    ];
+    for (face, normal, direction) in faces {
+        let base = vertices.len() as u32;
+        let packed_normal = Vertex::pack_normal(normal);
+        for (corner, &index) in face.iter().enumerate() {
+            vertices.push(Vertex {
+                position: transformed[index],
+                packed: Vertex::pack(
+                    packed_normal,
+                    block.color(),
+                    block.tex_for_face(direction) as u8,
+                    corner as u8,
+                    1,
+                    1,
+                ),
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    (vertices, indices)
+}
+
 pub fn build_player_model(x: f32, y: f32, z: f32, yaw: f32) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(2000);
     let mut indices = Vec::with_capacity(1000);

@@ -1,8 +1,10 @@
+use glam::Vec3;
 use std::time::Instant;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME,
-    MAX_CHUNKS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, SubchunkKey,
+    BlockType, SubchunkKey, CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, GENERATION_DISTANCE,
+    MAX_CHUNKS_PER_FRAME, MAX_CHUNK_COMMITS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS,
+    SUBCHUNK_HEIGHT,
 };
 use rustc_hash::FxHashSet;
 
@@ -13,6 +15,51 @@ use crate::ui::menu::GameState;
 use super::state::{State, WorldSnapshot, WorldWriteOps};
 
 impl State {
+    /// Runs world-drop physics and transfers an item only when the whole stack
+    /// fits in the inventory. This prevents silently deleting overflow items.
+    fn update_item_entities(&mut self, dt: f32) {
+        let mut entities = std::mem::take(&mut self.item_entities);
+        let player_position = self.camera.position;
+        let world = self.world.read();
+        entities.retain_mut(|entity| {
+            if !entity.update(&world, dt) {
+                return false;
+            }
+            if entity.pickup_delay > 0.0 || entity.position.distance(player_position) >= 1.5 {
+                return true;
+            }
+            let Some(item) = minerust::core::game_item::get_item(entity.item_id) else {
+                return false;
+            };
+            if self.inventory.can_add(item, entity.quantity) {
+                self.inventory.add_item(item.clone(), entity.quantity);
+                false
+            } else {
+                true
+            }
+        });
+        drop(world);
+        self.item_entities = entities;
+    }
+
+    fn spawn_block_drop(&mut self, block: BlockType, x: i32, y: i32, z: i32) {
+        let Some(item_id) = minerust::drop_for_block(block) else {
+            return;
+        };
+        let id = self.next_entity_id;
+        self.next_entity_id = self.next_entity_id.wrapping_add(1).max(1);
+        let mut entity = minerust::ItemEntity::new(
+            id,
+            item_id,
+            1,
+            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+        );
+        // A small deterministic burst keeps repeated drops from occupying one point.
+        entity.velocity.x = ((id.wrapping_mul(37) % 100) as f32 / 100.0 - 0.5) * 2.0;
+        entity.velocity.z = ((id.wrapping_mul(71) % 100) as f32 / 100.0 - 0.5) * 2.0;
+        self.item_entities.push(entity);
+    }
+
     /// Adds a stale subchunk to the meshing work list exactly once.
     pub(crate) fn enqueue_dirty_mesh(&mut self, key: SubchunkKey) {
         if self.dirty_mesh_queued.insert(key) {
@@ -402,6 +449,10 @@ impl State {
 
         self.input.jump = false;
 
+        // Drops are simulated after camera physics, so distance tests use the
+        // player's current position and terrain is only read-locked briefly.
+        self.update_item_entities(dt);
+
         self.highlighted_block = snapshot
             .raycast_result
             .map(|(bx, by, bz, _, _, _)| (bx, by, bz));
@@ -456,6 +507,7 @@ impl State {
                                 // Block fully broken — schedule removal.
                                 write_ops.block_break = Some((bx, by, bz));
                                 write_ops.mark_dirty.push((bx, by, bz));
+                                self.spawn_block_drop(target_block, bx, by, bz);
                                 self.digging.target = None;
                                 self.digging.progress = 0.0;
                             }

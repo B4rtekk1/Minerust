@@ -6,8 +6,8 @@ use wgpu::util::DeviceExt;
 
 use minerust::{
     BlockType, CHUNK_SIZE, DEFAULT_FOV, MAX_MESH_BUILDS_PER_FRAME, RENDER_DISTANCE, SEA_LEVEL,
-    SUN_MOVEMENT_SPEED, Uniforms, Vertex, World, build_block_outline, build_player_model,
-    extract_frustum_planes,
+    SUN_MOVEMENT_SPEED, Uniforms, Vertex, World, build_block_outline, build_item_model,
+    build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
@@ -202,13 +202,17 @@ impl State {
         let render_world_scene = !menu_visible || menu_uses_world_background;
         let preparation_start = Instant::now();
 
-        // ── Remote player model buffers ───────────────────────────────────── //
-        // All remote player meshes are concatenated into a single vertex/index
-        // buffer pair that grows on demand (doubling strategy).  This avoids
-        // per-player draw calls and keeps buffer management simple.
-        if !self.remote_players.is_empty() && render_world_scene {
-            let mut all_vertices = Vec::with_capacity(self.remote_players.len() * 16);
-            let mut all_indices = Vec::with_capacity(self.remote_players.len() * 24);
+        // ── Dynamic world-model buffers ──────────────────────────────────── //
+        // Remote players and dropped items share one vertex/index pair. This
+        // avoids a draw call per item while preserving terrain lighting, fog,
+        // depth testing and terrain-atlas textures.
+        if (!self.remote_players.is_empty() || !self.item_entities.is_empty()) && render_world_scene {
+            let mut all_vertices = Vec::with_capacity(
+                self.remote_players.len() * 16 + self.item_entities.len() * 24,
+            );
+            let mut all_indices = Vec::with_capacity(
+                self.remote_players.len() * 24 + self.item_entities.len() * 36,
+            );
 
             for (_id, player) in &self.remote_players {
                 let (vertices, indices) =
@@ -216,6 +220,22 @@ impl State {
                 let base_idx = all_vertices.len() as u32;
                 all_vertices.extend(vertices);
                 // Remap local indices to the combined buffer's address space.
+                all_indices.extend(indices.iter().map(|i| i + base_idx));
+            }
+
+            let elapsed = self.game_start_time.elapsed().as_secs_f32();
+            for item in &self.item_entities {
+                let Some(block) = minerust::block_for_item(item.item_id) else {
+                    continue;
+                };
+                let bob = (elapsed * 3.0 + item.id as f32 * 0.71).sin() * 0.06;
+                let (vertices, indices) = build_item_model(
+                    [item.position.x, item.position.y + bob, item.position.z],
+                    block,
+                    elapsed * 1.8 + item.id as f32 * 0.37,
+                );
+                let base_idx = all_vertices.len() as u32;
+                all_vertices.extend(vertices);
                 all_indices.extend(indices.iter().map(|i| i + base_idx));
             }
 
