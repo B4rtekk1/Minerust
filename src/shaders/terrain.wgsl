@@ -89,10 +89,12 @@ struct DdgiConfig {
     far_origin_spacing: vec4<f32>,
     voxel_origin_frame: vec4<f32>,
     sun_dir: vec4<f32>,
+    voxel_scroll: vec4<f32>, near_scroll: vec4<f32>, far_scroll: vec4<f32>,
 };
 struct Probe {
     px: vec4<f32>, nx: vec4<f32>, py: vec4<f32>, ny: vec4<f32>, pz: vec4<f32>, nz: vec4<f32>,
-    distance: vec4<f32>,
+    dpx: vec4<f32>, dnx: vec4<f32>, dpy: vec4<f32>, dny: vec4<f32>, dpz: vec4<f32>, dnz: vec4<f32>,
+    offset: vec4<f32>, anchor: vec4<f32>,
 };
 @group(2) @binding(0) var<uniform> ddgi_config: DdgiConfig;
 @group(2) @binding(1) var<storage, read> ddgi_probes: array<Probe>;
@@ -103,7 +105,9 @@ const DDGI_Z: i32 = 24;
 const DDGI_CASCADE_SIZE: u32 = 9216u;
 
 fn ddgi_probe_index(cell: vec3<i32>, cascade: u32) -> u32 {
-    return cascade * DDGI_CASCADE_SIZE + u32(cell.x + cell.y * DDGI_X + cell.z * DDGI_X * DDGI_Y);
+    let ring = select(ddgi_config.near_scroll.xyz, ddgi_config.far_scroll.xyz, cascade == 1u);
+    let physical = vec3<i32>((cell.x + i32(ring.x)) % DDGI_X, (cell.y + i32(ring.y)) % DDGI_Y, (cell.z + i32(ring.z)) % DDGI_Z);
+    return cascade * DDGI_CASCADE_SIZE + u32(physical.x + physical.y * DDGI_X + physical.z * DDGI_X * DDGI_Y);
 }
 
 fn ddgi_lobe(p: Probe, normal: vec3<f32>) -> vec3<f32> {
@@ -130,10 +134,13 @@ fn ddgi_sample_cascade(world_pos: vec3<f32>, normal: vec3<f32>, cascade: u32) ->
                 let probe = ddgi_probes[ddgi_probe_index(cell, cascade)];
                 // Moment-based visibility rejects probes whose closest geometry
                 // lies between the probe and this shaded surface.
-                let probe_pos = base.xyz + vec3<f32>(cell) * base.w;
+                let probe_pos = base.xyz + vec3<f32>(cell) * base.w + probe.offset.xyz;
                 let distance = length(world_pos - probe_pos);
-                let variance = max(probe.distance.y - probe.distance.x * probe.distance.x, 0.25);
-                let chebyshev = variance / (variance + max(distance - probe.distance.x, 0.0) * max(distance - probe.distance.x, 0.0));
+                let dir = normalize(world_pos - probe_pos);
+                let moment = select(select(probe.dnz, probe.dpz, dir.z >= 0.0), select(select(probe.dny, probe.dpy, dir.y >= 0.0), select(probe.dnx, probe.dpx, dir.x >= 0.0), abs(dir.x) >= max(abs(dir.y), abs(dir.z))), abs(dir.y) >= abs(dir.z));
+                let variance = max(moment.y - moment.x * moment.x, 0.25);
+                let chebyshev = variance / (variance + max(distance - moment.x, 0.0) * max(distance - moment.x, 0.0));
+                if any(abs(probe.anchor.xyz - (base.xyz + vec3<f32>(cell) * base.w)) > vec3(0.01)) { continue; }
                 let weight = wx * wy * wz * chebyshev;
                 result += ddgi_lobe(probe, normal) * weight;
                 weight_sum += weight;
@@ -147,8 +154,11 @@ fn voxel_ddgi(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let near = ddgi_sample_cascade(world_pos, normal, 0u);
     let far = ddgi_sample_cascade(world_pos, normal, 1u);
     let near_center = ddgi_config.near_origin_spacing.xyz + vec3<f32>(46.0, 30.0, 46.0);
-    let edge = max(abs(world_pos.x - near_center.x), abs(world_pos.z - near_center.z));
-    return mix(near, far, smoothstep(32.0, 44.0, edge));
+    let local = abs(world_pos - near_center);
+    // Blend against all three volume bounds; otherwise caves/cliffs outside
+    // the near Y extent incorrectly keep sampling its empty border.
+    let edge = max(local.x / 46.0, max(local.y / 30.0, local.z / 46.0));
+    return mix(near, far, smoothstep(0.70, 0.94, edge));
 }
 
 struct VertexOutput {
@@ -268,10 +278,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
     if tex.a < 0.5 { discard; }
 
-    // DDGI is geometry-aware and contains real material bounce.  Keep a
-    // faint analytic term only while probes converge or outside both volumes.
-    let analytic_indirect = fast_global_illumination(normal, sun_dir, day_factor, twilight_factor);
-    let indirect_light = max(voxel_ddgi(in.world_pos + normal * 0.03, normal), analytic_indirect * 0.20);
+    // Never clamp DDGI with camera-global analytic lighting: that turns an
+    // outdoor camera into a false sky source for every visible cave.
+    let indirect_light = voxel_ddgi(in.world_pos + normal * 0.03, normal);
 
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
     // Direct sunlight and sky fill cannot reach an area with a solid ceiling.
@@ -292,11 +301,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             + sun_color * sun_diff
             + vec3<f32>(0.58, 0.68, 0.82) * fill_diff * mix(0.70, 1.0, ambient_occlusion))
         * face_contrast;
-    let light_luma = dot(total_light, vec3<f32>(0.299, 0.587, 0.114));
-    let tint_luma = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
-    let dark_tint_neutralize = smoothstep(0.16, 0.035, light_luma) * 0.65;
-    let local_tint = mix(in.color, vec3<f32>(tint_luma), vec3<f32>(dark_tint_neutralize));
-    var lit = tex.rgb * total_light * local_tint;
+    // `in.color` is material/biome tint only; baked aperture/ground GI was
+    // removed from the mesher to avoid multiplying DDGI by legacy lighting.
+    var lit = tex.rgb * total_light * in.color;
 
     let sunset_factor = 1.0 - abs(sun_dir.y);
     if sunset_factor > 0.3 && sun_dir.y > -0.2 {

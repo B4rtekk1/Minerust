@@ -125,49 +125,150 @@ impl State {
         if self.ddgi.voxel_origin == origin {
             return;
         }
+        let initial_upload = self.ddgi.voxel_origin.0 == i32::MIN;
+        let old_origin = self.ddgi.voxel_origin;
+        let delta_x = if initial_upload {
+            0
+        } else {
+            origin.0 - old_origin.0
+        };
+        let delta_z = if initial_upload {
+            0
+        } else {
+            origin.2 - old_origin.2
+        };
+        self.ddgi.voxel_scroll.0 = (self.ddgi.voxel_scroll.0 + delta_x).rem_euclid(SIDE);
+        self.ddgi.voxel_scroll.2 = (self.ddgi.voxel_scroll.2 + delta_z).rem_euclid(SIDE);
 
-        let mut materials = vec![0u8; (SIDE * SIDE * SIDE) as usize];
-        {
+        if initial_upload {
+            let mut materials = vec![0u8; (SIDE * SIDE * SIDE) as usize];
             let world = self.world.read();
             for z in 0..SIDE {
                 for y in 0..SIDE {
-                    let row = ((z * SIDE + y) * SIDE) as usize;
                     for x in 0..SIDE {
-                        // BlockType is repr(u8); its discriminants are also the
-                        // stable material IDs consumed by ddgi.wgsl.
-                        materials[row + x as usize] =
+                        materials[((z * SIDE + y) * SIDE + x) as usize] =
                             world.get_block(origin.0 + x, y, origin.2 + z) as u8;
                     }
                 }
             }
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.ddgi.voxel_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &materials,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(SIDE as u32),
+                    rows_per_image: Some(SIDE as u32),
+                },
+                wgpu::Extent3d {
+                    width: SIDE as u32,
+                    height: SIDE as u32,
+                    depth_or_array_layers: SIDE as u32,
+                },
+            );
+        } else {
+            // A scroll exposes only one 16×256×256 slab per moved axis. Data
+            // is written in physical torus order, so no texture copy is needed.
+            let world = self.world.read();
+            let upload_x = |logical_x: i32,
+                            world: &minerust::World,
+                            queue: &wgpu::Queue,
+                            texture: &wgpu::Texture,
+                            scroll: (i32, i32, i32)| {
+                let physical_x = (logical_x + scroll.0).rem_euclid(SIDE);
+                let mut data = vec![0u8; (SIDE * SIDE) as usize];
+                for pz in 0..SIDE {
+                    let logical_z = (pz - scroll.2).rem_euclid(SIDE);
+                    for y in 0..SIDE {
+                        data[(pz * SIDE + y) as usize] =
+                            world.get_block(origin.0 + logical_x, y, origin.2 + logical_z) as u8;
+                    }
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: physical_x as u32,
+                            y: 0,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(1),
+                        rows_per_image: Some(SIDE as u32),
+                    },
+                    wgpu::Extent3d {
+                        width: 1,
+                        height: SIDE as u32,
+                        depth_or_array_layers: SIDE as u32,
+                    },
+                );
+            };
+            let upload_z = |logical_z: i32,
+                            world: &minerust::World,
+                            queue: &wgpu::Queue,
+                            texture: &wgpu::Texture,
+                            scroll: (i32, i32, i32)| {
+                let physical_z = (logical_z + scroll.2).rem_euclid(SIDE);
+                let mut data = vec![0u8; (SIDE * SIDE) as usize];
+                for y in 0..SIDE {
+                    for px in 0..SIDE {
+                        let logical_x = (px - scroll.0).rem_euclid(SIDE);
+                        data[(y * SIDE + px) as usize] =
+                            world.get_block(origin.0 + logical_x, y, origin.2 + logical_z) as u8;
+                    }
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: physical_z as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(SIDE as u32),
+                        rows_per_image: Some(SIDE as u32),
+                    },
+                    wgpu::Extent3d {
+                        width: SIDE as u32,
+                        height: SIDE as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            };
+            for i in 0..delta_x.abs().min(SIDE) {
+                upload_x(
+                    if delta_x > 0 { SIDE - delta_x + i } else { i },
+                    &world,
+                    &self.queue,
+                    &self.ddgi.voxel_texture,
+                    self.ddgi.voxel_scroll,
+                );
+            }
+            for i in 0..delta_z.abs().min(SIDE) {
+                upload_z(
+                    if delta_z > 0 { SIDE - delta_z + i } else { i },
+                    &world,
+                    &self.queue,
+                    &self.ddgi.voxel_texture,
+                    self.ddgi.voxel_scroll,
+                );
+            }
         }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.ddgi.voxel_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &materials,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(SIDE as u32),
-                rows_per_image: Some(SIDE as u32),
-            },
-            wgpu::Extent3d {
-                width: SIDE as u32,
-                height: SIDE as u32,
-                depth_or_array_layers: SIDE as u32,
-            },
-        );
-        // A scroll invalidates probe history. Clearing both ping-pong buffers
-        // avoids irradiance from the previous world region leaking into view.
-        let zeros = vec![0u8; (24 * 16 * 24 * 2 * 7 * 16) as usize];
-        self.queue
-            .write_buffer(&self.ddgi.probe_buffers[0], 0, &zeros);
-        self.queue
-            .write_buffer(&self.ddgi.probe_buffers[1], 0, &zeros);
-        self.ddgi.active_probe_set = 0;
         self.ddgi.voxel_origin = origin;
     }
 
@@ -202,18 +303,26 @@ impl State {
                 far_origin[2] as i32,
             ),
         ];
-        if self.ddgi.probe_origins != probe_origins {
-            // The correct long-term solution is toroidal probe scrolling.  A
-            // conservative reset is preferable to reusing lighting at a wrong
-            // world position while that optimization is still pending.
-            let zeros = vec![0u8; (24 * 16 * 24 * 2 * 7 * 16) as usize];
-            self.queue
-                .write_buffer(&self.ddgi.probe_buffers[0], 0, &zeros);
-            self.queue
-                .write_buffer(&self.ddgi.probe_buffers[1], 0, &zeros);
-            self.ddgi.active_probe_set = 0;
-            self.ddgi.probe_origins = probe_origins;
+        if self.ddgi.probe_origins[0].0 != i32::MIN {
+            for cascade in 0..2 {
+                let old = self.ddgi.probe_origins[cascade];
+                let new = probe_origins[cascade];
+                let spacing = if cascade == 0 { 4 } else { 10 };
+                let dims = (24, 16, 24);
+                self.ddgi.probe_scroll[cascade].0 = (self.ddgi.probe_scroll[cascade].0
+                    + (new.0 - old.0) / spacing)
+                    .rem_euclid(dims.0);
+                self.ddgi.probe_scroll[cascade].1 = (self.ddgi.probe_scroll[cascade].1
+                    + (new.1 - old.1) / spacing)
+                    .rem_euclid(dims.1);
+                self.ddgi.probe_scroll[cascade].2 = (self.ddgi.probe_scroll[cascade].2
+                    + (new.2 - old.2) / spacing)
+                    .rem_euclid(dims.2);
+            }
         }
+        // No history copy or clear: anchors in the probe buffer invalidate only
+        // freshly exposed toroidal layers until their scheduled update runs.
+        self.ddgi.probe_origins = probe_origins;
         let config = [
             near_origin,
             far_origin,
@@ -221,9 +330,27 @@ impl State {
                 self.ddgi.voxel_origin.0 as f32,
                 0.0,
                 self.ddgi.voxel_origin.2 as f32,
-                self.frame_count as f32,
+                self.ddgi.frame_index as f32,
             ],
             [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+            [
+                self.ddgi.voxel_scroll.0 as f32,
+                0.0,
+                self.ddgi.voxel_scroll.2 as f32,
+                0.0,
+            ],
+            [
+                self.ddgi.probe_scroll[0].0 as f32,
+                self.ddgi.probe_scroll[0].1 as f32,
+                self.ddgi.probe_scroll[0].2 as f32,
+                0.0,
+            ],
+            [
+                self.ddgi.probe_scroll[1].0 as f32,
+                self.ddgi.probe_scroll[1].1 as f32,
+                self.ddgi.probe_scroll[1].2 as f32,
+                0.0,
+            ],
         ];
         self.queue
             .write_buffer(&self.ddgi.config_buffer, 0, bytemuck::cast_slice(&config));
@@ -243,6 +370,7 @@ impl State {
             pass.dispatch_workgroups((24 * 16 * 24 * 2 + 63) / 64, 1, 1);
         }
         self.ddgi.active_probe_set = write_set;
+        self.ddgi.frame_index = self.ddgi.frame_index.wrapping_add(1);
         write_set
     }
 

@@ -30,11 +30,17 @@ pub struct DdgiResources {
     pub compute_write_bind_groups: [wgpu::BindGroup; 2],
     pub terrain_bind_groups: [wgpu::BindGroup; 2],
     pub active_probe_set: usize,
+    /// Independent temporal sequence; never coupled to the FPS HUD counter.
+    pub frame_index: u32,
     /// World-space minimum corner of the uploaded voxel volume.
     pub voxel_origin: (i32, i32, i32),
+    /// Physical texture coordinate corresponding to logical voxel origin.
+    pub voxel_scroll: (i32, i32, i32),
     /// Origins associated with the current probe history.  Until ring-buffer
     /// scrolling is introduced, an origin change resets history conservatively.
     pub probe_origins: [(i32, i32, i32); 2],
+    /// Physical probe coordinate corresponding to logical probe [0, 0, 0].
+    pub probe_scroll: [(i32, i32, i32); 2],
 }
 
 /// Tracks block placement while RMB is held so repeat placement stays in one line.

@@ -389,7 +389,9 @@ impl State {
         // identity even where greedy meshing has removed interior faces.
         const DDGI_VOXEL_SIDE: u32 = 256;
         const DDGI_PROBE_COUNT: u64 = 24 * 16 * 24 * 2;
-        const DDGI_PROBE_BYTES: u64 = 7 * 16;
+        // 6 irradiance lobes, 6 directional distance moments, relocation
+        // offset and world-space anchor.
+        const DDGI_PROBE_BYTES: u64 = 14 * 16;
         let ddgi_voxel_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DDGI Voxel Lighting Clipmap"),
             size: wgpu::Extent3d {
@@ -408,7 +410,7 @@ impl State {
             ddgi_voxel_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let ddgi_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DDGI Config Buffer"),
-            size: 64,
+            size: 112,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1807,8 +1809,11 @@ impl State {
                 compute_write_bind_groups: ddgi_compute_write_bind_groups,
                 terrain_bind_groups: ddgi_terrain_bind_groups,
                 active_probe_set: 0,
+                frame_index: 0,
                 voxel_origin: (i32::MIN, 0, i32::MIN),
+                voxel_scroll: (0, 0, 0),
                 probe_origins: [(i32::MIN, i32::MIN, i32::MIN); 2],
+                probe_scroll: [(0, 0, 0); 2],
             },
             world,
             mesh_loader,
