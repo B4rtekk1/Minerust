@@ -12,7 +12,34 @@ use crate::ui::menu::{GameState, MenuState};
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 
+use super::performance::CpuUsageAverager;
+
 pub(super) const MSAA_SAMPLE_COUNT: u32 = 4;
+
+/// CPU-side timings for the most recently rendered frame. All fields except
+/// the two CPU averages are wall-clock measurements made with `Instant`.
+#[derive(Default)]
+pub struct CpuFrameProfile {
+    pub cpu_wall_ms: f32,
+    pub update_ms: f32,
+    pub update_network_ms: f32,
+    pub update_chunk_poll_ms: f32,
+    pub update_physics_ms: f32,
+    pub update_chunk_scan_ms: f32,
+    pub update_request_ms: f32,
+    pub update_chunk_commit_ms: f32,
+    pub update_mesh_commit_ms: f32,
+    pub render_ms: f32,
+    pub acquire_ms: f32,
+    pub render_prepare_ms: f32,
+    pub render_encode_ms: f32,
+    pub glyphon_ms: f32,
+    pub encoder_finish_ms: f32,
+    pub submit_ms: f32,
+    pub present_ms: f32,
+    pub main_cpu_avg_ms: f32,
+    pub process_cpu_avg_ms: f32,
+}
 
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
 #[derive(Default)]
@@ -235,13 +262,10 @@ pub struct State {
     pub current_fps: f32,
     /// Last frame's total wall-clock time in milliseconds.
     pub frame_time_ms: f32,
-    /// CPU time used by the last complete frame, in milliseconds. On Windows
-    /// this is user + kernel time for the whole process.
-    pub cpu_update_ms: f32,
-    /// Start of the CPU-time sampling window used to average short frames.
-    pub cpu_time_sample_start: Option<(f64, Instant)>,
-    /// Completed frames collected in the current CPU-time sample window.
-    pub cpu_time_sample_frames: u32,
+    /// Hierarchical CPU-side wall-clock timings for the last frame.
+    pub profile: CpuFrameProfile,
+    /// 500-ms OS CPU accounting window for main-thread and process averages.
+    pub cpu_usage: CpuUsageAverager,
     /// `Instant` of the last `request_redraw` call (used to throttle redraws).
     pub last_redraw: Instant,
     /// `Instant` at the start of the previous frame (used to compute `dt`).

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use glam::{Mat4, Vec3};
 use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
@@ -176,11 +178,14 @@ impl State {
     /// The caller should handle `Lost` / `Outdated` by calling `resize`.
     pub fn render(&mut self) -> Result<(), RenderError> {
         // ── Acquire swap-chain texture ────────────────────────────────────── //
+        let acquire_start = Instant::now();
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             status => return Err(RenderError::Surface(status)),
         };
+        self.profile.acquire_ms = acquire_start.elapsed().as_secs_f32() * 1000.0;
+        let prepare_start = Instant::now();
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -407,6 +412,8 @@ impl State {
         self.subchunks_rendered = subchunks_rendered;
 
         // ── Main camera GPU cull dispatch ─────────────────────────────────── //
+        self.profile.render_prepare_ms = prepare_start.elapsed().as_secs_f32() * 1000.0;
+        let encode_start = Instant::now();
         // The indirect manager's compute shader reads the Hi-Z texture and
         // frustum planes to populate per-chunk indirect draw arguments.
         let frustum_planes_array = frustum_planes_to_array(&frustum_planes);
@@ -927,6 +934,8 @@ impl State {
         }
 
         // ── Text pass (glyphon) ───────────────────────────────────────────── //
+        self.profile.render_encode_ms = encode_start.elapsed().as_secs_f32() * 1000.0;
+        let glyphon_start = Instant::now();
         // All on-screen text is batched into a single `TextRenderer::prepare`
         // call and rendered in one pass.  The individual `glyphon::Buffer`
         // objects are updated lazily (only when the underlying text changes)
@@ -935,10 +944,28 @@ impl State {
             // ---- FPS counter (in-game only) ----
             if !menu_visible && self.show_debug_overlay {
                 let fps_text = format!(
-                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\nChunks: {}\nSubchunks: {}",
+                    "FPS: {:.0}\nFrame: {:.2} ms\n\nCPU SIDE\nTotal wall: {:.2} ms\nUpdate: {:.2} ms\n  Network: {:.2} ms\n  Chunk poll: {:.2} ms\n  Physics/snapshot: {:.2} ms\n  Chunk scan: {:.2} ms\n  Requests: {:.2} ms\n  Chunk commit: {:.2} ms\n  Mesh commit/upload: {:.2} ms\nRender: {:.2} ms\n  Acquire wait: {:.2} ms\n  Frame preparation: {:.2} ms\n  Command encoding: {:.2} ms\n  Glyphon/UI: {:.2} ms\n  Encoder finish: {:.2} ms\n  Queue submit: {:.2} ms\n  Present: {:.2} ms\n\nCPU EXECUTION\nMain thread avg: {:.2} ms/frame\nWhole process avg: {:.2} core-ms/frame\nChunks: {}\nSubchunks: {}",
                     self.current_fps,
                     self.frame_time_ms,
-                    self.cpu_update_ms,
+                    self.profile.cpu_wall_ms,
+                    self.profile.update_ms,
+                    self.profile.update_network_ms,
+                    self.profile.update_chunk_poll_ms,
+                    self.profile.update_physics_ms,
+                    self.profile.update_chunk_scan_ms,
+                    self.profile.update_request_ms,
+                    self.profile.update_chunk_commit_ms,
+                    self.profile.update_mesh_commit_ms,
+                    self.profile.render_ms,
+                    self.profile.acquire_ms,
+                    self.profile.render_prepare_ms,
+                    self.profile.render_encode_ms,
+                    self.profile.glyphon_ms,
+                    self.profile.encoder_finish_ms,
+                    self.profile.submit_ms,
+                    self.profile.present_ms,
+                    self.profile.main_cpu_avg_ms,
+                    self.profile.process_cpu_avg_ms,
                     self.chunks_rendered,
                     self.subchunks_rendered
                 );
@@ -1213,9 +1240,18 @@ impl State {
                 })?;
         }
 
+        self.profile.glyphon_ms = glyphon_start.elapsed().as_secs_f32() * 1000.0;
+
         // ── Submit & present ──────────────────────────────────────────────── //
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let finish_start = Instant::now();
+        let command_buffer = encoder.finish();
+        self.profile.encoder_finish_ms = finish_start.elapsed().as_secs_f32() * 1000.0;
+        let submit_start = Instant::now();
+        self.queue.submit(std::iter::once(command_buffer));
+        self.profile.submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+        let present_start = Instant::now();
         self.queue.present(output);
+        self.profile.present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
         Ok(())
     }
 
