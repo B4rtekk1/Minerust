@@ -893,6 +893,9 @@ impl IndirectManager {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
+        timestamp_query_set: Option<&wgpu::QuerySet>,
+        timestamp_start: u32,
+        timestamp_end: u32,
         water: &IndirectManager,
         view_proj: &glam::Mat4,
         frustum_planes: &[[f32; 4]; 6],
@@ -918,6 +921,9 @@ impl IndirectManager {
             &self.visible_draw_commands_buffer,
             self.cull_bind_group.as_ref(),
             "Culling Pass",
+            timestamp_query_set,
+            timestamp_start,
+            timestamp_end,
         );
     }
 
@@ -935,10 +941,26 @@ impl IndirectManager {
         commands_buffer: &wgpu::Buffer,
         bind_group: Option<&wgpu::BindGroup>,
         label: &'static str,
+        timestamp_query_set: Option<&wgpu::QuerySet>,
+        timestamp_start: u32,
+        timestamp_end: u32,
     ) {
         queue.write_buffer(count_buffer, 0, &0u32.to_le_bytes());
 
         if self.cull_allocations.is_empty() {
+            // Still write a valid pair every profiled frame. Resolving an
+            // unwritten query would otherwise report stale data from a prior
+            // frame while the world is still loading.
+            if let Some(query_set) = timestamp_query_set {
+                let _timestamp_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Empty Culling Timestamp Pass"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(timestamp_start),
+                        end_of_pass_write_index: Some(timestamp_end),
+                    }),
+                });
+            }
             return;
         }
 
@@ -961,7 +983,13 @@ impl IndirectManager {
 
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
-                timestamp_writes: None,
+                timestamp_writes: timestamp_query_set.map(|query_set| {
+                    wgpu::ComputePassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(timestamp_start),
+                        end_of_pass_write_index: Some(timestamp_end),
+                    }
+                }),
             });
             cpass.set_pipeline(&self.cull_pipeline);
             cpass.set_bind_group(0, bind_group, &[]);

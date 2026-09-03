@@ -177,6 +177,15 @@ impl State {
     /// be acquired (e.g., the window is minimized or the surface is lost).
     /// The caller should handle `Lost` / `Outdated` by calling `resize`.
     pub fn render(&mut self) -> Result<(), RenderError> {
+        // Drive completed map callbacks without waiting for the GPU. Timestamp
+        // values are therefore intentionally from an earlier frame.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        if let Some(profiler) = &mut self.gpu_timestamp_profiler {
+            if let Some(profile) = profiler.poll() {
+                self.gpu_frame_profile = Some(profile);
+            }
+        }
+
         // ── Acquire swap-chain texture ────────────────────────────────────── //
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -273,6 +282,19 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+        // A handle clone avoids holding an immutable borrow of `self` across
+        // the CPU-side preparation work below.
+        let timestamp_query_set = self
+            .gpu_timestamp_profiler
+            .as_ref()
+            .map(|p| p.query_set.clone());
+        let timestamp_readback_slot = if render_world_scene {
+            self.gpu_timestamp_profiler
+                .as_ref()
+                .and_then(|profiler| profiler.acquire_readback())
+        } else {
+            None
+        };
 
         // ── Camera & projection matrices ──────────────────────────────────── //
         let section_start = Instant::now();
@@ -423,6 +445,9 @@ impl State {
         self.indirect_manager.dispatch_culling(
             &mut encoder,
             &self.queue,
+            timestamp_query_set.as_ref(),
+            0,
+            1,
             &self.water_indirect_manager,
             &view_proj,
             &frustum_planes_array,
@@ -464,6 +489,13 @@ impl State {
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
+                }),
+                timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(2),
+                        end_of_pass_write_index: Some(3),
+                    }
                 }),
                 ..Default::default()
             });
@@ -534,7 +566,13 @@ impl State {
         if render_world_scene {
             let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Depth Resolve Compute Pass"),
-                timestamp_writes: None,
+                timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
+                    wgpu::ComputePassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(4),
+                        end_of_pass_write_index: Some(5),
+                    }
+                }),
             });
             depth_resolve_pass.set_pipeline(&self.depth_resolve_pipeline);
             depth_resolve_pass.set_bind_group(0, &self.depth_resolve_bind_group, &[]);
@@ -548,7 +586,18 @@ impl State {
             for i in 0..self.hiz_bind_groups.len() {
                 let mut hiz_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Hi-Z Generation Pass Level"),
-                    timestamp_writes: None,
+                    timestamp_writes: timestamp_query_set.as_ref().and_then(|query_set| {
+                        if i == 0 || i + 1 == self.hiz_bind_groups.len() {
+                            Some(wgpu::ComputePassTimestampWrites {
+                                query_set,
+                                beginning_of_pass_write_index: (i == 0).then_some(6),
+                                end_of_pass_write_index: (i + 1 == self.hiz_bind_groups.len())
+                                    .then_some(7),
+                            })
+                        } else {
+                            None
+                        }
+                    }),
                 });
                 hiz_pass.set_pipeline(&self.hiz_pipeline);
                 hiz_pass.set_bind_group(0, &self.hiz_bind_groups[i], &[]);
@@ -582,6 +631,13 @@ impl State {
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
+                }),
+                timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(8),
+                        end_of_pass_write_index: Some(9),
+                    }
                 }),
                 ..Default::default()
             });
@@ -683,6 +739,13 @@ impl State {
                     },
                 })],
                 depth_stencil_attachment: None, // no depth test for a full-screen blit
+                timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(10),
+                        end_of_pass_write_index: Some(11),
+                    }
+                }),
                 ..Default::default()
             });
 
@@ -714,6 +777,13 @@ impl State {
                     },
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(12),
+                        end_of_pass_write_index: Some(13),
+                    }
+                }),
                 ..Default::default()
             });
 
@@ -951,11 +1021,30 @@ impl State {
             {
                 let profile = &self.frame_profile;
                 let update_children_ms = profile.update_children_ms();
+                let gpu_text = if let Some(gpu) = self.gpu_frame_profile {
+                    format!(
+                        "GPU frame: {:.2} ms\n  Cull: {:.2} ms\n  Opaque: {:.2} ms\n  Depth resolve: {:.2} ms\n  Hi-Z: {:.2} ms\n  Water: {:.2} ms\n  Composite: {:.2} ms\n  UI: {:.2} ms\n  Text: {:.2} ms\n\n",
+                        gpu.frame_ms,
+                        gpu.cull_ms,
+                        gpu.opaque_ms,
+                        gpu.depth_resolve_ms,
+                        gpu.hiz_ms,
+                        gpu.water_ms,
+                        gpu.composite_ms,
+                        gpu.ui_ms,
+                        gpu.text_ms,
+                    )
+                } else if self.gpu_timestamp_profiler.is_some() {
+                    "GPU frame: collecting timestamp queries...\n\n".to_owned()
+                } else {
+                    "GPU frame: unavailable (TIMESTAMP_QUERY unsupported)\n\n".to_owned()
+                };
                 let fps_text = format!(
-                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\n\nUpdate: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Dirty mesh queue: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nChunks: {}\nSubchunks: {}",
+                    "FPS: {:.0}\nFrame avg: {:.2} ms\nCPU time avg: {:.2} ms\n\n{}Update: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Dirty mesh queue: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nChunks: {}\nSubchunks: {}",
                     self.current_fps,
                     self.frame_time_ms,
                     self.cpu_update_ms,
+                    gpu_text,
                     profile.update_ms,
                     profile.network_ms,
                     profile.chunk_poll_ms,
@@ -1237,6 +1326,13 @@ impl State {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(14),
+                        end_of_pass_write_index: Some(15),
+                    }
+                }),
                 ..Default::default()
             });
             self.text_renderer
@@ -1248,7 +1344,17 @@ impl State {
         }
 
         // ── Submit & present ──────────────────────────────────────────────── //
+        if let (Some(profiler), Some(slot)) =
+            (&self.gpu_timestamp_profiler, timestamp_readback_slot)
+        {
+            profiler.encode_resolve(&mut encoder, slot);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
+        if let (Some(profiler), Some(slot)) =
+            (&mut self.gpu_timestamp_profiler, timestamp_readback_slot)
+        {
+            profiler.request_readback(slot);
+        }
         self.queue.present(output);
         Ok(())
     }

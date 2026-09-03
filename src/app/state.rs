@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use glyphon::{FontSystem, SwashCache, TextAtlas, TextRenderer, Viewport};
@@ -50,6 +51,153 @@ pub struct FrameProfile {
     pub render_chunk_scan_ms: f32,
     pub mesh_request_submit_ms: f32,
     pub remote_players_ms: f32,
+}
+
+/// GPU durations from the most recently completed timestamp-query readback.
+/// Values are deliberately a few frames behind: waiting for the current frame
+/// would turn this diagnostic overlay into a GPU synchronization point.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GpuFrameProfile {
+    pub frame_ms: f32,
+    pub cull_ms: f32,
+    pub opaque_ms: f32,
+    pub depth_resolve_ms: f32,
+    pub hiz_ms: f32,
+    pub water_ms: f32,
+    pub composite_ms: f32,
+    pub ui_ms: f32,
+    pub text_ms: f32,
+}
+
+const GPU_TIMESTAMP_COUNT: u32 = 16;
+const GPU_TIMESTAMP_READBACKS: usize = 4;
+
+struct GpuTimestampReadback {
+    buffer: wgpu::Buffer,
+    map_requested: bool,
+    map_status: Arc<AtomicU8>,
+}
+
+/// Timestamp query resources plus a small readback ring.  Each frame resolves
+/// its queries into a different buffer, so mapping a prior frame never stalls
+/// command recording for the next one.
+pub struct GpuTimestampProfiler {
+    pub query_set: wgpu::QuerySet,
+    resolve_buffer: wgpu::Buffer,
+    readbacks: Vec<GpuTimestampReadback>,
+    timestamp_period_ns: f32,
+}
+
+impl GpuTimestampProfiler {
+    pub fn new(device: &wgpu::Device, timestamp_period_ns: f32) -> Self {
+        let byte_len = GPU_TIMESTAMP_COUNT as u64 * std::mem::size_of::<u64>() as u64;
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("GPU Frame Timestamp Queries"),
+            ty: wgpu::QueryType::Timestamp,
+            count: GPU_TIMESTAMP_COUNT,
+        });
+        let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Timestamp Resolve Buffer"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readbacks = (0..GPU_TIMESTAMP_READBACKS)
+            .map(|index| GpuTimestampReadback {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("GPU Timestamp Readback {index}")),
+                    size: byte_len,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                map_requested: false,
+                map_status: Arc::new(AtomicU8::new(0)),
+            })
+            .collect();
+        Self {
+            query_set,
+            resolve_buffer,
+            readbacks,
+            timestamp_period_ns,
+        }
+    }
+
+    pub fn acquire_readback(&self) -> Option<usize> {
+        self.readbacks.iter().position(|slot| !slot.map_requested)
+    }
+
+    pub fn encode_resolve(&self, encoder: &mut wgpu::CommandEncoder, slot: usize) {
+        let byte_len = GPU_TIMESTAMP_COUNT as u64 * std::mem::size_of::<u64>() as u64;
+        encoder.resolve_query_set(
+            &self.query_set,
+            0..GPU_TIMESTAMP_COUNT,
+            &self.resolve_buffer,
+            0,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.resolve_buffer,
+            0,
+            &self.readbacks[slot].buffer,
+            0,
+            byte_len,
+        );
+    }
+
+    pub fn request_readback(&mut self, slot: usize) {
+        let readback = &mut self.readbacks[slot];
+        readback.map_requested = true;
+        readback.map_status.store(0, Ordering::Release);
+        let status = Arc::clone(&readback.map_status);
+        readback
+            .buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                status.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
+            });
+    }
+
+    pub fn poll(&mut self) -> Option<GpuFrameProfile> {
+        for readback in &mut self.readbacks {
+            if !readback.map_requested {
+                continue;
+            }
+            match readback.map_status.load(Ordering::Acquire) {
+                0 => continue,
+                2 => {
+                    readback.map_requested = false;
+                    readback.map_status.store(0, Ordering::Release);
+                }
+                _ => {
+                    let bytes = readback.buffer.slice(..).get_mapped_range().ok()?;
+                    let timestamps: Vec<u64> = bytes
+                        .chunks_exact(std::mem::size_of::<u64>())
+                        .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("u64 timestamp")))
+                        .collect();
+                    drop(bytes);
+                    readback.buffer.unmap();
+                    readback.map_requested = false;
+                    readback.map_status.store(0, Ordering::Release);
+                    let ms = |start: usize, end: usize| {
+                        timestamps[end].saturating_sub(timestamps[start]) as f64
+                            * self.timestamp_period_ns as f64
+                            / 1_000_000.0
+                    };
+                    return Some(GpuFrameProfile {
+                        frame_ms: ms(0, 15) as f32,
+                        cull_ms: ms(0, 1) as f32,
+                        opaque_ms: ms(2, 3) as f32,
+                        depth_resolve_ms: ms(4, 5) as f32,
+                        hiz_ms: ms(6, 7) as f32,
+                        water_ms: ms(8, 9) as f32,
+                        composite_ms: ms(10, 11) as f32,
+                        ui_ms: ms(12, 13) as f32,
+                        text_ms: ms(14, 15) as f32,
+                    });
+                }
+            }
+        }
+        None
+    }
 }
 
 impl FrameProfile {
@@ -274,6 +422,10 @@ pub struct State {
     pub cpu_update_ms: f32,
     /// Per-section raw wall-clock timings from the most recently completed frame.
     pub frame_profile: FrameProfile,
+    /// Timestamp-query results from a previously completed GPU frame.
+    pub gpu_frame_profile: Option<GpuFrameProfile>,
+    /// `None` if the selected adapter does not expose timestamp queries.
+    pub gpu_timestamp_profiler: Option<GpuTimestampProfiler>,
     /// Time at which the dynamic debug text was last shaped.  The overlay is
     /// still drawn every frame, but its text need not be rebuilt at render rate.
     pub last_debug_text_update: Instant,

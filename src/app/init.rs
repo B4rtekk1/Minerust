@@ -211,6 +211,20 @@ impl State {
             log(LogLevel::Info, "Adapter supports SHADER_F16");
         }
 
+        // Timestamp queries provide actual GPU execution durations.  Keep the
+        // profiler optional so adapters which lack the feature still run the
+        // renderer normally.
+        let supports_timestamp_queries = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        if supports_timestamp_queries {
+            requested_features |= wgpu::Features::TIMESTAMP_QUERY;
+            log(LogLevel::Info, "Adapter supports TIMESTAMP_QUERY");
+        } else {
+            log(
+                LogLevel::Info,
+                "Adapter lacks TIMESTAMP_QUERY; GPU timings disabled",
+            );
+        }
+
         // ------------------------------------------------------------------ //
         // Logical device & queue
         // ------------------------------------------------------------------ //
@@ -1544,6 +1558,13 @@ impl State {
         });
 
         // ------------------------------------------------------------------ //
+        // GPU timestamp profiler
+        // ------------------------------------------------------------------ //
+        let gpu_timestamp_profiler = supports_timestamp_queries.then(|| {
+            super::state::GpuTimestampProfiler::new(&device, queue.get_timestamp_period())
+        });
+
+        // ------------------------------------------------------------------ //
         // Assemble and return State
         // ------------------------------------------------------------------ //
 
@@ -1587,6 +1608,8 @@ impl State {
             frame_time_ms: 0.0,
             cpu_update_ms: 0.0,
             frame_profile: super::state::FrameProfile::default(),
+            gpu_frame_profile: None,
+            gpu_timestamp_profiler,
             // Make the debug overlay populate on the first rendered frame.
             last_debug_text_update: Instant::now() - Duration::from_millis(100),
             cpu_time_sample_start: None,
