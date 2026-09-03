@@ -407,7 +407,7 @@ winit = "0.29"               # Window and event handling
 glam = { version = "0.29", features = ["bytemuck", "serde"] } # Linear algebra
 serde = "1.0"                # Serialization
 serde_yaml = "0.9"           # YAML configuration
-bincode = "1.3"              # Binary serialization
+postcard = "1.1"             # Compact binary serialization
 tokio = "1.40"               # Async runtime
 quinn = "0.11"               # QUIC protocol
 rustls = "0.23"              # TLS/cryptography

@@ -336,7 +336,7 @@ impl Default for DebugSettings {
     }
 }
 
-/// Serializes `settings` to `settings.bin` using `bincode`.
+/// Serializes `settings` to `settings.bin` using `postcard`.
 ///
 /// Creates or overwrites the file in the current working directory.
 ///
@@ -345,7 +345,7 @@ impl Default for DebugSettings {
 /// Returns a boxed error if serialization fails or the file cannot be
 /// created or written.
 pub fn save_settings(settings: &GameSettings) -> Result<(), Box<dyn std::error::Error>> {
-    let encoded: Vec<u8> = bincode::serialize(settings)?;
+    let encoded: Vec<u8> = postcard::to_stdvec(settings)?;
     let path = get_project_dirs()?;
     let final_path = path.data_dir().join("settings.bin");
     let mut file = File::create(final_path)?;
@@ -377,10 +377,10 @@ pub fn load_settings() -> GameSettings {
 /// # Errors
 ///
 /// Returns a boxed error if the file cannot be opened, read, or
-/// deserialized by `bincode`.
+/// deserialized by `postcard`.
 fn try_load_settings() -> Result<GameSettings, Box<dyn std::error::Error>> {
     let mut file = File::open("settings.bin")?;
     let mut encoded = Vec::new();
     file.read_to_end(&mut encoded)?;
-    Ok(bincode::deserialize(&encoded)?)
+    Ok(postcard::from_bytes(&encoded)?)
 }

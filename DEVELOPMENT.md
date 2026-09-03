@@ -50,7 +50,7 @@ cargo build
 **Serialization:**
 - `serde 1.0` - Serialization framework
 - `serde_yaml 0.9` - YAML format support
-- `bincode 1.3` - Binary serialization (compact)
+- `postcard 1.1` - Compact binary serialization
 - `image 0.25` - Image file loading
 
 **Networking:**

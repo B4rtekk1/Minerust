@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{Read, Write};
 use std::path::Path;
 
 use crate::block::BlockType;
@@ -79,15 +79,19 @@ impl SavedWorld {
 }
 
 pub fn save_world<P: AsRef<Path>>(path: P, world: &SavedWorld) -> Result<(), String> {
-    let file = File::create(path).map_err(|e| format!("Could not create file: {}", e))?;
-    let writer = BufWriter::new(file);
-    bincode::serialize_into(writer, world).map_err(|e| format!("Serialization error: {}", e))
+    let mut file = File::create(path).map_err(|e| format!("Could not create file: {}", e))?;
+    let encoded = postcard::to_stdvec(world)
+        .map_err(|e| format!("Serialization error: {}", e))?;
+    file.write_all(&encoded)
+        .map_err(|e| format!("Could not write save file: {}", e))
 }
 
 pub fn load_world<P: AsRef<Path>>(path: P) -> Result<SavedWorld, String> {
-    let file = File::open(path).map_err(|e| format!("Could not open file: {}", e))?;
-    let reader = BufReader::new(file);
-    bincode::deserialize_from(reader).map_err(|e| format!("Deserialization error: {}", e))
+    let mut file = File::open(path).map_err(|e| format!("Could not open file: {}", e))?;
+    let mut encoded = Vec::new();
+    file.read_to_end(&mut encoded)
+        .map_err(|e| format!("Could not read save file: {}", e))?;
+    postcard::from_bytes(&encoded).map_err(|e| format!("Deserialization error: {}", e))
 }
 
 pub const WORLD_FILE_EXTENSION: &str = "minerust";

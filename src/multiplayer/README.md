@@ -113,7 +113,7 @@ pub enum GameMessage {
 ```
 
 **Serialization:**
-- Uses `bincode` for efficient binary serialization
+- Uses `postcard` for efficient binary serialization
 - Supports compression (gzip) for large messages
 - Version negotiation for protocol compatibility
 
