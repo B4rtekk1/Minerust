@@ -29,6 +29,38 @@ impl BlockPlacementState {
     }
 }
 
+/// Raw wall-clock timings from one frame.  Unlike the process CPU-time
+/// average, every field here is sampled in the same frame, so child sums are
+/// meaningful when diagnosing overlaps or gaps in instrumentation.
+#[derive(Debug, Default)]
+pub struct FrameProfile {
+    pub update_ms: f32,
+    pub network_ms: f32,
+    pub chunk_poll_ms: f32,
+    pub physics_snapshot_ms: f32,
+    pub chunk_requests_ms: f32,
+    pub chunk_commit_ms: f32,
+    pub mesh_commit_ms: f32,
+    pub frame_preparation_ms: f32,
+    pub camera_matrices_ms: f32,
+    pub visible_cache_ms: f32,
+    pub uniform_upload_ms: f32,
+    pub render_chunk_scan_ms: f32,
+    pub mesh_request_submit_ms: f32,
+    pub remote_players_ms: f32,
+}
+
+impl FrameProfile {
+    pub fn update_children_ms(&self) -> f32 {
+        self.network_ms
+            + self.chunk_poll_ms
+            + self.physics_snapshot_ms
+            + self.chunk_requests_ms
+            + self.chunk_commit_ms
+            + self.mesh_commit_ms
+    }
+}
+
 /// Central application state owned by the main thread.
 ///
 /// `State` is the single source of truth for all GPU resources, world data,
@@ -238,6 +270,11 @@ pub struct State {
     /// CPU time used by the last complete frame, in milliseconds. On Windows
     /// this is user + kernel time for the whole process.
     pub cpu_update_ms: f32,
+    /// Per-section raw wall-clock timings from the most recently completed frame.
+    pub frame_profile: FrameProfile,
+    /// Time at which the dynamic debug text was last shaped.  The overlay is
+    /// still drawn every frame, but its text need not be rebuilt at render rate.
+    pub last_debug_text_update: Instant,
     /// Start of the CPU-time sampling window used to average short frames.
     pub cpu_time_sample_start: Option<(f64, Instant)>,
     /// Completed frames collected in the current CPU-time sample window.

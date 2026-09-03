@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytemuck;
 use glam::{Mat4, Vec4};
@@ -1584,6 +1584,9 @@ impl State {
             current_fps: 0.0,
             frame_time_ms: 0.0,
             cpu_update_ms: 0.0,
+            frame_profile: super::state::FrameProfile::default(),
+            // Make the debug overlay populate on the first rendered frame.
+            last_debug_text_update: Instant::now() - Duration::from_millis(100),
             cpu_time_sample_start: None,
             cpu_time_sample_frames: 0,
             last_redraw: Instant::now(),

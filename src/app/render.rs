@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use glam::{Mat4, Vec3};
 use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
@@ -189,6 +191,7 @@ impl State {
         let menu_uses_world_background =
             menu_visible && (self.has_entered_world || world_has_loaded_chunks);
         let render_world_scene = !menu_visible || menu_uses_world_background;
+        let preparation_start = Instant::now();
 
         // ── Remote player model buffers ───────────────────────────────────── //
         // All remote player meshes are concatenated into a single vertex/index
@@ -262,6 +265,7 @@ impl State {
             // No remote players or we're in the menu – skip the draw later.
             self.player_model_num_indices = 0;
         }
+        self.frame_profile.remote_players_ms = preparation_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Command encoder ───────────────────────────────────────────────── //
         let mut encoder = self
@@ -271,6 +275,7 @@ impl State {
             });
 
         // ── Camera & projection matrices ──────────────────────────────────── //
+        let section_start = Instant::now();
         let aspect = self.config.width as f32 / self.config.height as f32;
         // Extend the far plane beyond RENDER_DISTANCE so chunks at the horizon
         // are not clipped by the projection; 400 blocks is a sensible floor.
@@ -280,6 +285,7 @@ impl State {
         // `glam`'s RH projection helpers already use WebGPU's [0, 1] depth range.
         let view_proj = proj * view_mat;
         let view_proj_array: [[f32; 4]; 4] = view_proj.to_cols_array_2d();
+        self.frame_profile.camera_matrices_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Day/night cycle ───────────────────────────────────────────────── //
         let time = self.game_start_time.elapsed().as_secs_f32();
@@ -302,7 +308,9 @@ impl State {
         // Chunk coordinates of the camera, used to center the render window.
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
+        let section_start = Instant::now();
         self.rebuild_visible_chunk_cache(player_cx, player_cz);
+        self.frame_profile.visible_cache_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         // Inverse view-projection is used by the composite / water shaders to
         // reconstruct world-space positions from screen-space depth samples.
@@ -313,6 +321,7 @@ impl State {
         let is_underwater = self.is_underwater;
 
         // ── Upload uniforms ───────────────────────────────────────────────── //
+        let section_start = Instant::now();
         self.queue.write_buffer(
             &self.uniform_buffer,
             0,
@@ -337,6 +346,7 @@ impl State {
                 _pad_uniforms: 0.0,
             }]),
         );
+        self.frame_profile.uniform_upload_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Frustum planes (main camera) ──────────────────────────────────── //
         // Six half-space planes derived from the combined view-projection
@@ -352,6 +362,7 @@ impl State {
         let mut chunks_rendered = 0u32;
         let mut subchunks_rendered = 0u32;
 
+        let section_start = Instant::now();
         {
             let world = self.world.read();
             for &(cx, cz) in &self.visible_chunk_columns {
@@ -375,9 +386,14 @@ impl State {
                 }
             }
         }
+        self.frame_profile.render_chunk_scan_ms = section_start.elapsed().as_secs_f32() * 1000.0;
+        let section_start = Instant::now();
         for (cx, cz, sy) in meshes_to_request.iter().take(MAX_MESH_BUILDS_PER_FRAME) {
             self.mesh_loader.request_mesh(*cx, *cz, *sy);
         }
+        self.frame_profile.mesh_request_submit_ms = section_start.elapsed().as_secs_f32() * 1000.0;
+        self.frame_profile.frame_preparation_ms =
+            preparation_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Sky color interpolation ──────────────────────────────────────── //
         // Three anchor colors (day, sunset, night) are blended based on the
@@ -933,12 +949,37 @@ impl State {
         // to avoid redundant re-shaping work.
         {
             // ---- FPS counter (in-game only) ----
-            if !menu_visible && self.show_debug_overlay {
+            // Formatting and shaping this multi-line buffer on every redraw
+            // makes the profiler affect the result it reports.  Keep drawing
+            // the already prepared buffer every frame, while refreshing its
+            // dynamic contents at 10 Hz.
+            if !menu_visible
+                && self.show_debug_overlay
+                && self.last_debug_text_update.elapsed() >= Duration::from_millis(100)
+            {
+                let profile = &self.frame_profile;
+                let update_children_ms = profile.update_children_ms();
                 let fps_text = format!(
-                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\nChunks: {}\nSubchunks: {}",
+                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\n\nUpdate: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Chunk/subchunk scan: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nChunks: {}\nSubchunks: {}",
                     self.current_fps,
                     self.frame_time_ms,
                     self.cpu_update_ms,
+                    profile.update_ms,
+                    profile.network_ms,
+                    profile.chunk_poll_ms,
+                    profile.physics_snapshot_ms,
+                    profile.chunk_requests_ms,
+                    profile.chunk_commit_ms,
+                    profile.mesh_commit_ms,
+                    update_children_ms,
+                    profile.update_ms - update_children_ms,
+                    profile.frame_preparation_ms,
+                    profile.camera_matrices_ms,
+                    profile.visible_cache_ms,
+                    profile.uniform_upload_ms,
+                    profile.render_chunk_scan_ms,
+                    profile.mesh_request_submit_ms,
+                    profile.remote_players_ms,
                     self.chunks_rendered,
                     self.subchunks_rendered
                 );
@@ -954,6 +995,7 @@ impl State {
                     Some(self.config.width as f32),
                     Some(self.config.height as f32),
                 );
+                self.last_debug_text_update = std::time::Instant::now();
             }
 
             // ---- Hotbar slot label (in-game only, updated on slot change) ----

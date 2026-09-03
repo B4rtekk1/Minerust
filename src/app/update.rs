@@ -176,8 +176,12 @@ impl State {
     /// 8. **Mesh uploads** – drain up to `MAX_MESH_COMMITS_PER_FRAME` completed
     ///    mesh results from the background workers.
     pub fn update(&mut self) {
+        let update_start = Instant::now();
+
         // --- 1. Network ---
+        let section_start = Instant::now();
         self.update_network_state();
+        self.frame_profile.network_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         // --- 2. Delta time ---
         let now = Instant::now();
@@ -191,11 +195,19 @@ impl State {
             self.highlighted_block = None;
             self.is_underwater = 0.0;
             self.sky_visibility = 1.0;
+            self.frame_profile.chunk_poll_ms = 0.0;
+            self.frame_profile.physics_snapshot_ms = 0.0;
+            self.frame_profile.chunk_requests_ms = 0.0;
+            self.frame_profile.chunk_commit_ms = 0.0;
+            self.frame_profile.mesh_commit_ms = 0.0;
+            self.frame_profile.update_ms = update_start.elapsed().as_secs_f32() * 1000.0;
             return;
         }
 
         // --- 3. Chunk streaming ---
+        let section_start = Instant::now();
         let completed_chunks = self.chunk_loader.poll_results(MAX_CHUNK_COMMITS_PER_FRAME);
+        self.frame_profile.chunk_poll_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
@@ -205,6 +217,7 @@ impl State {
         // --- 4. Read-locked snapshot ---
         // Acquire the read lock once and do all read-only queries inside a
         // single block so the lock is held for the shortest possible time.
+        let section_start = Instant::now();
         let snapshot = {
             let world = self.world.read();
 
@@ -289,6 +302,7 @@ impl State {
                 sky_visibility,
             }
         }; // Read lock released here.
+        self.frame_profile.physics_snapshot_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         self.input.jump = false;
 
@@ -305,11 +319,13 @@ impl State {
         // --- 5. Chunk requests ---
         // Sort by ascending priority (smallest squared distance first) and cap
         // at twice the per-frame chunk limit to allow some look-ahead.
+        let section_start = Instant::now();
         let mut requests = snapshot.missing_chunks;
         requests.sort_by_key(|&(_, _, priority)| priority);
         for (cx, cz, priority) in requests.into_iter().take(MAX_CHUNKS_PER_FRAME * 2) {
             self.chunk_loader.request_chunk(cx, cz, priority);
         }
+        self.frame_profile.chunk_requests_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         // --- 6. Digging ---
         let mut write_ops = WorldWriteOps {
@@ -376,6 +392,7 @@ impl State {
         // --- 7. World write ---
         // Batch all mutations into a single write-lock window to minimize
         // contention with background generation and mesh threads.
+        let section_start = Instant::now();
         if !write_ops.completed_chunks.is_empty()
             || write_ops.block_break.is_some()
             || !write_ops.block_places.is_empty()
@@ -490,10 +507,12 @@ impl State {
         self.sky_visibility += (snapshot.sky_visibility - self.sky_visibility) * sky_blend;
 
         self.update_coords_ui();
+        self.frame_profile.chunk_commit_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
         // --- 8. Mesh uploads ---
         // Drain completed mesh results up to the per-frame cap so a burst of
         // ready meshes doesn't cause a single-frame GPU upload spike.
+        let section_start = Instant::now();
         for _ in 0..MAX_MESH_COMMITS_PER_FRAME {
             if let Some(result) = self.mesh_loader.poll_result() {
                 self.update_subchunk_mesh(result);
@@ -501,6 +520,8 @@ impl State {
                 break;
             }
         }
+        self.frame_profile.mesh_commit_ms = section_start.elapsed().as_secs_f32() * 1000.0;
+        self.frame_profile.update_ms = update_start.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Removes all GPU terrain and water mesh data for the given chunk columns.
