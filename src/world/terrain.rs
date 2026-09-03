@@ -221,7 +221,6 @@ impl World {
 
     /// Returns `true` if `(x, z)` at the given `surface_height` is a cave
     /// entrance column according to the generator's entrance heuristic.
-    #[allow(dead_code)]
     fn is_cave_entrance(&self, x: i32, z: i32, surface_height: i32) -> bool {
         self.generator.is_cave_entrance_pub(x, z, surface_height)
     }
@@ -463,19 +462,58 @@ impl World {
                     let z = dz;
                     let height = self.get_terrain_height(x, z);
                     let biome = self.get_biome(x, z);
+                    let spawn_x = x as f32 + 0.3;
+                    let spawn_y = (height + 1) as f32;
+                    let spawn_z = z as f32 + 0.5;
 
                     if height >= SEA_LEVEL
                         && !matches!(biome, Biome::Ocean | Biome::River | Biome::Lake)
+                        && !self.is_cave_entrance(x, z, height)
+                        && self.spawn_space_is_clear(spawn_x, spawn_y, spawn_z)
                     {
                         // +0.3 / +0.5 offsets prevent the player from being
                         // centred on a block edge and avoid false collision
                         // positives at the moment of spawn.
-                        return (x as f32 + 0.3, (height + 1) as f32, z as f32 + 0.5);
+                        return (spawn_x, spawn_y, spawn_z);
                     }
                 }
             }
         }
         (0.5, 80.0, 0.5) // fallback
+    }
+
+    /// Returns whether the standing player's body AABB is free of solid blocks.
+    ///
+    /// The player is 1.8 blocks tall, so checking the two block layers crossed
+    /// by the body prevents spawning inside trees, ceilings, or other terrain
+    /// decorations. Unloaded chunks are deliberately treated as unsafe here:
+    /// spawn selection is performed before gameplay starts and must not choose
+    /// a position whose contents are unknown.
+    fn spawn_space_is_clear(&self, x: f32, y: f32, z: f32) -> bool {
+        let min_x = (x - PLAYER_WIDTH).floor() as i32;
+        let max_x = (x + PLAYER_WIDTH).floor() as i32;
+        let min_z = (z - PLAYER_WIDTH).floor() as i32;
+        let max_z = (z + PLAYER_WIDTH).floor() as i32;
+        let min_y = y.floor() as i32;
+        let max_y = (y + PLAYER_HEIGHT).floor() as i32;
+
+        for bx in min_x..=max_x {
+            for by in min_y..=max_y {
+                for bz in min_z..=max_z {
+                    let chunk_coords = (
+                        bx.div_euclid(CHUNK_SIZE),
+                        bz.div_euclid(CHUNK_SIZE),
+                    );
+                    if !self.chunks.contains_key(&chunk_coords) {
+                        return false;
+                    }
+                    if self.get_block(bx, by, bz).is_solid() {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     // ── Mesh generation ───────────────────────────────────────────────────── //

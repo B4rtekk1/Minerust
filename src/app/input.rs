@@ -60,7 +60,10 @@ impl State {
     }
 
     fn start_new_world(&mut self) {
-        let world = World::new();
+        let mut world = World::new();
+        // Spawn selection needs the actual blocks (trees, ceilings, etc.),
+        // not only the height-map. Generate the initial area before searching.
+        world.generate_chunks_in_radius(0, 0, 2);
         let seed = world.seed;
         let spawn = world.find_spawn_point();
         let spawn_cx = (spawn.0 / CHUNK_SIZE as f32).floor() as i32;
