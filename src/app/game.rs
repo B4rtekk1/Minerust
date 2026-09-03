@@ -8,7 +8,7 @@ use winit::{
     event::{DeviceEvent, ElementState, Event, KeyEvent, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{CursorGrabMode, Fullscreen, WindowBuilder},
+    window::{CursorGrabMode, Fullscreen, Window},
 };
 
 use minerust::{
@@ -315,13 +315,14 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the window. On failure, log the error and return it instead
     // of panicking so the caller can handle it gracefully.
-    let window = match WindowBuilder::new()
+    let window_attributes = Window::default_attributes()
         .with_title("Minerust")
         .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
         .with_transparent(true)
         // Start the window in borderless fullscreen on the current monitor.
-        .with_fullscreen(Some(Fullscreen::Borderless(None)))
-        .build(&event_loop)
+        .with_fullscreen(Some(Fullscreen::Borderless(None)));
+
+    let window = match event_loop.create_window(window_attributes)
     {
         Ok(w) => w,
         Err(e) => {
