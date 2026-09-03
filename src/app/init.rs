@@ -1649,7 +1649,7 @@ impl State {
             text_renderer,
             viewport,
             fps_buffer,
-            show_debug_overlay: true,
+            show_debug_overlay: false,
             menu_connect_button_buffer,
             menu_singleplayer_button_buffer,
             menu_render_mode_button_buffer,

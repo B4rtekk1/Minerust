@@ -387,7 +387,7 @@ pub struct State {
 
     /// FPS / performance stats overlay buffer.
     pub fps_buffer: glyphon::Buffer,
-    /// Whether the FPS/chunk debug overlay is rendered.
+    /// Whether the opt-in CPU-profiler overlay is rendered (toggled with C).
     pub show_debug_overlay: bool,
 
     // Main-menu text buffers.

@@ -580,7 +580,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 log(LogLevel::Info, &format!("HUD: {}", state_name));
                             }
 
-                            KeyCode::F3 if pressed && !repeat => {
+                            // The profiler is intentionally opt-in: it can
+                            // perturb frame timings while its text is shaped.
+                            KeyCode::KeyC
+                                if pressed
+                                    && !repeat
+                                    && state.game_state == GameState::Playing =>
+                            {
                                 state.show_debug_overlay = !state.show_debug_overlay;
                                 let state_name = if state.show_debug_overlay {
                                     "On"
