@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,8 +9,10 @@ use winit::{keyboard::ModifiersState, window::Window};
 use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
 use crate::ui::menu::{GameState, MenuState};
+use minerust::SubchunkKey;
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
+use rustc_hash::FxHashSet;
 
 pub(super) const MSAA_SAMPLE_COUNT: u32 = 4;
 
@@ -306,6 +308,13 @@ pub struct State {
     pub last_gen_player_cz: i32,
     /// Submits subchunk mesh-build requests to background threads and collects results.
     pub mesh_loader: minerust::MeshLoader,
+    /// Dirty subchunks awaiting a mesh-worker request.  This is populated at
+    /// the point where a mesh becomes stale, avoiding a world-wide scan in
+    /// `render()`.
+    pub dirty_mesh_queue: VecDeque<SubchunkKey>,
+    /// Keys already present in `dirty_mesh_queue`, used to coalesce repeated
+    /// edits to the same subchunk while it awaits processing.
+    pub dirty_mesh_queued: FxHashSet<SubchunkKey>,
     /// Cached list of currently loaded chunk columns inside the render radius.
     pub visible_chunk_columns: Vec<(i32, i32)>,
     /// Player chunk coordinate at which `visible_chunk_columns` was last rebuilt.

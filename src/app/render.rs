@@ -148,8 +148,8 @@ impl State {
     ///    for all visible remote players if any exist.
     /// 2. **Uniform upload** – computes the camera matrices, advances the day
     ///    cycle, and uploads the `Uniforms` struct.
-    /// 3. **Mesh request** – walks the visible chunk grid, queues dirty sub-chunk
-    ///    meshes for background rebuild, and tallies rendered counts.
+    /// 3. **Mesh request** – drains a bounded dirty-subchunk queue into the
+    ///    background mesher.
     /// 4. **Main cull dispatch** – GPU frustum + Hi-Z occlusion cull for both
     ///    the opaque terrain and water indirect managers.
     /// 5. **Opaque pass** – sky dome -> terrain -> remote player models -> sun/moon.
@@ -354,44 +354,39 @@ impl State {
         let frustum_planes = extract_frustum_planes(&view_proj);
 
         // ── Mesh rebuild requests ─────────────────────────────────────────── //
-        // Walk all chunks within RENDER_DISTANCE.  For each sub-chunk whose
-        // mesh is stale and not already being rebuilt on a worker thread,
-        // queue a rebuild request.  Requests are sorted nearest-first so the
-        // closest geometry always appears first.
-        let mut meshes_to_request: Vec<(i32, i32, i32)> = Vec::new();
-        let mut chunks_rendered = 0u32;
-        let mut subchunks_rendered = 0u32;
-
+        // Dirtying code enqueues a key immediately, so the hot render path
+        // never traverses every visible chunk/subchunk merely to discover that
+        // nothing changed.  The queue is deduplicated at insertion time.
         let section_start = Instant::now();
-        {
-            let world = self.world.read();
-            for &(cx, cz) in &self.visible_chunk_columns {
-                if let Some(chunk) = world.chunks.get(&(cx, cz)) {
-                    let mut chunk_has_visible = false;
-                    for (sy, subchunk) in chunk.subchunks.iter().enumerate() {
-                        if subchunk.is_empty {
-                            continue; // skip fully empty sub-chunks early
-                        }
-                        if subchunk.mesh_dirty && !self.mesh_loader.is_pending(cx, cz, sy as i32) {
-                            meshes_to_request.push((cx, cz, sy as i32));
-                        }
-                        if subchunk.num_quads > 0 || subchunk.num_water_quads > 0 {
-                            subchunks_rendered += 1;
-                            chunk_has_visible = true;
-                        }
-                    }
-                    if chunk_has_visible {
-                        chunks_rendered += 1;
-                    }
-                }
+        for _ in 0..MAX_MESH_BUILDS_PER_FRAME {
+            let Some(key) = self.pop_dirty_mesh() else {
+                break;
+            };
+            // A synchronous player-edit rebuild may have cleaned this entry
+            // after it was queued.  Inspect only this dequeued key, never the
+            // whole visible world.
+            let still_dirty = self
+                .world
+                .read()
+                .chunks
+                .get(&(key.chunk_x, key.chunk_z))
+                .and_then(|chunk| chunk.subchunks.get(key.subchunk_y as usize))
+                .is_some_and(|subchunk| subchunk.mesh_dirty && !subchunk.is_empty);
+            if !still_dirty {
+                continue;
+            }
+            if !self
+                .mesh_loader
+                .request_mesh(key.chunk_x, key.chunk_z, key.subchunk_y)
+            {
+                // The bounded worker channel is full.  Retain the work for a
+                // later frame instead of falling back to a global re-scan.
+                self.requeue_dirty_mesh_front(key);
+                break;
             }
         }
         self.frame_profile.render_chunk_scan_ms = section_start.elapsed().as_secs_f32() * 1000.0;
-        let section_start = Instant::now();
-        for (cx, cz, sy) in meshes_to_request.iter().take(MAX_MESH_BUILDS_PER_FRAME) {
-            self.mesh_loader.request_mesh(*cx, *cz, *sy);
-        }
-        self.frame_profile.mesh_request_submit_ms = section_start.elapsed().as_secs_f32() * 1000.0;
+        self.frame_profile.mesh_request_submit_ms = 0.0;
         self.frame_profile.frame_preparation_ms =
             preparation_start.elapsed().as_secs_f32() * 1000.0;
 
@@ -418,9 +413,6 @@ impl State {
             + sunset_sky.2 * sunset_factor * 0.5
             + night_sky.2 * night_factor)
             .min(1.0);
-
-        self.chunks_rendered = chunks_rendered;
-        self.subchunks_rendered = subchunks_rendered;
 
         // ── Main camera GPU cull dispatch ─────────────────────────────────── //
         // The indirect manager's compute shader reads the Hi-Z texture and
@@ -960,7 +952,7 @@ impl State {
                 let profile = &self.frame_profile;
                 let update_children_ms = profile.update_children_ms();
                 let fps_text = format!(
-                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\n\nUpdate: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Chunk/subchunk scan: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nChunks: {}\nSubchunks: {}",
+                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\n\nUpdate: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Dirty mesh queue: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nChunks: {}\nSubchunks: {}",
                     self.current_fps,
                     self.frame_time_ms,
                     self.cpu_update_ms,

@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use minerust::{
-    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME, MAX_CHUNKS_PER_FRAME,
-    MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, SubchunkKey,
+    BlockType, CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME,
+    MAX_CHUNKS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, SubchunkKey,
 };
 use rustc_hash::FxHashSet;
 
@@ -13,6 +13,55 @@ use crate::ui::menu::GameState;
 use super::state::{State, WorldSnapshot, WorldWriteOps};
 
 impl State {
+    /// Adds a stale subchunk to the meshing work list exactly once.
+    pub(crate) fn enqueue_dirty_mesh(&mut self, key: SubchunkKey) {
+        if self.dirty_mesh_queued.insert(key) {
+            self.dirty_mesh_queue.push_back(key);
+        }
+    }
+
+    pub(crate) fn pop_dirty_mesh(&mut self) -> Option<SubchunkKey> {
+        let key = self.dirty_mesh_queue.pop_front()?;
+        self.dirty_mesh_queued.remove(&key);
+        Some(key)
+    }
+
+    pub(crate) fn requeue_dirty_mesh_front(&mut self, key: SubchunkKey) {
+        if self.dirty_mesh_queued.insert(key) {
+            self.dirty_mesh_queue.push_front(key);
+        }
+    }
+
+    /// Seeds the queue after replacing or bulk-loading a world.  This runs on
+    /// those infrequent events, never on the per-frame render path.
+    pub(crate) fn enqueue_all_dirty_meshes(&mut self) {
+        self.dirty_mesh_queue.clear();
+        self.dirty_mesh_queued.clear();
+        let keys = {
+            let world = self.world.read();
+            world
+                .chunks
+                .iter()
+                .flat_map(|(&(cx, cz), chunk)| {
+                    chunk
+                        .subchunks
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(sy, subchunk)| {
+                            (!subchunk.is_empty && subchunk.mesh_dirty).then_some(SubchunkKey {
+                                chunk_x: cx,
+                                chunk_z: cz,
+                                subchunk_y: sy as i32,
+                            })
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        for key in keys {
+            self.enqueue_dirty_mesh(key);
+        }
+    }
+
     /// Rebuilds the on-screen coordinate HUD if the camera has moved since the
     /// last update.
     ///
@@ -51,7 +100,7 @@ impl State {
 
         // Update CPU-side bookkeeping under a short write lock, then release
         // before touching the GPU buffers to minimize lock contention.
-        let aabb_copy = {
+        let (aabb_copy, was_rendered, is_rendered) = {
             let mut world = self.world.write();
             let chunk = match world.chunks.get_mut(&(cx, cz)) {
                 Some(chunk) => chunk,
@@ -59,14 +108,55 @@ impl State {
             };
             let subchunk = &mut chunk.subchunks[sy as usize];
             if subchunk.mesh_version != result.mesh_version {
+                drop(world);
+                self.enqueue_dirty_mesh(SubchunkKey {
+                    chunk_x: cx,
+                    chunk_z: cz,
+                    subchunk_y: sy,
+                });
                 return; // A newer block edit or neighbor change invalidated this mesh.
             }
             let aabb = subchunk.aabb;
+            let was_rendered = subchunk.num_quads > 0 || subchunk.num_water_quads > 0;
             subchunk.num_quads = result.terrain.len() as u32;
             subchunk.num_water_quads = result.water.len() as u32;
             subchunk.mesh_dirty = false;
-            aabb
+            let is_rendered = subchunk.num_quads > 0 || subchunk.num_water_quads > 0;
+            (aabb, was_rendered, is_rendered)
         };
+
+        match (was_rendered, is_rendered) {
+            (false, true) => {
+                self.subchunks_rendered += 1;
+                // A column becomes visible when its first mesh is committed.
+                let column_was_rendered = {
+                    let world = self.world.read();
+                    world.chunks[&(cx, cz)].subchunks.iter().enumerate().any(
+                        |(other_sy, subchunk)| {
+                            other_sy != sy as usize
+                                && (subchunk.num_quads > 0 || subchunk.num_water_quads > 0)
+                        },
+                    )
+                };
+                if !column_was_rendered {
+                    self.chunks_rendered += 1;
+                }
+            }
+            (true, false) => {
+                self.subchunks_rendered = self.subchunks_rendered.saturating_sub(1);
+                let column_still_rendered = {
+                    let world = self.world.read();
+                    world.chunks[&(cx, cz)]
+                        .subchunks
+                        .iter()
+                        .any(|subchunk| subchunk.num_quads > 0 || subchunk.num_water_quads > 0)
+                };
+                if !column_still_rendered {
+                    self.chunks_rendered = self.chunks_rendered.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
 
         let key = minerust::render::indirect::SubchunkKey {
             chunk_x: cx,
@@ -152,6 +242,12 @@ impl State {
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
                 chunk.subchunks[sy as usize].mesh_dirty = true;
             }
+            drop(world);
+            self.enqueue_dirty_mesh(SubchunkKey {
+                chunk_x: cx,
+                chunk_z: cz,
+                subchunk_y: sy,
+            });
         }
     }
 
@@ -428,9 +524,13 @@ impl State {
                     }
                 }
             }
+            let mut dirty_meshes = Vec::with_capacity(dirty_this_frame.len());
             for key in dirty_this_frame {
                 if let Some(chunk) = world.chunks.get_mut(&(key.chunk_x, key.chunk_z)) {
                     chunk.subchunks[key.subchunk_y as usize].mark_mesh_dirty();
+                    if !chunk.subchunks[key.subchunk_y as usize].is_empty {
+                        dirty_meshes.push(key);
+                    }
                 }
             }
 
@@ -477,16 +577,49 @@ impl State {
 
             // Evict chunks that have moved outside the generation radius and
             // collect their identifiers so their GPU data can be freed below.
+            // Statistics are maintained incrementally.  Traversing a removed
+            // column here is an infrequent streaming event, not render work.
+            let cleanup_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
+            let cleanup_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
+            let (removed_columns_rendered, removed_subchunks_rendered) = world
+                .chunks
+                .iter()
+                .filter(|&(&(cx, cz), _)| {
+                    (cx - cleanup_cx).abs() > CHUNK_UNLOAD_DISTANCE
+                        || (cz - cleanup_cz).abs() > CHUNK_UNLOAD_DISTANCE
+                })
+                .map(|(_, chunk)| {
+                    let subchunks = chunk
+                        .subchunks
+                        .iter()
+                        .filter(|subchunk| subchunk.num_quads > 0 || subchunk.num_water_quads > 0)
+                        .count() as u32;
+                    (u32::from(subchunks > 0), subchunks)
+                })
+                .fold((0, 0), |(columns, subchunks), (c, s)| {
+                    (columns + c, subchunks + s)
+                });
+
             let removed_chunks =
                 world.update_chunks_around_player(self.camera.position.x, self.camera.position.z);
 
             drop(world); // Release the write lock before GPU work.
+
+            self.chunks_rendered = self
+                .chunks_rendered
+                .saturating_sub(removed_columns_rendered);
+            self.subchunks_rendered = self
+                .subchunks_rendered
+                .saturating_sub(removed_subchunks_rendered);
 
             if !newly_inserted_chunks.is_empty() || !removed_chunks.is_empty() {
                 self.visible_chunk_columns_dirty = true;
             }
 
             self.remove_chunk_gpu_data(&removed_chunks);
+            for key in dirty_meshes {
+                self.enqueue_dirty_mesh(key);
+            }
         }
 
         // Dirty-marking runs outside the write-lock window above to avoid
@@ -562,13 +695,25 @@ impl State {
         let mut affected_subchunks = Vec::with_capacity(7);
         Self::collect_affected_subchunk_keys(x, y, z, &mut affected_subchunks);
 
+        let mut queued = Vec::with_capacity(affected_subchunks.len());
         let mut world = self.world.write();
         for (cx, cz, sy) in affected_subchunks {
             if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
                 if let Some(subchunk) = chunk.subchunks.get_mut(sy as usize) {
                     subchunk.mark_mesh_dirty();
+                    if !subchunk.is_empty {
+                        queued.push(SubchunkKey {
+                            chunk_x: cx,
+                            chunk_z: cz,
+                            subchunk_y: sy,
+                        });
+                    }
                 }
             }
+        }
+        drop(world);
+        for key in queued {
+            self.enqueue_dirty_mesh(key);
         }
     }
 
@@ -695,6 +840,10 @@ impl State {
                     .map(|n| n.get())
                     .unwrap_or(2),
             );
+            self.dirty_mesh_queue.clear();
+            self.dirty_mesh_queued.clear();
+            self.chunks_rendered = 0;
+            self.subchunks_rendered = 0;
             self.indirect_manager.clear_gpu_data(&self.queue);
             self.water_indirect_manager.clear_gpu_data(&self.queue);
             self.visible_chunk_columns.clear();

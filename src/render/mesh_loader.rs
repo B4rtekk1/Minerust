@@ -120,7 +120,8 @@ impl MeshLoader {
         }
     }
 
-    /// Enqueues a mesh-build request for the subchunk at `(cx, cz, sy)`.
+    /// Enqueues a mesh-build request for the subchunk at `(cx, cz, sy)` and
+    /// returns whether the request is accepted (or was already in flight).
     ///
     /// Does nothing if the subchunk is already in the pending set, preventing
     /// redundant in-flight work for the same subchunk.
@@ -129,20 +130,22 @@ impl MeshLoader {
     /// warning is logged; the caller should retry on a future frame.  The
     /// subchunk is intentionally *not* added to `pending` in this case so that
     /// the next call for the same key can attempt to enqueue it again.
-    pub fn request_mesh(&mut self, cx: i32, cz: i32, sy: i32) {
+    pub fn request_mesh(&mut self, cx: i32, cz: i32, sy: i32) -> bool {
         let key = (cx, cz, sy);
         if self.pending.contains(&key) {
-            return;
+            return true;
         }
         match self.request_tx.try_send(MeshRequest { cx, cz, sy }) {
             Ok(_) => {
                 self.pending.insert(key);
+                true
             }
             Err(_) => {
                 // The request channel is full. The subchunk is intentionally
                 // not inserted into `pending` here so the caller can retry it
                 // on the next frame once the workers drain the backlog.
                 //log(crate::logger::LogLevel::Warning, &format!("Mesh request channel full — dropping request for subchunk ({cx}, {cz}, {sy})"));
+                false
             }
         }
     }

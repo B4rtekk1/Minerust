@@ -701,6 +701,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    state.enqueue_all_dirty_meshes();
                                     log(
                                         LogLevel::Info,
                                         &format!(

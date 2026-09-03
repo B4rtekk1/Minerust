@@ -85,6 +85,9 @@ impl State {
         self.chunk_loader = minerust::ChunkLoader::new(seed);
         self.mesh_loader =
             minerust::MeshLoader::new(self.world.clone(), minerust::get_mesh_worker_count());
+        self.chunks_rendered = 0;
+        self.subchunks_rendered = 0;
+        self.enqueue_all_dirty_meshes();
         self.indirect_manager.clear();
         self.water_indirect_manager.clear();
         self.visible_chunk_columns.clear();
