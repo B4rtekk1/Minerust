@@ -1573,6 +1573,8 @@ impl State {
             current_fps: 0.0,
             frame_time_ms: 0.0,
             cpu_update_ms: 0.0,
+            cpu_time_sample_start: None,
+            cpu_time_sample_frames: 0,
             last_redraw: Instant::now(),
             last_frame: Instant::now(),
             mouse_captured: false,

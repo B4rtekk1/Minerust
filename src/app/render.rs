@@ -925,7 +925,7 @@ impl State {
             // ---- FPS counter (in-game only) ----
             if !menu_visible && self.show_debug_overlay {
                 let fps_text = format!(
-                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU update: {:.2} ms\nChunks: {}\nSubchunks: {}",
+                    "FPS: {:.0}\nFrame: {:.2} ms\nCPU time avg: {:.2} ms\nChunks: {}\nSubchunks: {}",
                     self.current_fps,
                     self.frame_time_ms,
                     self.cpu_update_ms,

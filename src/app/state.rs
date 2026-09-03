@@ -235,8 +235,13 @@ pub struct State {
     pub current_fps: f32,
     /// Last frame's total wall-clock time in milliseconds.
     pub frame_time_ms: f32,
-    /// Last frame's CPU update (non-render) time in milliseconds.
+    /// CPU time used by the last complete frame, in milliseconds. On Windows
+    /// this is user + kernel time for the whole process.
     pub cpu_update_ms: f32,
+    /// Start of the CPU-time sampling window used to average short frames.
+    pub cpu_time_sample_start: Option<(f64, Instant)>,
+    /// Completed frames collected in the current CPU-time sample window.
+    pub cpu_time_sample_frames: u32,
     /// `Instant` of the last `request_redraw` call (used to throttle redraws).
     pub last_redraw: Instant,
     /// `Instant` at the start of the previous frame (used to compute `dt`).

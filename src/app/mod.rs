@@ -1,6 +1,7 @@
 mod game;
 mod init;
 mod input;
+mod performance;
 mod render;
 mod resize;
 mod server;
