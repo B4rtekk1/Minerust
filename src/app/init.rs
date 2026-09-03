@@ -19,7 +19,7 @@ use minerust::{
     SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
 };
 
-use super::state::{DdgiResources, MSAA_SAMPLE_COUNT, State};
+use super::state::{MSAA_SAMPLE_COUNT, State};
 
 fn create_menu_background_texture(
     device: &wgpu::Device,
@@ -317,10 +317,6 @@ impl State {
             // Main opaque geometry pass: texture atlas lookup and lighting.
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
         });
-        let ddgi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cascaded Voxel DDGI Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/ddgi.wgsl").into()),
-        });
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
             // Translucent water pass: SSR reflection, refraction, foam edge
@@ -382,49 +378,6 @@ impl State {
                 _pad_uniforms: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // 256³ R8Uint is a 16 MiB camera-centred material/occupancy clipmap.
-        // It is intentionally independent of render meshes: DDA needs block
-        // identity even where greedy meshing has removed interior faces.
-        const DDGI_VOXEL_SIDE: u32 = 256;
-        const DDGI_PROBE_COUNT: u64 = 24 * 16 * 24 * 2;
-        // 6 irradiance lobes, 6 directional distance moments, relocation
-        // offset and world-space anchor.
-        const DDGI_PROBE_BYTES: u64 = 14 * 16;
-        let ddgi_voxel_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("DDGI Voxel Lighting Clipmap"),
-            size: wgpu::Extent3d {
-                width: DDGI_VOXEL_SIDE,
-                height: 256,
-                depth_or_array_layers: DDGI_VOXEL_SIDE,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::R8Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let ddgi_voxel_view =
-            ddgi_voxel_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let ddgi_config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("DDGI Config Buffer"),
-            size: 112,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let ddgi_probe_buffers = std::array::from_fn(|i| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(if i == 0 {
-                    "DDGI Probe History A"
-                } else {
-                    "DDGI Probe History B"
-                }),
-                size: DDGI_PROBE_COUNT * DDGI_PROBE_BYTES,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
         });
 
         // ------------------------------------------------------------------ //
@@ -490,88 +443,6 @@ impl State {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let ddgi_config_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("DDGI Config Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let ddgi_voxel_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("DDGI Voxel Clipmap Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Uint,
-                    view_dimension: wgpu::TextureViewDimension::D3,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        });
-        let ddgi_probe_read_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("DDGI Probe Read Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let ddgi_probe_write_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("DDGI Probe Write Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let ddgi_terrain_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Terrain DDGI Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
                         count: None,
                     },
                 ],
@@ -838,7 +709,6 @@ impl State {
                 bind_group_layouts: &[
                     Some(&uniform_bind_group_layout),
                     Some(&quad_bind_group_layout),
-                    Some(&ddgi_terrain_layout),
                 ],
                 immediate_size: 0,
             });
@@ -900,86 +770,10 @@ impl State {
             multiview_mask: None,
         });
 
-        let ddgi_compute_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Cascaded Voxel DDGI Pipeline Layout"),
-                bind_group_layouts: &[
-                    Some(&ddgi_config_layout),
-                    Some(&ddgi_voxel_layout),
-                    Some(&ddgi_probe_read_layout),
-                    Some(&ddgi_probe_write_layout),
-                ],
-                immediate_size: 0,
-            });
-        let ddgi_compute_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Cascaded Voxel DDGI Update"),
-                layout: Some(&ddgi_compute_pipeline_layout),
-                module: &ddgi_shader,
-                entry_point: Some("cs_update"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let ddgi_config_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DDGI Compute Config"),
-            layout: &ddgi_config_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: ddgi_config_buffer.as_entire_binding(),
-            }],
-        });
-        let ddgi_voxel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DDGI Compute Voxel Clipmap"),
-            layout: &ddgi_voxel_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&ddgi_voxel_view),
-            }],
-        });
-        let ddgi_compute_bind_groups = std::array::from_fn(|read_set| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("DDGI Compute Probe History"),
-                layout: &ddgi_probe_read_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ddgi_probe_buffers[read_set].as_entire_binding(),
-                }],
-            })
-        });
-        // The output bind groups have a different layout, so build them separately
-        // and pair each read-set with its opposite write-set below.
-        let ddgi_compute_write_bind_groups = std::array::from_fn(|read_set| {
-            let write_set = 1 - read_set;
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("DDGI Compute Probe Output"),
-                layout: &ddgi_probe_write_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ddgi_probe_buffers[write_set].as_entire_binding(),
-                }],
-            })
-        });
-        let ddgi_terrain_bind_groups = std::array::from_fn(|set| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Terrain DDGI Probes"),
-                layout: &ddgi_terrain_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ddgi_config_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: ddgi_probe_buffers[set].as_entire_binding(),
-                    },
-                ],
-            })
-        });
-
         let player_model_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Player Model Pipeline"),
-                layout: Some(&terrain_pipeline_layout),
+                layout: Some(&pipeline_layout),
                 cache: None,
                 vertex: wgpu::VertexState {
                     module: &terrain_shader,
@@ -1798,23 +1592,6 @@ impl State {
             water_quad_bind_group,
             depth_texture,
             msaa_texture_view,
-            ddgi: DdgiResources {
-                voxel_texture: ddgi_voxel_texture,
-                config_buffer: ddgi_config_buffer,
-                config_bind_group: ddgi_config_bind_group,
-                voxel_bind_group: ddgi_voxel_bind_group,
-                probe_buffers: ddgi_probe_buffers,
-                compute_pipeline: ddgi_compute_pipeline,
-                compute_bind_groups: ddgi_compute_bind_groups,
-                compute_write_bind_groups: ddgi_compute_write_bind_groups,
-                terrain_bind_groups: ddgi_terrain_bind_groups,
-                active_probe_set: 0,
-                frame_index: 0,
-                voxel_origin: (i32::MIN, 0, i32::MIN),
-                voxel_scroll: (0, 0, 0),
-                probe_origins: [(i32::MIN, i32::MIN, i32::MIN); 2],
-                probe_scroll: [(0, 0, 0); 2],
-            },
             world,
             mesh_loader,
             dirty_mesh_queue: std::collections::VecDeque::new(),

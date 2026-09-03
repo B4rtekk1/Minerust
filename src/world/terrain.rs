@@ -500,7 +500,10 @@ impl World {
         for bx in min_x..=max_x {
             for by in min_y..=max_y {
                 for bz in min_z..=max_z {
-                    let chunk_coords = (bx.div_euclid(CHUNK_SIZE), bz.div_euclid(CHUNK_SIZE));
+                    let chunk_coords = (
+                        bx.div_euclid(CHUNK_SIZE),
+                        bz.div_euclid(CHUNK_SIZE),
+                    );
                     if !self.chunks.contains_key(&chunk_coords) {
                         return false;
                     }
@@ -1280,9 +1283,7 @@ impl World {
                             continue;
                         }
 
-                        // Dynamic DDGI owns indirect lighting. Keep the packed
-                        // colour neutral; it must not retain baked aperture GI.
-                        let gi_tint = [1.0, 1.0, 1.0];
+                        let gi_tint = face_gi_tint(face_dir, world_x, y, world_z);
                         let ao = if block == BlockType::Water {
                             [3; 4]
                         } else {

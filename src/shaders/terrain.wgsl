@@ -82,85 +82,6 @@ struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, terrain_draw_dat
 @group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
 @group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
 
-// Cascaded voxel DDGI is deliberately a terrain-only group: sky, water and
-// legacy player pipelines retain their compact shared group(0) layout.
-struct DdgiConfig {
-    near_origin_spacing: vec4<f32>,
-    far_origin_spacing: vec4<f32>,
-    voxel_origin_frame: vec4<f32>,
-    sun_dir: vec4<f32>,
-    voxel_scroll: vec4<f32>, near_scroll: vec4<f32>, far_scroll: vec4<f32>,
-};
-struct Probe {
-    px: vec4<f32>, nx: vec4<f32>, py: vec4<f32>, ny: vec4<f32>, pz: vec4<f32>, nz: vec4<f32>,
-    dpx: vec4<f32>, dnx: vec4<f32>, dpy: vec4<f32>, dny: vec4<f32>, dpz: vec4<f32>, dnz: vec4<f32>,
-    offset: vec4<f32>, anchor: vec4<f32>,
-};
-@group(2) @binding(0) var<uniform> ddgi_config: DdgiConfig;
-@group(2) @binding(1) var<storage, read> ddgi_probes: array<Probe>;
-
-const DDGI_X: i32 = 24;
-const DDGI_Y: i32 = 16;
-const DDGI_Z: i32 = 24;
-const DDGI_CASCADE_SIZE: u32 = 9216u;
-
-fn ddgi_probe_index(cell: vec3<i32>, cascade: u32) -> u32 {
-    let ring = select(ddgi_config.near_scroll.xyz, ddgi_config.far_scroll.xyz, cascade == 1u);
-    let physical = vec3<i32>((cell.x + i32(ring.x)) % DDGI_X, (cell.y + i32(ring.y)) % DDGI_Y, (cell.z + i32(ring.z)) % DDGI_Z);
-    return cascade * DDGI_CASCADE_SIZE + u32(physical.x + physical.y * DDGI_X + physical.z * DDGI_X * DDGI_Y);
-}
-
-fn ddgi_lobe(p: Probe, normal: vec3<f32>) -> vec3<f32> {
-    return p.px.xyz * max(normal.x, 0.0) + p.nx.xyz * max(-normal.x, 0.0)
-         + p.py.xyz * max(normal.y, 0.0) + p.ny.xyz * max(-normal.y, 0.0)
-         + p.pz.xyz * max(normal.z, 0.0) + p.nz.xyz * max(-normal.z, 0.0);
-}
-
-fn ddgi_sample_cascade(world_pos: vec3<f32>, normal: vec3<f32>, cascade: u32) -> vec3<f32> {
-    let base = select(ddgi_config.near_origin_spacing, ddgi_config.far_origin_spacing, cascade == 1u);
-    let grid_pos = (world_pos - base.xyz) / base.w;
-    let whole = vec3<i32>(floor(grid_pos));
-    let fraction = fract(grid_pos);
-    var result = vec3(0.0);
-    var weight_sum = 0.0;
-    for (var dz = 0i; dz <= 1i; dz++) {
-        for (var dy = 0i; dy <= 1i; dy++) {
-            for (var dx = 0i; dx <= 1i; dx++) {
-                let cell = whole + vec3<i32>(dx, dy, dz);
-                if cell.x < 0 || cell.y < 0 || cell.z < 0 || cell.x >= DDGI_X || cell.y >= DDGI_Y || cell.z >= DDGI_Z { continue; }
-                let wx = select(1.0 - fraction.x, fraction.x, dx == 1i);
-                let wy = select(1.0 - fraction.y, fraction.y, dy == 1i);
-                let wz = select(1.0 - fraction.z, fraction.z, dz == 1i);
-                let probe = ddgi_probes[ddgi_probe_index(cell, cascade)];
-                // Moment-based visibility rejects probes whose closest geometry
-                // lies between the probe and this shaded surface.
-                let probe_pos = base.xyz + vec3<f32>(cell) * base.w + probe.offset.xyz;
-                let distance = length(world_pos - probe_pos);
-                let dir = normalize(world_pos - probe_pos);
-                let moment = select(select(probe.dnz, probe.dpz, dir.z >= 0.0), select(select(probe.dny, probe.dpy, dir.y >= 0.0), select(probe.dnx, probe.dpx, dir.x >= 0.0), abs(dir.x) >= max(abs(dir.y), abs(dir.z))), abs(dir.y) >= abs(dir.z));
-                let variance = max(moment.y - moment.x * moment.x, 0.25);
-                let chebyshev = variance / (variance + max(distance - moment.x, 0.0) * max(distance - moment.x, 0.0));
-                if any(abs(probe.anchor.xyz - (base.xyz + vec3<f32>(cell) * base.w)) > vec3(0.01)) { continue; }
-                let weight = wx * wy * wz * chebyshev;
-                result += ddgi_lobe(probe, normal) * weight;
-                weight_sum += weight;
-            }
-        }
-    }
-    return result / max(weight_sum, 1e-4);
-}
-
-fn voxel_ddgi(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let near = ddgi_sample_cascade(world_pos, normal, 0u);
-    let far = ddgi_sample_cascade(world_pos, normal, 1u);
-    let near_center = ddgi_config.near_origin_spacing.xyz + vec3<f32>(46.0, 30.0, 46.0);
-    let local = abs(world_pos - near_center);
-    // Blend against all three volume bounds; otherwise caves/cliffs outside
-    // the near Y extent incorrectly keep sampling its empty border.
-    let edge = max(local.x / 46.0, max(local.y / 30.0, local.z / 46.0));
-    return mix(near, far, smoothstep(0.70, 0.94, edge));
-}
-
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
@@ -278,9 +199,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
     if tex.a < 0.5 { discard; }
 
-    // Never clamp DDGI with camera-global analytic lighting: that turns an
-    // outdoor camera into a false sky source for every visible cave.
-    let indirect_light = voxel_ddgi(in.world_pos + normal * 0.03, normal);
+    let indirect_light = fast_global_illumination(
+        normal,
+        sun_dir,
+        day_factor,
+        twilight_factor,
+    );
 
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
     // Direct sunlight and sky fill cannot reach an area with a solid ceiling.
@@ -301,9 +225,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             + sun_color * sun_diff
             + vec3<f32>(0.58, 0.68, 0.82) * fill_diff * mix(0.70, 1.0, ambient_occlusion))
         * face_contrast;
-    // `in.color` is material/biome tint only; baked aperture/ground GI was
-    // removed from the mesher to avoid multiplying DDGI by legacy lighting.
-    var lit = tex.rgb * total_light * in.color;
+    let light_luma = dot(total_light, vec3<f32>(0.299, 0.587, 0.114));
+    let tint_luma = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
+    let dark_tint_neutralize = smoothstep(0.16, 0.035, light_luma) * 0.65;
+    let local_tint = mix(in.color, vec3<f32>(tint_luma), vec3<f32>(dark_tint_neutralize));
+    var lit = tex.rgb * total_light * local_tint;
 
     let sunset_factor = 1.0 - abs(sun_dir.y);
     if sunset_factor > 0.3 && sun_dir.y > -0.2 {
