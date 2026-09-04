@@ -563,6 +563,8 @@ pub struct State {
     pub fps_buffer: glyphon::Buffer,
     /// Whether the opt-in CPU-profiler overlay is rendered (toggled with C).
     pub show_debug_overlay: bool,
+    /// Enables the Hi-Z test in GPU culling; F4 toggles this for diagnostics.
+    pub occlusion_culling_enabled: bool,
 
     // Main-menu text buffers.
     /// "multiplayer" menu label.

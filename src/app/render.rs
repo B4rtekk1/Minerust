@@ -460,7 +460,14 @@ impl State {
         // The indirect manager's compute shader reads the Hi-Z texture and
         // frustum planes to populate per-chunk indirect draw arguments.
         let frustum_planes_array = frustum_planes_to_array(&frustum_planes);
-        let hiz_size_f = [self.hiz_size[0] as f32, self.hiz_size[1] as f32];
+        // A zero Hi-Z size makes the compute shader accept every
+        // frustum-visible subchunk. F4 uses this to distinguish temporal
+        // occlusion artifacts from a meshing-streaming backlog.
+        let hiz_size_f = if self.occlusion_culling_enabled {
+            [self.hiz_size[0] as f32, self.hiz_size[1] as f32]
+        } else {
+            [0.0, 0.0]
+        };
 
         self.indirect_manager.dispatch_culling(
             &mut encoder,
@@ -1104,7 +1111,7 @@ impl State {
                     "GPU frame: unavailable (TIMESTAMP_QUERY unsupported)\n\n".to_owned()
                 };
                 let fps_text = format!(
-                    "FPS: {:.0}\nFrame avg: {:.2} ms\nCPU time avg: {:.2} ms\n\n{}Update: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Dirty mesh queue: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nChunks: {}\nSubchunks: {}",
+                    "FPS: {:.0}\nFrame avg: {:.2} ms\nCPU time avg: {:.2} ms\n\n{}Update: {:.2} ms\n  Network: {:.2}\n  Chunk poll: {:.2}\n  Physics/snapshot: {:.2}\n  Requests: {:.2}\n  Chunk commit: {:.2}\n  Mesh commit: {:.2}\n  Children sum: {:.2}\n  Unaccounted: {:.2}\n\nFrame preparation: {:.2} ms\n  Camera/matrices: {:.2}\n  Visible cache: {:.2}\n  Uniform upload: {:.2}\n  Dirty mesh queue: {:.2}\n  Mesh requests: {:.2}\n  Remote players: {:.2}\n\nMeshing: queued {} | pending {}\nHi-Z occlusion: {}\n\nChunks: {}\nSubchunks: {}",
                     self.current_fps,
                     self.frame_time_ms,
                     self.cpu_update_ms,
@@ -1125,6 +1132,9 @@ impl State {
                     profile.render_chunk_scan_ms,
                     profile.mesh_request_submit_ms,
                     profile.remote_players_ms,
+                    self.dirty_mesh_queue.len(),
+                    self.mesh_loader.pending_count(),
+                    if self.occlusion_culling_enabled { "on" } else { "OFF" },
                     self.chunks_rendered,
                     self.subchunks_rendered
                 );

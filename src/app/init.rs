@@ -1686,6 +1686,7 @@ impl State {
             viewport,
             fps_buffer,
             show_debug_overlay: false,
+            occlusion_culling_enabled: true,
             menu_connect_button_buffer,
             menu_singleplayer_button_buffer,
             menu_render_mode_button_buffer,

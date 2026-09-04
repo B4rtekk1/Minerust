@@ -244,6 +244,7 @@ fn write_clipboard_text(_text: &str) -> bool {
 /// | F1 | Toggle crosshair and hotbar. |
 /// | F5 | Save world to disk. |
 /// | F3 | Toggle FPS/chunk debug overlay. |
+/// | F4 | Toggle Hi-Z occlusion culling (diagnostic). |
 /// | F9 | Load world from disk. |
 /// | F11 | Toggle borderless fullscreen. |
 ///
@@ -602,6 +603,12 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     "Off"
                                 };
                                 log(LogLevel::Info, &format!("Debug overlay: {}", state_name));
+                            }
+
+                            KeyCode::F4 if pressed && !repeat && state.game_state == GameState::Playing => {
+                                state.occlusion_culling_enabled = !state.occlusion_culling_enabled;
+                                let state_name = if state.occlusion_culling_enabled { "On" } else { "Off" };
+                                log(LogLevel::Info, &format!("Hi-Z occlusion culling: {}", state_name));
                             }
 
                             // ---- F5: Save world to disk ---------------------
