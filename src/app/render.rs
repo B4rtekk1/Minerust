@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec3};
-use glyphon::{Attrs, Color, Family, Metrics, Shaping, TextArea, TextBounds};
+use glyphon::{Color, Metrics, Shaping, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use minerust::{
@@ -842,8 +842,23 @@ impl State {
                     ui_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
                 }
             } else {
+                // --- Inventory overlay ---
+                if self.inventory_open {
+                    let (vb, ib, count) = crate::ui::inventory::build(
+                        &self.device,
+                        &self.inventory,
+                        self.hotbar_slot,
+                        self.cursor_position,
+                        self.config.width,
+                        self.config.height,
+                    );
+                    ui_pass.set_vertex_buffer(0, vb.slice(..));
+                    ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    ui_pass.draw_indexed(0..count, 0, 0..1);
+                }
+
                 // --- Crosshair ---
-                if self.show_crosshair {
+                if self.show_crosshair && !self.inventory_open {
                     ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
                     ui_pass.set_index_buffer(
                         self.crosshair_index_buffer.slice(..),
@@ -1086,7 +1101,7 @@ impl State {
                 );
                 self.fps_buffer.set_text(
                     &fps_text,
-                    &Attrs::new().family(Family::SansSerif),
+                    &self.ui_font.attrs(),
                     Shaping::Advanced,
                     None,
                 );
@@ -1105,9 +1120,7 @@ impl State {
                 let label = block.display_name();
                 self.hotbar_label_buffer.set_text(
                     label,
-                    &Attrs::new()
-                        .family(Family::SansSerif)
-                        .color(Color::rgb(255, 238, 200)),
+                    &self.ui_font.colored(Color::rgb(255, 238, 200)),
                     Shaping::Advanced,
                     None,
                 );
@@ -1152,9 +1165,7 @@ impl State {
                     let buffer = &mut self.player_label_buffers[i];
                     buffer.set_text(
                         &label.username,
-                        &Attrs::new()
-                            .family(Family::SansSerif)
-                            .color(Color::rgb(76, 255, 76)), // bright green name tags
+                        &self.ui_font.colored(Color::rgb(76, 255, 76)), // bright green name tags
                         Shaping::Advanced,
                         None,
                     );
@@ -1385,7 +1396,7 @@ impl State {
 
         self.menu_connect_button_buffer.set_text(
             "MULTIPLAYER",
-            &Attrs::new().family(Family::Name("Google Sans")),
+            &self.ui_font.attrs(),
             Shaping::Advanced,
             None,
         );
@@ -1398,7 +1409,7 @@ impl State {
 
         self.menu_singleplayer_button_buffer.set_text(
             "NEW WORLD",
-            &Attrs::new().family(Family::Name("Google Sans")),
+            &self.ui_font.attrs(),
             Shaping::Advanced,
             None,
         );
@@ -1415,7 +1426,7 @@ impl State {
         };
         self.menu_render_mode_button_buffer.set_text(
             render_mode_text,
-            &Attrs::new().family(Family::Name("Google Sans")),
+            &self.ui_font.attrs(),
             Shaping::Advanced,
             None,
         );
@@ -1435,7 +1446,7 @@ impl State {
         };
         self.menu_server_address_input_buffer.set_text(
             &server_address_text,
-            &Attrs::new().family(Family::Name("Google Sans")),
+            &self.ui_font.attrs(),
             Shaping::Advanced,
             None,
         );

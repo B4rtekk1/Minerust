@@ -552,6 +552,14 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::ShiftLeft => state.input.sprint = pressed,
                             KeyCode::ControlLeft => state.input.sneak = pressed,
 
+                            KeyCode::KeyE if pressed && !repeat => {
+                                state.toggle_inventory();
+                            }
+
+                            KeyCode::Escape if pressed && state.inventory_open => {
+                                state.toggle_inventory();
+                            }
+
                             KeyCode::Escape if pressed => {
                                 // Escape always returns to the menu from gameplay.
                                 // Release the cursor at the same time so the UI is
@@ -808,6 +816,16 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         if pressed && button == winit::event::MouseButton::Left {
                             if let Some((x, y)) = state.cursor_position {
                                 state.handle_menu_click(x, y);
+                            }
+                        }
+                    } else if state.inventory_open {
+                        if pressed {
+                            if let Some((x, y)) = state.cursor_position {
+                                state.handle_inventory_click(
+                                    x,
+                                    y,
+                                    button == winit::event::MouseButton::Right,
+                                );
                             }
                         }
                     } else if pressed && !state.mouse_captured {

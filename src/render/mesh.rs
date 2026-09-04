@@ -407,7 +407,7 @@ pub fn build_block_outline(
 pub fn build_item_model(position: [f32; 3], block: BlockType, yaw: f32) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(24);
     let mut indices = Vec::with_capacity(36);
-    let half = 0.18;
+    let half = 0.11;
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     let corners = [
         (-half, -half, -half), (half, -half, -half), (half, half, -half), (-half, half, -half),

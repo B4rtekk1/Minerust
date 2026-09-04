@@ -12,6 +12,68 @@ use super::state::State;
 const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.4;
 
 impl State {
+    pub fn toggle_inventory(&mut self) {
+        self.inventory_open = !self.inventory_open;
+        self.input = Default::default();
+        self.digging = Default::default();
+        self.placement.reset();
+        self.mouse_captured = !self.inventory_open;
+        if self.inventory_open {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            self.window.set_cursor_visible(true);
+        } else {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::Confined)
+                .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked));
+            self.window.set_cursor_visible(false);
+        }
+    }
+
+    pub fn handle_inventory_click(&mut self, x: f32, y: f32, right_click: bool) {
+        let layout = crate::ui::inventory::InventoryLayout::new(self.config.width, self.config.height);
+        let Some(slot) = layout.slot_at(x, y) else { return; };
+        if self.modifiers.shift_key() && !right_click {
+            self.inventory.shift_click(slot);
+            return;
+        }
+        if right_click {
+            if self.inventory.cursor_item.is_none() {
+                let _ = self.inventory.split_stack(slot, None);
+            } else {
+                let cursor = self.inventory.cursor_item.as_mut().unwrap();
+                let target = &mut self.inventory.slots[slot];
+                if target.is_none() {
+                    *target = Some(minerust::InventoryItem::new(cursor.item.clone(), 1));
+                    cursor.quantity -= 1;
+                } else if let Some(stack) = target.as_mut() {
+                    if stack.item.id == cursor.item.id && stack.quantity < stack.max_quantity() {
+                        stack.quantity += 1;
+                        cursor.quantity -= 1;
+                    }
+                }
+                if self.inventory.cursor_item.as_ref().is_some_and(|item| item.quantity == 0) {
+                    self.inventory.cursor_item = None;
+                }
+            }
+            return;
+        }
+        match self.inventory.cursor_item.take() {
+            None => self.inventory.cursor_item = self.inventory.slots[slot].take(),
+            Some(mut cursor) => match self.inventory.slots[slot].as_mut() {
+                None => self.inventory.slots[slot] = Some(cursor),
+                Some(stack) if stack.item.id == cursor.item.id && stack.item.stackable => {
+                    let room = stack.max_quantity().saturating_sub(stack.quantity);
+                    let moved = room.min(cursor.quantity);
+                    stack.quantity += moved;
+                    cursor.quantity -= moved;
+                    if cursor.quantity > 0 { self.inventory.cursor_item = Some(cursor); }
+                }
+                Some(_) => {
+                    let old = self.inventory.slots[slot].replace(cursor);
+                    self.inventory.cursor_item = old;
+                }
+            },
+        }
+    }
     /// Translates a raw mouse-click position into a menu action.
     ///
     /// Called whenever the player clicks while the game is in
@@ -99,6 +161,7 @@ impl State {
         self.input = Default::default();
         self.digging = Default::default();
         self.placement = Default::default();
+        self.inventory_open = false;
         self.inventory = Default::default();
         self.item_entities.clear();
         self.next_entity_id = 1;

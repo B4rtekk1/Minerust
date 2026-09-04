@@ -10,6 +10,7 @@ use winit::{keyboard::ModifiersState, window::Window};
 use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
 use crate::ui::menu::{GameState, MenuState};
+use crate::ui::font::Font;
 use minerust::SubchunkKey;
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
@@ -397,6 +398,8 @@ pub struct State {
     pub digging: DiggingState,
     /// Repeat-placement tracker used while the right mouse button is held.
     pub placement: BlockPlacementState,
+    /// True while the mouse-driven inventory overlay is open.
+    pub inventory_open: bool,
     /// Player-owned item stacks. World drops are inserted here only on pickup.
     pub inventory: minerust::Inventory,
     /// Dropped item stacks currently simulated in the world.
@@ -534,6 +537,8 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Manages font data and shaping for all text rendered via glyphon.
     pub font_system: FontSystem,
+    /// Shared Windows-backed typeface used by every glyphon UI element.
+    pub ui_font: Font,
     /// Rasterises glyph outlines into the `text_atlas`.
     pub swash_cache: SwashCache,
     /// GPU glyph cache texture used by `text_renderer`.

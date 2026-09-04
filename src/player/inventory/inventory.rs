@@ -3,6 +3,7 @@ use crate::GameItem;
 pub const MAIN_SLOT_COUNT: usize = 27;
 pub const HOTBAR_SLOT_COUNT: usize = 9;
 pub const INVENTORY_SLOT_COUNT: usize = MAIN_SLOT_COUNT + HOTBAR_SLOT_COUNT;
+pub const MAX_STACK_SIZE: u32 = 64;
 
 /// A stack stored in an inventory slot or carried by the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,10 @@ impl InventoryItem {
 
     pub fn item_id(&self) -> &str {
         self.item.id
+    }
+
+    pub fn max_quantity(&self) -> u32 {
+        self.item.max_stack_size.clamp(1, MAX_STACK_SIZE)
     }
 }
 
@@ -57,7 +62,7 @@ impl Inventory {
             return 0;
         }
         let max = if item.stackable {
-            item.max_stack_size.max(1)
+            item.max_stack_size.clamp(1, MAX_STACK_SIZE)
         } else {
             1
         };
@@ -145,10 +150,7 @@ impl Inventory {
                 true
             }
             Some(destination) if destination.item.id == moving.item.id && moving.item.stackable => {
-                let room = moving
-                    .item
-                    .max_stack_size
-                    .saturating_sub(destination.quantity);
+                let room = moving.max_quantity().saturating_sub(destination.quantity);
                 let added = room.min(moving.quantity);
                 destination.quantity += added;
                 moving.quantity -= added;

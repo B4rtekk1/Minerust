@@ -1122,6 +1122,7 @@ impl State {
         // string changes.
 
         let mut font_system = FontSystem::new();
+        let ui_font = crate::ui::font::Font::load(&mut font_system);
         // Load the bundled Google Sans font so that text looks consistent
         // across all platforms regardless of system fonts installed.
         font_system.db_mut().load_font_data(
@@ -1601,6 +1602,7 @@ impl State {
             input: InputState::default(),
             digging: DiggingState::default(),
             placement: super::state::BlockPlacementState::default(),
+            inventory_open: false,
             inventory: minerust::Inventory::default(),
             item_entities: Vec::new(),
             next_entity_id: 1,
@@ -1670,6 +1672,7 @@ impl State {
             water_bind_group_layout,
             surface_format,
             font_system,
+            ui_font,
             swash_cache,
             text_atlas,
             text_renderer,
