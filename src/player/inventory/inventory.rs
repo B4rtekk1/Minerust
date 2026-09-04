@@ -26,17 +26,22 @@ impl PlayerSlot {
 #[derive(Debug, Clone)]
 pub struct Container<const N: usize> {
     slots: [Option<ItemStack>; N],
+    rules: [SlotRule; N],
     revision: u64,
 }
 impl<const N: usize> Default for Container<N> {
     fn default() -> Self {
         Self {
             slots: std::array::from_fn(|_| None),
+            rules: [SlotRule::Any; N],
             revision: 0,
         }
     }
 }
 impl<const N: usize> Container<N> {
+    pub fn with_rules(rules: [SlotRule; N]) -> Self { Self { slots: std::array::from_fn(|_| None), rules, revision: 0 } }
+    pub fn rule(&self, index: usize) -> Option<SlotRule> { self.rules.get(index).copied() }
+    pub fn accepts(&self, index: usize, stack: &ItemStack, registry: &ItemRegistry) -> bool { self.rule(index).is_some_and(|rule| rule.accepts(stack, registry)) }
     pub fn get(&self, index: usize) -> Option<&ItemStack> {
         self.slots.get(index)?.as_ref()
     }
@@ -54,6 +59,10 @@ impl<const N: usize> Container<N> {
         *slot = stack;
         self.revision += 1;
         true
+    }
+    pub fn set_checked(&mut self, index: usize, stack: Option<ItemStack>, registry: &ItemRegistry) -> bool {
+        if stack.as_ref().is_some_and(|stack| !self.accepts(index, stack, registry)) { return false; }
+        self.set(index, stack)
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -79,11 +88,14 @@ pub enum InventoryAction {
     LeftClick(PlayerSlot),
     RightClick(PlayerSlot),
     QuickMove(PlayerSlot),
+    DropOne(PlayerSlot),
+    DropStack(PlayerSlot),
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct InventoryTransactionResult {
     pub changed: bool,
+    pub dropped: Option<ItemStack>,
 }
 
 /// Per-slot admission rule for containers such as furnaces, armor and output slots.
@@ -97,6 +109,24 @@ impl SlotRule {
             Self::OutputOnly => false,
             Self::Tool => matches!(registry.get(stack.item).kind, ItemKind::Tool(_)),
             Self::Fuel | Self::Smeltable => false,
+        }
+    }
+}
+
+/// Constrained storage layout used by a future furnace UI and simulation.
+#[derive(Debug, Clone)]
+pub struct FurnaceInventory {
+    pub input: Container<1>,
+    pub fuel: Container<1>,
+    pub output: Container<1>,
+}
+
+impl Default for FurnaceInventory {
+    fn default() -> Self {
+        Self {
+            input: Container::with_rules([SlotRule::Smeltable]),
+            fuel: Container::with_rules([SlotRule::Fuel]),
+            output: Container::with_rules([SlotRule::OutputOnly]),
         }
     }
 }
@@ -172,8 +202,20 @@ impl PlayerInventory {
         registry: &ItemRegistry,
     ) -> InventoryTransactionResult {
         match action {
+            InventoryAction::DropOne(slot) => {
+                let Some(mut stack) = self.take(slot) else { return InventoryTransactionResult::default() };
+                let dropped = ItemStack { count: 1, ..stack.clone() };
+                stack.count -= 1;
+                if stack.count > 0 { self.set(slot, Some(stack)); }
+                InventoryTransactionResult { changed: true, dropped: Some(dropped) }
+            }
+            InventoryAction::DropStack(slot) => {
+                let dropped = self.take(slot);
+                InventoryTransactionResult { changed: dropped.is_some(), dropped }
+            }
             InventoryAction::QuickMove(slot) => InventoryTransactionResult {
                 changed: self.quick_move(slot, registry),
+                dropped: None,
             },
             InventoryAction::LeftClick(slot) => {
                 match ui.cursor_stack.take() {
@@ -203,7 +245,7 @@ impl PlayerInventory {
                         }
                     },
                 }
-                InventoryTransactionResult { changed: true }
+                InventoryTransactionResult { changed: true, dropped: None }
             }
             InventoryAction::RightClick(slot) => {
                 if ui.cursor_stack.is_none() {
@@ -219,7 +261,7 @@ impl PlayerInventory {
                         count: amount,
                         ..stack
                     });
-                    return InventoryTransactionResult { changed: true };
+                    return InventoryTransactionResult { changed: true, dropped: None };
                 }
                 let mut cursor = ui.cursor_stack.take().expect("cursor checked above");
                 match self.get(slot).cloned() {
@@ -246,7 +288,7 @@ impl PlayerInventory {
                 if cursor.count > 0 {
                     ui.cursor_stack = Some(cursor);
                 }
-                InventoryTransactionResult { changed: true }
+                InventoryTransactionResult { changed: true, dropped: None }
             }
         }
     }
@@ -264,6 +306,17 @@ impl PlayerInventory {
         if stack.count > 0 {
             self.set(slot, Some(stack));
         }
+        true
+    }
+
+    /// Damages the selected tool once. A tool at zero durability disappears.
+    pub fn damage_selected_tool(&mut self, registry: &ItemRegistry) -> bool {
+        let slot = PlayerSlot::Hotbar(self.selected_hotbar);
+        let Some(mut stack) = self.take(slot) else { return false };
+        if !matches!(registry.get(stack.item).kind, ItemKind::Tool(_)) { self.set(slot, Some(stack)); return false; }
+        let Some(durability) = stack.state.durability.as_mut() else { self.set(slot, Some(stack)); return false; };
+        *durability = durability.saturating_sub(1);
+        if *durability > 0 { self.set(slot, Some(stack)); }
         true
     }
 
@@ -376,5 +429,32 @@ mod tests {
         let tool_stack = registry.new_stack(registry.resolve("minerust:iron_pickaxe").unwrap(), 1);
         assert!(!SlotRule::Tool.accepts(&stone_stack, registry));
         assert!(SlotRule::Tool.accepts(&tool_stack, registry));
+    }
+
+    #[test]
+    fn constrained_container_refuses_invalid_stack() {
+        let mut container = Container::<1>::with_rules([SlotRule::Tool]);
+        assert!(!container.set_checked(0, Some(stone(1)), item_registry()));
+        let pickaxe = item_registry().new_stack(item_registry().resolve("minerust:iron_pickaxe").unwrap(), 1);
+        assert!(container.set_checked(0, Some(pickaxe), item_registry()));
+    }
+
+    #[test]
+    fn drop_one_keeps_the_remainder_in_the_slot() {
+        let mut inventory = PlayerInventory::default();
+        inventory.set(PlayerSlot::Hotbar(0), Some(stone(3)));
+        let result = inventory.apply_action(&mut InventoryUiState::default(), InventoryAction::DropOne(PlayerSlot::Hotbar(0)), item_registry());
+        assert_eq!(result.dropped.unwrap().count, 1);
+        assert_eq!(inventory.get(PlayerSlot::Hotbar(0)).unwrap().count, 2);
+    }
+
+    #[test]
+    fn selected_tool_loses_durability() {
+        let registry = item_registry();
+        let mut inventory = PlayerInventory::default();
+        let pickaxe = registry.new_stack(registry.resolve("minerust:iron_pickaxe").unwrap(), 1);
+        inventory.set(PlayerSlot::Hotbar(0), Some(pickaxe));
+        assert!(inventory.damage_selected_tool(registry));
+        assert_eq!(inventory.selected_stack().unwrap().state.durability, Some(249));
     }
 }
