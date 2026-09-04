@@ -1685,6 +1685,7 @@ impl State {
             menu_server_address_input_buffer,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,
+            inventory_count_buffers: Vec::new(),
             last_hotbar_slot: usize::MAX,
             player_label_buffers: Vec::new(),
             composite_pipeline,

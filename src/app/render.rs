@@ -1287,6 +1287,56 @@ impl State {
             } else {
                 // ---- In-game HUD text ----
 
+                // Stack counts are ordinary Glyphon text, so inventory uses
+                // the same Windows-backed UI font as every other label.
+                if self.inventory_open {
+                    let counts: Vec<(usize, u32)> = self
+                        .inventory
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(slot, stack)| stack.as_ref().map(|item| (slot, item.quantity)))
+                        .collect();
+                    while self.inventory_count_buffers.len() < counts.len() {
+                        self.inventory_count_buffers.push(glyphon::Buffer::new(
+                            &mut self.font_system,
+                            Metrics::new(18.0, 20.0),
+                        ));
+                    }
+                    let layout = crate::ui::inventory::InventoryLayout::new(
+                        self.config.width,
+                        self.config.height,
+                    );
+                    for (index, (_, quantity)) in counts.iter().enumerate() {
+                        let buffer = &mut self.inventory_count_buffers[index];
+                        buffer.set_text(
+                            &quantity.to_string(),
+                            &self.ui_font.colored(Color::rgb(255, 255, 255)),
+                            Shaping::Advanced,
+                            None,
+                        );
+                        buffer.shape_until_scroll(&mut self.font_system, false);
+                    }
+                    for (index, (slot, _)) in counts.iter().enumerate() {
+                        let buffer = &self.inventory_count_buffers[index];
+                        let (x, y, width, height) = layout.slot_rect(*slot);
+                        text_areas.push(TextArea {
+                            buffer,
+                            left: x + width - 24.0,
+                            top: y + height - 25.0,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: x as i32,
+                                top: y as i32,
+                                right: (x + width) as i32,
+                                bottom: (y + height) as i32,
+                            },
+                            default_color: Color::rgb(255, 255, 255),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
+
                 if self.show_crosshair {
                     // Hotbar slot name: centred above the hotbar, clamped to the
                     // screen width.

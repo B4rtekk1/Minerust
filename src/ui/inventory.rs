@@ -5,41 +5,6 @@ use wgpu::util::DeviceExt;
 pub const SLOT: f32 = 64.0;
 const GAP: f32 = 8.0;
 
-fn add_quantity(
-    vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, quantity: u32, x: f32, y: f32,
-    screen_w: u32, screen_h: u32,
-) {
-    // Seven-segment digits keep stack counts in the same GPU-only UI pass.
-    const SEGMENTS: [[bool; 7]; 10] = [
-        [true,true,true,true,true,true,false], [false,true,true,false,false,false,false],
-        [true,true,false,true,true,false,true], [true,true,true,true,false,false,true],
-        [false,true,true,false,false,true,true], [true,false,true,true,false,true,true],
-        [true,false,true,true,true,true,true], [true,true,true,false,false,false,false],
-        [true,true,true,true,true,true,true], [true,true,true,true,false,true,true],
-    ];
-    let text = quantity.to_string();
-    for (digit_index, byte) in text.bytes().enumerate() {
-        let digit = (byte - b'0') as usize;
-        for (segment, enabled) in SEGMENTS[digit].iter().enumerate() {
-            if !enabled { continue; }
-            let (dx, dy, w, h) = match segment {
-                0 => (2.0, 0.0, 8.0, 2.0), 1 => (10.0, 2.0, 2.0, 7.0),
-                2 => (10.0, 11.0, 2.0, 7.0), 3 => (2.0, 18.0, 8.0, 2.0),
-                4 => (0.0, 11.0, 2.0, 7.0), 5 => (0.0, 2.0, 2.0, 7.0),
-                _ => (2.0, 9.0, 8.0, 2.0),
-            };
-            let px = x + digit_index as f32 * 13.0 + dx;
-            let py = y + dy;
-            let base = vertices.len() as u32;
-            let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
-            for (corner, (vx, vy)) in [(px,py),(px+w,py),(px+w,py+h),(px,py+h)].into_iter().enumerate() {
-                vertices.push(Vertex { position: [vx / screen_w as f32 * 2.0 - 1.0, 1.0 - vy / screen_h as f32 * 2.0, 0.0], packed: Vertex::pack_ui(normal, [1.0, 1.0, 1.0, 1.0], 0, corner as u8) });
-            }
-            indices.extend_from_slice(&[base,base+1,base+2,base,base+2,base+3]);
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct InventoryLayout { pub x: f32, pub y: f32, pub w: f32, pub h: f32 }
 
@@ -83,7 +48,6 @@ pub fn build(device: &wgpu::Device, inventory: &Inventory, selected_hotbar: usiz
         if let Some(stack) = &inventory.slots[slot] {
             let color = block_for_item(stack.item.id).map(|block| block.color()).unwrap_or([0.8,0.8,0.8]);
             add(&mut vertices, &mut indices, x+14.0, y+14.0, w-28.0, h-28.0, color);
-            add_quantity(&mut vertices, &mut indices, stack.quantity, x + w - 30.0, y + h - 24.0, width, height);
         }
     }
     if let (Some(cursor), Some((x, y))) = (&inventory.cursor_item, cursor_position) {

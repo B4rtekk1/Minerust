@@ -568,6 +568,8 @@ pub struct State {
     pub hotbar_label_buffer: glyphon::Buffer,
     /// Pre-measured pixel width of `hotbar_label_buffer` for centering.
     pub hotbar_label_width: f32,
+    /// Reusable Glyphon buffers for inventory stack quantities.
+    pub inventory_count_buffers: Vec<glyphon::Buffer>,
     /// One name-tag buffer per currently visible remote player.
     pub player_label_buffers: Vec<glyphon::Buffer>,
 
