@@ -40,7 +40,15 @@ impl State {
     fn spawn_block_drop(&mut self, block: BlockType, x: i32, y: i32, z: i32) {
         let canonical = match block { BlockType::WoodLogX | BlockType::WoodLogZ => BlockType::Wood, other => other };
         for stack in minerust::item_registry().roll_block_loot(canonical) {
-            self.spawn_item_stack(stack, Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
+            if let Some(remainder) = self
+                .inventory
+                .insert_hotbar_first(stack, minerust::item_registry())
+            {
+                self.spawn_item_stack(
+                    remainder,
+                    Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                );
+            }
         }
     }
 

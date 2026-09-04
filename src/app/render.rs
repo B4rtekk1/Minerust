@@ -1363,7 +1363,7 @@ impl State {
 
                 if self.show_crosshair {
                     while self.hotbar_count_buffers.len() < 9 {
-                        self.hotbar_count_buffers.push(glyphon::Buffer::new(&mut self.font_system, Metrics::new(16.0, 18.0)));
+                        self.hotbar_count_buffers.push(glyphon::Buffer::new(&mut self.font_system, Metrics::new(19.0, 21.0)));
                     }
                     let slot_width = self.config.width as f32 * 0.04;
                     let gap = self.config.width as f32 * 0.002;
@@ -1372,14 +1372,23 @@ impl State {
                     for slot in 0..9 {
                         let buffer = &mut self.hotbar_count_buffers[slot];
                         let count = self.inventory.get_flat(27 + slot).map(|stack| stack.count.to_string()).unwrap_or_default();
-                        buffer.set_text(&count, &self.ui_font.colored(Color::rgb(255, 255, 255)), Shaping::Advanced, None);
+                        let count_attrs = self
+                            .ui_font
+                            .colored(Color::rgb(255, 255, 255))
+                            .weight(glyphon::Weight::BOLD);
+                        buffer.set_text(&count, &count_attrs, Shaping::Advanced, None);
                         buffer.shape_until_scroll(&mut self.font_system, false);
                     }
                     for slot in 0..9 {
                         let buffer = &self.hotbar_count_buffers[slot];
                         let left = start_x + slot as f32 * (slot_width + gap) + slot_width - 20.0;
-                        text_areas.push(TextArea { buffer, left, top: (self.config.height as f32 - 31.0).max(0.0), scale: 1.0,
-                            bounds: TextBounds { left: left as i32 - 4, top: (self.config.height as i32 - 72).max(0), right: (left + 24.0) as i32, bottom: self.config.height as i32 },
+                        // The hotbar quad ends a few pixels above the bottom
+                        // edge.  Keep the quantity baseline inside that quad;
+                        // the old `height - 31` anchor put the glyph descenders
+                        // below the slot on shorter screens.
+                        let count_top = (self.config.height as f32 * 0.975 - 25.0).max(0.0);
+                        text_areas.push(TextArea { buffer, left, top: count_top, scale: 1.0,
+                            bounds: TextBounds { left: left as i32 - 4, top: (count_top as i32 - 4).max(0), right: (left + 28.0) as i32, bottom: (count_top as i32 + 24).min(self.config.height as i32) },
                             default_color: Color::rgb(255, 255, 255), custom_glyphs: &[] });
                     }
                     // Hotbar slot name: centred above the hotbar, clamped to the

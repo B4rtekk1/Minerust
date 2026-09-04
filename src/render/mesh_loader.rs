@@ -32,6 +32,14 @@ pub struct MeshResult {
     pub water: Vec<PackedQuad>,
 }
 
+/// Completion message sent by a mesh worker.  A request must produce one of
+/// these messages even when its chunk was evicted before the worker obtained a
+/// snapshot: otherwise its key would remain in [`MeshLoader::pending`] forever.
+enum MeshJobResult {
+    Built(MeshResult),
+    Cancelled { cx: i32, cz: i32, sy: i32 },
+}
+
 /// Asynchronous mesh-building system backed by a fixed pool of worker threads.
 ///
 /// The main thread submits [`MeshRequest`]s via [`request_mesh`] and collects
@@ -47,7 +55,7 @@ pub struct MeshLoader {
     /// Sending half of the request channel shared with all worker threads.
     request_tx: Sender<MeshRequest>,
     /// Receiving half of the result channel; workers write completed meshes here.
-    result_rx: Receiver<MeshResult>,
+    result_rx: Receiver<MeshJobResult>,
     /// Set of subchunk keys `(cx, cz, sy)` that have been queued but not yet
     /// collected, used to deduplicate in-flight requests.
     pending: HashSet<(i32, i32, i32)>,
@@ -65,7 +73,7 @@ impl MeshLoader {
     /// Panics if any worker thread cannot be spawned.
     pub fn new(world: Arc<parking_lot::RwLock<World>>, worker_count: usize) -> Self {
         let (request_tx, request_rx) = bounded::<MeshRequest>(256);
-        let (result_tx, result_rx) = bounded::<MeshResult>(256);
+        let (result_tx, result_rx) = bounded::<MeshJobResult>(256);
         let seed = world.read().seed;
 
         for i in 0..worker_count {
@@ -86,23 +94,29 @@ impl MeshLoader {
                             world_read.snapshot_subchunk_mesh(req.cx, req.cz, req.sy)
                         };
 
-                        let Some(snapshot) = snapshot else {
-                            continue;
-                        };
-
-                        let meshes =
-                            World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
-
-                        if tx
-                            .send(MeshResult {
+                        let result = match snapshot {
+                            Some(snapshot) => {
+                                let meshes = World::build_subchunk_mesh_from_snapshot(
+                                    &generator,
+                                    &snapshot,
+                                );
+                                MeshJobResult::Built(MeshResult {
+                                    cx: req.cx,
+                                    cz: req.cz,
+                                    sy: req.sy,
+                                    mesh_version: snapshot.mesh_version,
+                                    terrain: meshes.0,
+                                    water: meshes.1,
+                                })
+                            }
+                            None => MeshJobResult::Cancelled {
                                 cx: req.cx,
                                 cz: req.cz,
                                 sy: req.sy,
-                                mesh_version: snapshot.mesh_version,
-                                terrain: meshes.0,
-                                water: meshes.1,
-                            })
-                            .is_err()
+                            },
+                        };
+
+                        if tx.send(result).is_err()
                         {
                             // The result receiver has been dropped — the
                             // MeshLoader is shutting down, so exit the loop.
@@ -151,23 +165,34 @@ impl MeshLoader {
     }
 
     /// Returns the next completed mesh result without blocking, or `None` if
-    /// no results are currently available.
+    /// no built results are currently available.
     ///
     /// Removes the corresponding entry from the pending set so the subchunk
     /// can be re-requested later if needed.
     pub fn poll_result(&mut self) -> Option<MeshResult> {
-        match self.result_rx.try_recv() {
-            Ok(result) => {
-                self.pending.remove(&(result.cx, result.cz, result.sy));
-                Some(result)
+        while let Ok(result) = self.result_rx.try_recv() {
+            match result {
+                MeshJobResult::Built(result) => {
+                    self.pending.remove(&(result.cx, result.cz, result.sy));
+                    return Some(result);
+                }
+                MeshJobResult::Cancelled { cx, cz, sy } => {
+                    self.pending.remove(&(cx, cz, sy));
+                }
             }
-            Err(_) => None,
         }
+        None
     }
 
     /// Returns `true` if a mesh request for `(cx, cz, sy)` has been enqueued
     /// but its result has not yet been collected.
     pub fn is_pending(&self, cx: i32, cz: i32, sy: i32) -> bool {
         self.pending.contains(&(cx, cz, sy))
+    }
+
+    /// Number of mesh jobs that have been accepted but not yet acknowledged by
+    /// a worker. Useful for diagnosing streaming backlog.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 }

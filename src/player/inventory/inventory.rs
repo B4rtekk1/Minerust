@@ -178,6 +178,25 @@ impl PlayerInventory {
         )
     }
 
+    /// Inserts a stack into the hotbar before using the main inventory.
+    ///
+    /// This is used for freshly mined block drops so they become immediately
+    /// available for placement without disturbing the normal inventory sort
+    /// order used by UI transfers and pickups.
+    pub fn insert_hotbar_first(
+        &mut self,
+        stack: ItemStack,
+        registry: &ItemRegistry,
+    ) -> Option<ItemStack> {
+        self.insert_into(
+            stack,
+            registry,
+            (0..HOTBAR_SLOT_COUNT)
+                .map(|i| PlayerSlot::Hotbar(i as u8))
+                .chain((0..MAIN_SLOT_COUNT).map(|i| PlayerSlot::Main(i as u8))),
+        )
+    }
+
     pub fn quick_move(&mut self, source: PlayerSlot, registry: &ItemRegistry) -> bool {
         let Some(stack) = self.take(source) else {
             return false;
@@ -275,7 +294,7 @@ impl PlayerInventory {
                         return InventoryTransactionResult::default();
                     };
                     let amount = stack.count.div_ceil(2);
-                    stack.count -= amount;
+                    stack.count -= amount; 
                     if stack.count > 0 {
                         self.set(slot, Some(stack.clone()));
                     }
@@ -284,7 +303,7 @@ impl PlayerInventory {
                         ..stack
                     });
                     ui.cursor_origin = Some(slot);
-                    return InventoryTransactionResult { changed: true, dropped: None };
+                    return InventoryTransactionResult { changed: true,  dropped: None };
                 }
                 let mut cursor = ui.cursor_stack.take().expect("cursor checked above");
                 match self.get(slot).cloned() {
@@ -414,6 +433,14 @@ mod tests {
         assert_eq!(inventory.insert(stone(8), item_registry()), None);
         assert_eq!(inventory.get(PlayerSlot::Main(1)).unwrap().count, 64);
         assert_eq!(inventory.get(PlayerSlot::Main(0)).unwrap().count, 4);
+    }
+
+    #[test]
+    fn insert_hotbar_first_prefers_hotbar_over_empty_main_slot() {
+        let mut inventory = PlayerInventory::default();
+        assert_eq!(inventory.insert_hotbar_first(stone(1), item_registry()), None);
+        assert_eq!(inventory.get(PlayerSlot::Hotbar(0)).unwrap().count, 1);
+        assert!(inventory.get(PlayerSlot::Main(0)).is_none());
     }
 
     #[test]
