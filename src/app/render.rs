@@ -844,17 +844,45 @@ impl State {
             } else {
                 // --- Inventory overlay ---
                 if self.inventory_open {
-                    let (vb, ib, count) = crate::ui::inventory::build(
-                        &self.device,
-                        &self.inventory,
-                        &self.inventory_ui,
-                        self.cursor_position,
-                        self.config.width,
-                        self.config.height,
-                    );
-                    ui_pass.set_vertex_buffer(0, vb.slice(..));
-                    ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    ui_pass.draw_indexed(0..count, 0, 0..1);
+                    let size = [self.config.width, self.config.height];
+                    if self.inventory_vertex_buffer.is_none()
+                        || self.last_inventory_revision != self.inventory.revision()
+                        || self.inventory_buffer_size != size
+                    {
+                        let (vertices, indices) = crate::ui::inventory::build_geometry(&self.inventory, size[0], size[1]);
+                        self.inventory_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Inventory UI VB"), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX,
+                        }));
+                        self.inventory_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Inventory UI IB"), contents: bytemuck::cast_slice(&indices), usage: wgpu::BufferUsages::INDEX,
+                        }));
+                        self.inventory_num_indices = indices.len() as u32;
+                        self.last_inventory_revision = self.inventory.revision();
+                        self.inventory_buffer_size = size;
+                    }
+                    if let (Some(vb), Some(ib)) = (&self.inventory_vertex_buffer, &self.inventory_index_buffer) {
+                        ui_pass.set_vertex_buffer(0, vb.slice(..));
+                        ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                        ui_pass.draw_indexed(0..self.inventory_num_indices, 0, 0..1);
+                    }
+                    if let (Some(stack), Some((x, y))) = (&self.inventory_ui.cursor_stack, self.cursor_position) {
+                        let vertices = crate::ui::inventory::cursor_geometry(stack, x, y, size[0], size[1]);
+                        if self.inventory_cursor_vertex_buffer.is_none() {
+                            self.inventory_cursor_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Inventory cursor VB"), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            }));
+                            self.inventory_cursor_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Inventory cursor IB"), contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]), usage: wgpu::BufferUsages::INDEX,
+                            }));
+                        } else if let Some(vb) = &self.inventory_cursor_vertex_buffer {
+                            self.queue.write_buffer(vb, 0, bytemuck::cast_slice(&vertices));
+                        }
+                        if let (Some(vb), Some(ib)) = (&self.inventory_cursor_vertex_buffer, &self.inventory_cursor_index_buffer) {
+                            ui_pass.set_vertex_buffer(0, vb.slice(..));
+                            ui_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            ui_pass.draw_indexed(0..6, 0, 0..1);
+                        }
+                    }
                 }
 
                 // --- Crosshair ---
@@ -1334,6 +1362,26 @@ impl State {
                 }
 
                 if self.show_crosshair {
+                    while self.hotbar_count_buffers.len() < 9 {
+                        self.hotbar_count_buffers.push(glyphon::Buffer::new(&mut self.font_system, Metrics::new(16.0, 18.0)));
+                    }
+                    let slot_width = self.config.width as f32 * 0.04;
+                    let gap = self.config.width as f32 * 0.002;
+                    let total_width = slot_width * 9.0 + gap * 8.0;
+                    let start_x = (self.config.width as f32 - total_width) * 0.5;
+                    for slot in 0..9 {
+                        let buffer = &mut self.hotbar_count_buffers[slot];
+                        let count = self.inventory.get_flat(27 + slot).map(|stack| stack.count.to_string()).unwrap_or_default();
+                        buffer.set_text(&count, &self.ui_font.colored(Color::rgb(255, 255, 255)), Shaping::Advanced, None);
+                        buffer.shape_until_scroll(&mut self.font_system, false);
+                    }
+                    for slot in 0..9 {
+                        let buffer = &self.hotbar_count_buffers[slot];
+                        let left = start_x + slot as f32 * (slot_width + gap) + slot_width - 20.0;
+                        text_areas.push(TextArea { buffer, left, top: (self.config.height as f32 - 31.0).max(0.0), scale: 1.0,
+                            bounds: TextBounds { left: left as i32 - 4, top: (self.config.height as i32 - 72).max(0), right: (left + 24.0) as i32, bottom: self.config.height as i32 },
+                            default_color: Color::rgb(255, 255, 255), custom_glyphs: &[] });
+                    }
                     // Hotbar slot name: centred above the hotbar, clamped to the
                     // screen width.
                     let label_width = self.hotbar_label_width.min(self.config.width as f32);

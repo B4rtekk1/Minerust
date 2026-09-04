@@ -1,5 +1,4 @@
-use minerust::{Inventory, InventoryUiState, Vertex, block_for_item};
-use wgpu::util::DeviceExt;
+use minerust::{Inventory, ItemStack, Vertex, block_for_item};
 
 /// Large, readable slots for the full-screen inventory overlay.
 pub const SLOT: f32 = 64.0;
@@ -26,7 +25,7 @@ impl InventoryLayout {
     }
 }
 
-pub fn build(device: &wgpu::Device, inventory: &Inventory, ui_state: &InventoryUiState, cursor_position: Option<(f32, f32)>, width: u32, height: u32) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+pub fn build_geometry(inventory: &Inventory, width: u32, height: u32) -> (Vec<Vertex>, Vec<u32>) {
     let layout = InventoryLayout::new(width, height);
     let mut vertices = Vec::with_capacity(36 * 12 + 8);
     let mut indices = Vec::with_capacity(36 * 18 + 12);
@@ -50,11 +49,16 @@ pub fn build(device: &wgpu::Device, inventory: &Inventory, ui_state: &InventoryU
             add(&mut vertices, &mut indices, x+14.0, y+14.0, w-28.0, h-28.0, color);
         }
     }
-    if let (Some(cursor), Some((x, y))) = (&ui_state.cursor_stack, cursor_position) {
-        let color = block_for_item(cursor.item).map(|block| block.color()).unwrap_or([0.8, 0.8, 0.8]);
-        add(&mut vertices, &mut indices, x + 10.0, y + 10.0, 38.0, 38.0, color);
-    }
-    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Inventory UI VB"), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX });
-    let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Inventory UI IB"), contents: bytemuck::cast_slice(&indices), usage: wgpu::BufferUsages::INDEX });
-    (vb, ib, indices.len() as u32)
+    (vertices, indices)
+}
+
+/// Four dynamic vertices for the mouse-attached item. The renderer reuses one
+/// GPU buffer and merely writes these bytes as the cursor moves.
+pub fn cursor_geometry(stack: &ItemStack, x: f32, y: f32, width: u32, height: u32) -> [Vertex; 4] {
+    let color = block_for_item(stack.item).map(|block| block.color()).unwrap_or([0.8, 0.8, 0.8]);
+    let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
+    [(x + 10.0, y + 10.0), (x + 48.0, y + 10.0), (x + 48.0, y + 48.0), (x + 10.0, y + 48.0)].map(|(px, py)| Vertex {
+        position: [px / width as f32 * 2.0 - 1.0, 1.0 - py / height as f32 * 2.0, 0.0],
+        packed: Vertex::pack_ui(normal, [color[0], color[1], color[2], 0.92], 0, 0),
+    })
 }

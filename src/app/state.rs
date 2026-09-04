@@ -293,6 +293,15 @@ pub struct State {
     pub num_crosshair_indices: u32,
     /// Whether the in-game crosshair and hotbar are rendered.
     pub show_crosshair: bool,
+    /// Cached full-inventory geometry; rebuilt only after storage/layout changes.
+    pub inventory_vertex_buffer: Option<wgpu::Buffer>,
+    pub inventory_index_buffer: Option<wgpu::Buffer>,
+    pub inventory_num_indices: u32,
+    pub last_inventory_revision: u64,
+    pub inventory_buffer_size: [u32; 2],
+    /// Reused dynamic cursor buffers; contents are updated, never recreated per frame.
+    pub inventory_cursor_vertex_buffer: Option<wgpu::Buffer>,
+    pub inventory_cursor_index_buffer: Option<wgpu::Buffer>,
 
     // -------------------------------------------------------------------------
     // Uniforms and bind groups
@@ -572,6 +581,8 @@ pub struct State {
     pub hotbar_label_width: f32,
     /// Reusable Glyphon buffers for inventory stack quantities.
     pub inventory_count_buffers: Vec<glyphon::Buffer>,
+    /// Fixed per-slot quantity labels for the HUD hotbar.
+    pub hotbar_count_buffers: Vec<glyphon::Buffer>,
     /// One name-tag buffer per currently visible remote player.
     pub player_label_buffers: Vec<glyphon::Buffer>,
 

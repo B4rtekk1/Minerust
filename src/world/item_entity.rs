@@ -91,17 +91,9 @@ fn collides(world: &World, position: Vec3, radius: f32) -> bool {
 
 /// Maps a broken block to a registered pickup item. Bedrock never drops.
 pub fn drop_for_block(block: BlockType) -> Option<ItemId> {
-    let key = match block {
-        BlockType::Air | BlockType::Bedrock | BlockType::DeadBush => return None,
-        BlockType::Grass => "minerust:grass", BlockType::Dirt => "minerust:dirt",
-        BlockType::Stone => "minerust:stone", BlockType::Sand => "minerust:sand",
-        BlockType::Water => "minerust:water", BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => "minerust:wood",
-        BlockType::Leaves => "minerust:leaves", BlockType::Snow => "minerust:snow",
-        BlockType::Gravel => "minerust:gravel", BlockType::Clay => "minecraft:clay",
-        BlockType::Ice => "minecraft:ice", BlockType::Cactus => "minerust:cactus",
-        BlockType::WoodStairs => "minerust:wood_stairs",
-    };
-    item_registry().resolve(key)
+    // Axis-specific logs intentionally share the canonical wood item.
+    let canonical = match block { BlockType::WoodLogX | BlockType::WoodLogZ => BlockType::Wood, other => other };
+    item_registry().item_for_block(canonical)
 }
 
 /// Returns the block appearance used to render a registered block item.

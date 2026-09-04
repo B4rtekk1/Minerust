@@ -59,18 +59,21 @@ impl ItemDefinition {
 pub struct ItemRegistry {
     definitions: Vec<ItemDefinition>,
     by_key: HashMap<&'static str, ItemId>,
+    by_block: HashMap<BlockType, ItemId>,
 }
 
 impl ItemRegistry {
     fn new(entries: &[(&'static str, &'static str, u16, ItemKind)]) -> Self {
         let mut definitions = Vec::with_capacity(entries.len());
         let mut by_key = HashMap::with_capacity(entries.len());
+        let mut by_block = HashMap::with_capacity(entries.len());
         for &(key, display_name, max_stack, kind) in entries {
             let id = ItemId(definitions.len() as u32);
             definitions.push(ItemDefinition { id, key, display_name, max_stack, kind });
             by_key.insert(key, id);
+            if let ItemKind::Block { block } = kind { by_block.insert(block, id); }
         }
-        Self { definitions, by_key }
+        Self { definitions, by_key, by_block }
     }
 
     pub fn get(&self, id: ItemId) -> &ItemDefinition {
@@ -80,6 +83,8 @@ impl ItemRegistry {
     pub fn resolve(&self, key: &str) -> Option<ItemId> {
         self.by_key.get(key).copied()
     }
+
+    pub fn item_for_block(&self, block: BlockType) -> Option<ItemId> { self.by_block.get(&block).copied() }
 }
 
 const BLOCK_ITEMS: &[(&str, &str, u16, ItemKind)] = &[
