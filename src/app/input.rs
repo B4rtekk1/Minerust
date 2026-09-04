@@ -13,7 +13,11 @@ const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.4;
 impl State {
     fn resolve_inventory_cursor(&mut self) {
         let Some(stack) = self.inventory_ui.cursor_stack.take() else { return; };
-        if let Some(remainder) = self.inventory.insert(stack, minerust::item_registry()) {
+        let remainder = match self.inventory_ui.cursor_origin.take() {
+            Some(origin) => self.inventory.return_to_slot(origin, stack, minerust::item_registry()),
+            None => Some(stack),
+        };
+        if let Some(remainder) = remainder.and_then(|stack| self.inventory.insert(stack, minerust::item_registry())) {
             self.spawn_item_stack(remainder, self.camera.position + glam::Vec3::new(0.0, -0.4, 0.0));
         }
         self.hotbar_dirty = true;

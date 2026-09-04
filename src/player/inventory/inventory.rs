@@ -81,6 +81,9 @@ pub struct PlayerInventory {
 #[derive(Debug, Clone, Default)]
 pub struct InventoryUiState {
     pub cursor_stack: Option<ItemStack>,
+    /// Original slot of the cursor stack, used to restore it predictably when
+    /// an inventory screen closes.
+    pub cursor_origin: Option<PlayerSlot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +197,22 @@ impl PlayerInventory {
         true
     }
 
+    /// Returns a cursor stack to its original slot when possible, then yields
+    /// the remainder for normal inventory insertion or a world drop.
+    pub fn return_to_slot(&mut self, slot: PlayerSlot, mut stack: ItemStack, registry: &ItemRegistry) -> Option<ItemStack> {
+        match self.get(slot).cloned() {
+            None => { self.set(slot, Some(stack)); None }
+            Some(mut destination) if destination.can_stack_with(&stack) => {
+                let moved = registry.get(destination.item).max_stack.saturating_sub(destination.count).min(stack.count);
+                destination.count += moved;
+                stack.count -= moved;
+                self.set(slot, Some(destination));
+                (stack.count > 0).then_some(stack)
+            }
+            Some(_) => Some(stack),
+        }
+    }
+
     /// Applies UI semantics without exposing container storage to input code.
     pub fn apply_action(
         &mut self,
@@ -221,10 +240,12 @@ impl PlayerInventory {
                 match ui.cursor_stack.take() {
                     None => {
                         ui.cursor_stack = self.take(slot);
+                        ui.cursor_origin = ui.cursor_stack.as_ref().map(|_| slot);
                     }
                     Some(mut cursor) => match self.get(slot).cloned() {
                         None => {
                             self.set(slot, Some(cursor));
+                            ui.cursor_origin = None;
                         }
                         Some(mut target) if target.can_stack_with(&cursor) => {
                             let moved = registry
@@ -237,11 +258,12 @@ impl PlayerInventory {
                             self.set(slot, Some(target));
                             if cursor.count > 0 {
                                 ui.cursor_stack = Some(cursor);
-                            }
+                            } else { ui.cursor_origin = None; }
                         }
                         Some(target) => {
                             self.set(slot, Some(cursor));
                             ui.cursor_stack = Some(target);
+                            ui.cursor_origin = Some(slot);
                         }
                     },
                 }
@@ -261,6 +283,7 @@ impl PlayerInventory {
                         count: amount,
                         ..stack
                     });
+                    ui.cursor_origin = Some(slot);
                     return InventoryTransactionResult { changed: true, dropped: None };
                 }
                 let mut cursor = ui.cursor_stack.take().expect("cursor checked above");
@@ -287,7 +310,7 @@ impl PlayerInventory {
                 }
                 if cursor.count > 0 {
                     ui.cursor_stack = Some(cursor);
-                }
+                } else { ui.cursor_origin = None; }
                 InventoryTransactionResult { changed: true, dropped: None }
             }
         }
@@ -456,5 +479,16 @@ mod tests {
         inventory.set(PlayerSlot::Hotbar(0), Some(pickaxe));
         assert!(inventory.damage_selected_tool(registry));
         assert_eq!(inventory.selected_stack().unwrap().state.durability, Some(249));
+    }
+
+    #[test]
+    fn cursor_recovery_prefers_its_origin_slot() {
+        let mut inventory = PlayerInventory::default();
+        inventory.set(PlayerSlot::Main(2), Some(stone(12)));
+        let mut ui = InventoryUiState::default();
+        inventory.apply_action(&mut ui, InventoryAction::LeftClick(PlayerSlot::Main(2)), item_registry());
+        let remainder = inventory.return_to_slot(ui.cursor_origin.unwrap(), ui.cursor_stack.take().unwrap(), item_registry());
+        assert!(remainder.is_none());
+        assert_eq!(inventory.get(PlayerSlot::Main(2)).unwrap().count, 12);
     }
 }

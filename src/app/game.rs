@@ -770,6 +770,20 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 state.inventory.select_hotbar(8);
                                 state.hotbar_dirty = true;
                             }
+                            // Q drops one selected item; Ctrl+Q drops the whole stack.
+                            KeyCode::KeyQ if pressed && state.game_state != GameState::Menu => {
+                                let slot = minerust::PlayerSlot::Hotbar(state.inventory.selected_hotbar);
+                                let action = if state.modifiers.control_key() {
+                                    minerust::InventoryAction::DropStack(slot)
+                                } else {
+                                    minerust::InventoryAction::DropOne(slot)
+                                };
+                                let result = state.inventory.apply_action(&mut state.inventory_ui, action, minerust::item_registry());
+                                if let Some(stack) = result.dropped {
+                                    state.spawn_item_stack(stack, state.camera.position + glam::Vec3::new(0.0, -0.4, 0.0));
+                                    state.hotbar_dirty = true;
+                                }
+                            }
                             _ => {}
                         }
                     }
