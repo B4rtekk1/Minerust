@@ -58,8 +58,8 @@ mod shader_utils;
 
 pub use constants::*;
 pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
-pub use core::{Biome, BlockType, Chunk, ItemDefinition, ItemId, ItemKind, ItemRegistry, ItemStack, ItemState, SubChunk, SubChunkStorage, Uniforms, Vertex, item_registry};
-pub use player::{Camera, DiggingState, InputState, Inventory, InventoryAction, InventoryTransactionResult, InventoryUiState, PlayerInventory, PlayerSlot};
+pub use core::{Biome, BlockType, Chunk, FoodItem, ItemDefinition, ItemId, ItemKind, ItemRegistry, ItemStack, ItemState, LootEntry, LootTable, SubChunk, SubChunkStorage, ToolItem, ToolType, Uniforms, Vertex, item_registry};
+pub use player::{Camera, DiggingState, InputState, Inventory, InventoryAction, InventoryTransactionResult, InventoryUiState, PlayerInventory, PlayerSlot, SlotRule};
 pub use render::{
     AABB, DrawIndirect, IndirectBufferBudget, IndirectManager, MeshLoader, PackedQuad, SubchunkKey,
     add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_item_model,

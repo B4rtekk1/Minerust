@@ -38,10 +38,10 @@ impl State {
     }
 
     fn spawn_block_drop(&mut self, block: BlockType, x: i32, y: i32, z: i32) {
-        let Some(item_id) = minerust::drop_for_block(block) else {
-            return;
-        };
-        self.spawn_item_stack(minerust::ItemStack::new(item_id, 1), Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
+        let canonical = match block { BlockType::WoodLogX | BlockType::WoodLogZ => BlockType::Wood, other => other };
+        for stack in minerust::item_registry().roll_block_loot(canonical) {
+            self.spawn_item_stack(stack, Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
+        }
     }
 
     /// Spawns a stack as a physical drop. Used when a UI cursor cannot be

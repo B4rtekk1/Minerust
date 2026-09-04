@@ -1,4 +1,4 @@
-use crate::{ItemRegistry, ItemStack};
+use crate::{ItemKind, ItemRegistry, ItemStack};
 
 pub const MAIN_SLOT_COUNT: usize = 27;
 pub const HOTBAR_SLOT_COUNT: usize = 9;
@@ -84,6 +84,21 @@ pub enum InventoryAction {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct InventoryTransactionResult {
     pub changed: bool,
+}
+
+/// Per-slot admission rule for containers such as furnaces, armor and output slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotRule { Any, OutputOnly, Fuel, Smeltable, Tool }
+
+impl SlotRule {
+    pub fn accepts(self, stack: &ItemStack, registry: &ItemRegistry) -> bool {
+        match self {
+            Self::Any => true,
+            Self::OutputOnly => false,
+            Self::Tool => matches!(registry.get(stack.item).kind, ItemKind::Tool(_)),
+            Self::Fuel | Self::Smeltable => false,
+        }
+    }
 }
 
 /// Transitional public name retained while callers migrate to PlayerInventory.
@@ -352,5 +367,14 @@ mod tests {
         );
         assert_eq!(inventory.get(PlayerSlot::Hotbar(1)).unwrap().count, 64);
         assert_eq!(inventory.get(PlayerSlot::Hotbar(0)).unwrap().count, 6);
+    }
+
+    #[test]
+    fn tool_slot_rule_rejects_blocks_and_accepts_tools() {
+        let registry = item_registry();
+        let stone_stack = stone(1);
+        let tool_stack = registry.new_stack(registry.resolve("minerust:iron_pickaxe").unwrap(), 1);
+        assert!(!SlotRule::Tool.accepts(&stone_stack, registry));
+        assert!(SlotRule::Tool.accepts(&tool_stack, registry));
     }
 }

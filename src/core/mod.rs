@@ -13,6 +13,6 @@ pub mod mobs;
 pub use biome::Biome;
 pub use block::BlockType;
 pub use chunk::{Chunk, SubChunk, SubChunkStorage};
-pub use item::{ItemDefinition, ItemId, ItemKind, ItemRegistry, ItemStack, ItemState, item_registry};
+pub use item::{FoodItem, ItemDefinition, ItemId, ItemKind, ItemRegistry, ItemStack, ItemState, LootEntry, LootTable, ToolItem, ToolType, item_registry};
 pub use uniforms::{GpuSubchunk, PendingCopy, Uniforms, UploadBatch};
 pub use vertex::Vertex;
