@@ -1,4 +1,4 @@
-use minerust::{Inventory, Vertex, block_for_item};
+use minerust::{Inventory, InventoryUiState, Vertex, block_for_item};
 use wgpu::util::DeviceExt;
 
 /// Large, readable slots for the full-screen inventory overlay.
@@ -26,7 +26,7 @@ impl InventoryLayout {
     }
 }
 
-pub fn build(device: &wgpu::Device, inventory: &Inventory, selected_hotbar: usize, cursor_position: Option<(f32, f32)>, width: u32, height: u32) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+pub fn build(device: &wgpu::Device, inventory: &Inventory, ui_state: &InventoryUiState, cursor_position: Option<(f32, f32)>, width: u32, height: u32) -> (wgpu::Buffer, wgpu::Buffer, u32) {
     let layout = InventoryLayout::new(width, height);
     let mut vertices = Vec::with_capacity(36 * 12 + 8);
     let mut indices = Vec::with_capacity(36 * 18 + 12);
@@ -42,16 +42,16 @@ pub fn build(device: &wgpu::Device, inventory: &Inventory, selected_hotbar: usiz
     add(&mut vertices, &mut indices, layout.x, layout.y, layout.w, layout.h, [0.06,0.07,0.09]);
     for slot in 0..36 {
         let (x,y,w,h) = layout.slot_rect(slot);
-        let selected = slot == 27 + selected_hotbar;
+        let selected = slot == 27 + inventory.selected_hotbar as usize;
         add(&mut vertices, &mut indices, x, y, w, h, if selected {[0.95,0.78,0.24]} else {[0.36,0.40,0.46]});
         add(&mut vertices, &mut indices, x+3.0, y+3.0, w-6.0, h-6.0, [0.13,0.15,0.18]);
-        if let Some(stack) = &inventory.slots[slot] {
-            let color = block_for_item(stack.item.id).map(|block| block.color()).unwrap_or([0.8,0.8,0.8]);
+        if let Some(stack) = inventory.get_flat(slot) {
+            let color = block_for_item(stack.item).map(|block| block.color()).unwrap_or([0.8,0.8,0.8]);
             add(&mut vertices, &mut indices, x+14.0, y+14.0, w-28.0, h-28.0, color);
         }
     }
-    if let (Some(cursor), Some((x, y))) = (&inventory.cursor_item, cursor_position) {
-        let color = block_for_item(cursor.item.id).map(|block| block.color()).unwrap_or([0.8, 0.8, 0.8]);
+    if let (Some(cursor), Some((x, y))) = (&ui_state.cursor_stack, cursor_position) {
+        let color = block_for_item(cursor.item).map(|block| block.color()).unwrap_or([0.8, 0.8, 0.8]);
         add(&mut vertices, &mut indices, x + 10.0, y + 10.0, 38.0, 38.0, color);
     }
     let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("Inventory UI VB"), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX });

@@ -402,6 +402,8 @@ pub struct State {
     pub inventory_open: bool,
     /// Player-owned item stacks. World drops are inserted here only on pickup.
     pub inventory: minerust::Inventory,
+    /// UI-only cursor stack; it is not player-owned storage.
+    pub inventory_ui: minerust::InventoryUiState,
     /// Dropped item stacks currently simulated in the world.
     pub item_entities: Vec<minerust::ItemEntity>,
     /// Monotonic ID source for locally spawned item entities.
@@ -519,8 +521,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     // HUD: hotbar
     // -------------------------------------------------------------------------
-    /// Currently selected hotbar slot index (0-based).
-    pub hotbar_slot: usize,
     /// Vertex buffer for the hotbar background/selection quads.
     pub hotbar_vertex_buffer: Option<wgpu::Buffer>,
     /// Index buffer for the hotbar background/selection quads.
@@ -529,8 +529,10 @@ pub struct State {
     pub hotbar_num_indices: u32,
     /// When `true` the hotbar geometry needs to be rebuilt before the next frame.
     pub hotbar_dirty: bool,
-    /// Slot index the hotbar was last built for; used to detect slot changes.
+    /// Last selected inventory hotbar slot used only for HUD-label caching.
     pub last_hotbar_slot: usize,
+    /// Last inventory mutation revision rendered into the HUD hotbar buffers.
+    pub last_hotbar_inventory_revision: u64,
 
     // -------------------------------------------------------------------------
     // glyphon text rendering

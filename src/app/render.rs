@@ -225,7 +225,7 @@ impl State {
 
             let elapsed = self.game_start_time.elapsed().as_secs_f32();
             for item in &self.item_entities {
-                let Some(block) = minerust::block_for_item(item.item_id) else {
+                let Some(block) = minerust::block_for_item(item.stack.item) else {
                     continue;
                 };
                 let bob = (elapsed * 3.0 + item.id as f32 * 0.71).sin() * 0.06;
@@ -847,7 +847,7 @@ impl State {
                     let (vb, ib, count) = crate::ui::inventory::build(
                         &self.device,
                         &self.inventory,
-                        self.hotbar_slot,
+                        &self.inventory_ui,
                         self.cursor_position,
                         self.config.width,
                         self.config.height,
@@ -881,14 +881,15 @@ impl State {
 
                 // --- Hotbar ---
                 if self.show_crosshair {
-                    if self.hotbar_dirty || self.hotbar_vertex_buffer.is_none() {
+                    if self.hotbar_dirty || self.hotbar_vertex_buffer.is_none() || self.last_hotbar_inventory_revision != self.inventory.revision() {
                         let aspect = self.config.width as f32 / self.config.height as f32;
                         let (vb, ib, count) =
-                            crate::ui::ui::build_hotbar(&self.device, self.hotbar_slot, aspect);
+                            crate::ui::ui::build_hotbar(&self.device, &self.inventory, aspect);
                         self.hotbar_vertex_buffer = Some(vb);
                         self.hotbar_index_buffer = Some(ib);
                         self.hotbar_num_indices = count;
                         self.hotbar_dirty = false;
+                        self.last_hotbar_inventory_revision = self.inventory.revision();
                     }
                     if let (Some(vb), Some(ib)) =
                         (&self.hotbar_vertex_buffer, &self.hotbar_index_buffer)
@@ -1115,9 +1116,8 @@ impl State {
             }
 
             // ---- Hotbar slot label (in-game only, updated on slot change) ----
-            if !menu_visible && self.last_hotbar_slot != self.hotbar_slot {
-                let block = crate::ui::ui::HOTBAR_SLOTS[self.hotbar_slot];
-                let label = block.display_name();
+            if !menu_visible && self.last_hotbar_slot != self.inventory.selected_hotbar as usize {
+                let label = self.inventory.selected_stack().map(|stack| minerust::item_registry().get(stack.item).display_name).unwrap_or("");
                 self.hotbar_label_buffer.set_text(
                     label,
                     &self.ui_font.colored(Color::rgb(255, 238, 200)),
@@ -1136,7 +1136,7 @@ impl State {
                 let font_size = 22.0;
                 let char_width = font_size * 0.6;
                 self.hotbar_label_width = label.chars().count() as f32 * char_width;
-                self.last_hotbar_slot = self.hotbar_slot;
+                self.last_hotbar_slot = self.inventory.selected_hotbar as usize;
             }
 
             // ---- Remote player name labels / menu text ----
@@ -1290,12 +1290,8 @@ impl State {
                 // Stack counts are ordinary Glyphon text, so inventory uses
                 // the same Windows-backed UI font as every other label.
                 if self.inventory_open {
-                    let counts: Vec<(usize, u32)> = self
-                        .inventory
-                        .slots
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(slot, stack)| stack.as_ref().map(|item| (slot, item.quantity)))
+                    let counts: Vec<(usize, u16)> = (0..36)
+                        .filter_map(|slot| self.inventory.get_flat(slot).map(|item| (slot, item.count)))
                         .collect();
                     while self.inventory_count_buffers.len() < counts.len() {
                         self.inventory_count_buffers.push(glyphon::Buffer::new(

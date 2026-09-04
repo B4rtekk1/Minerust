@@ -731,39 +731,39 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             // Setting `hotbar_dirty` triggers a mesh rebuild of
                             // the hotbar UI on the next frame.
                             KeyCode::Digit1 if pressed => {
-                                state.hotbar_slot = 0;
+                                state.inventory.select_hotbar(0);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit2 if pressed => {
-                                state.hotbar_slot = 1;
+                                state.inventory.select_hotbar(1);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit3 if pressed => {
-                                state.hotbar_slot = 2;
+                                state.inventory.select_hotbar(2);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit4 if pressed => {
-                                state.hotbar_slot = 3;
+                                state.inventory.select_hotbar(3);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit5 if pressed => {
-                                state.hotbar_slot = 4;
+                                state.inventory.select_hotbar(4);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit6 if pressed => {
-                                state.hotbar_slot = 5;
+                                state.inventory.select_hotbar(5);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit7 if pressed => {
-                                state.hotbar_slot = 6;
+                                state.inventory.select_hotbar(6);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit8 if pressed => {
-                                state.hotbar_slot = 7;
+                                state.inventory.select_hotbar(7);
                                 state.hotbar_dirty = true;
                             }
                             KeyCode::Digit9 if pressed => {
-                                state.hotbar_slot = 8;
+                                state.inventory.select_hotbar(8);
                                 state.hotbar_dirty = true;
                             }
                             _ => {}
@@ -784,13 +784,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             MouseScrollDelta::LineDelta(_, y) => y,
                             MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
                         };
-                        let slots = crate::ui::ui::HOTBAR_SLOTS.len() as i32;
+                        let slots = minerust::player::inventory::HOTBAR_SLOT_COUNT as i32;
                         // `rem_euclid` wraps correctly for negative values
                         // (scrolling backward past slot 0 lands on the last slot).
-                        let new_slot = (state.hotbar_slot as i32 - scroll.signum() as i32)
+                        let new_slot = (state.inventory.selected_hotbar as i32 - scroll.signum() as i32)
                             .rem_euclid(slots) as usize;
-                        if new_slot != state.hotbar_slot {
-                            state.hotbar_slot = new_slot;
+                        if new_slot != state.inventory.selected_hotbar as usize {
+                            state.inventory.select_hotbar(new_slot as u8);
                             state.hotbar_dirty = true;
                         }
                     }

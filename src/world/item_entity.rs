@@ -1,15 +1,13 @@
-use crate::{BlockType, World};
+use crate::{BlockType, ItemId, ItemStack, item_registry, World};
 use glam::Vec3;
 
 pub type EntityId = u64;
-pub type ItemId = &'static str;
 
 /// A physical item stack in the world, kept independent from its renderer.
 #[derive(Debug, Clone)]
 pub struct ItemEntity {
     pub id: EntityId,
-    pub item_id: ItemId,
-    pub quantity: u32,
+    pub stack: ItemStack,
     pub position: Vec3,
     pub velocity: Vec3,
     pub pickup_delay: f32,
@@ -23,11 +21,10 @@ impl ItemEntity {
     /// forever over flat terrain.
     pub const HORIZONTAL_DRAG: f32 = 8.0;
 
-    pub fn new(id: EntityId, item_id: ItemId, quantity: u32, position: Vec3) -> Self {
+    pub fn new(id: EntityId, stack: ItemStack, position: Vec3) -> Self {
         Self {
             id,
-            item_id,
-            quantity,
+            stack,
             position,
             velocity: Vec3::new(0.0, 2.0, 0.0),
             pickup_delay: 0.25,
@@ -94,40 +91,20 @@ fn collides(world: &World, position: Vec3, radius: f32) -> bool {
 
 /// Maps a broken block to a registered pickup item. Bedrock never drops.
 pub fn drop_for_block(block: BlockType) -> Option<ItemId> {
-    match block {
-        BlockType::Air | BlockType::Bedrock | BlockType::DeadBush => None,
-        BlockType::Grass => Some("minerust:grass"),
-        BlockType::Dirt => Some("minerust:dirt"),
-        BlockType::Stone => Some("minerust:stone"),
-        BlockType::Sand => Some("minerust:sand"),
-        BlockType::Water => Some("minerust:water"),
-        BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => Some("minerust:wood"),
-        BlockType::Leaves => Some("minerust:leaves"),
-        BlockType::Snow => Some("minerust:snow"),
-        BlockType::Gravel => Some("minerust:gravel"),
-        BlockType::Clay => Some("minecraft:clay"),
-        BlockType::Ice => Some("minecraft:ice"),
-        BlockType::Cactus => Some("minerust:cactus"),
-        BlockType::WoodStairs => Some("minerust:WoodStairs"),
-    }
+    let key = match block {
+        BlockType::Air | BlockType::Bedrock | BlockType::DeadBush => return None,
+        BlockType::Grass => "minerust:grass", BlockType::Dirt => "minerust:dirt",
+        BlockType::Stone => "minerust:stone", BlockType::Sand => "minerust:sand",
+        BlockType::Water => "minerust:water", BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => "minerust:wood",
+        BlockType::Leaves => "minerust:leaves", BlockType::Snow => "minerust:snow",
+        BlockType::Gravel => "minerust:gravel", BlockType::Clay => "minecraft:clay",
+        BlockType::Ice => "minecraft:ice", BlockType::Cactus => "minerust:cactus",
+        BlockType::WoodStairs => "minerust:wood_stairs",
+    };
+    item_registry().resolve(key)
 }
 
 /// Returns the block appearance used to render a registered block item.
-pub fn block_for_item(item_id: &str) -> Option<BlockType> {
-    match item_id {
-        "minerust:grass" => Some(BlockType::Grass),
-        "minerust:dirt" => Some(BlockType::Dirt),
-        "minerust:stone" => Some(BlockType::Stone),
-        "minerust:sand" => Some(BlockType::Sand),
-        "minerust:water" => Some(BlockType::Water),
-        "minerust:wood" => Some(BlockType::Wood),
-        "minerust:leaves" => Some(BlockType::Leaves),
-        "minerust:snow" => Some(BlockType::Snow),
-        "minerust:gravel" => Some(BlockType::Gravel),
-        "minecraft:clay" => Some(BlockType::Clay),
-        "minecraft:ice" => Some(BlockType::Ice),
-        "minerust:cactus" => Some(BlockType::Cactus),
-        "minerust:WoodStairs" => Some(BlockType::WoodStairs),
-        _ => None,
-    }
+pub fn block_for_item(item_id: ItemId) -> Option<BlockType> {
+    item_registry().get(item_id).placeable_block()
 }

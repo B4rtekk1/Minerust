@@ -1,7 +1,7 @@
 pub mod biome;
 pub mod block;
 pub mod chunk;
-pub mod game_item;
+pub mod item;
 pub mod quad;
 pub mod uniforms;
 pub mod vertex;
@@ -13,6 +13,6 @@ pub mod mobs;
 pub use biome::Biome;
 pub use block::BlockType;
 pub use chunk::{Chunk, SubChunk, SubChunkStorage};
-pub use game_item::GameItem;
+pub use item::{ItemDefinition, ItemId, ItemKind, ItemRegistry, ItemStack, ItemState, item_registry};
 pub use uniforms::{GpuSubchunk, PendingCopy, Uniforms, UploadBatch};
 pub use vertex::Vertex;

@@ -1,33 +1,5 @@
-use minerust::{BlockType, Vertex};
+use minerust::{Inventory, Vertex, block_for_item};
 use wgpu::util::DeviceExt;
-
-/// The fixed set of block types assigned to hotbar slots 0–8, left to right.
-///
-/// The index of a block in this array corresponds directly to its hotbar slot
-/// number. Use [`block_type_to_index`] to perform the reverse lookup.
-pub const HOTBAR_SLOTS: [BlockType; 9] = [
-    BlockType::Grass,
-    BlockType::Dirt,
-    BlockType::Stone,
-    BlockType::Sand,
-    BlockType::Wood,
-    BlockType::Leaves,
-    BlockType::Gravel,
-    BlockType::Clay,
-    BlockType::Ice,
-];
-
-/// Returns the hotbar slot index of `block` as an `f32`, or `None` if the
-/// block is not present in [`HOTBAR_SLOTS`].
-///
-/// The result is `f32` so it can be passed directly to shader uniforms or
-/// stored in vertex data without an extra cast at the call site.
-pub fn block_type_to_index(block: BlockType) -> Option<f32> {
-    HOTBAR_SLOTS
-        .iter()
-        .position(|&b| b == block)
-        .map(|i| i as f32)
-}
 
 /// Builds GPU vertex and index buffers for the HUD hotbar.
 ///
@@ -55,12 +27,8 @@ pub fn block_type_to_index(block: BlockType) -> Option<f32> {
 ///
 /// A tuple of `(vertex_buffer, index_buffer, index_count)` ready to be bound
 /// and drawn with `draw_indexed`.
-pub fn build_hotbar(
-    device: &wgpu::Device,
-    selected_slot: usize,
-    aspect: f32,
-) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    let slot_count = HOTBAR_SLOTS.len() as f32;
+pub fn build_hotbar(device: &wgpu::Device, inventory: &Inventory, aspect: f32) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    let slot_count = 9.0;
     let slot_size = 0.08_f32;
     let slot_h = slot_size * aspect;
     let gap = 0.004_f32;
@@ -87,14 +55,14 @@ pub fn build_hotbar(
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
 
-    for i in 0..HOTBAR_SLOTS.len() {
+    for i in 0..9 {
         let x0 = start_x + i as f32 * (slot_size + gap);
         let x1 = x0 + slot_size;
         let y0 = bottom_y;
         let y1 = y0 + slot_h;
 
         // Layer 1: border — bright for the selected slot, dim otherwise.
-        let border_color = if i == selected_slot {
+        let border_color = if i == inventory.selected_hotbar as usize {
             [1.0, 1.0, 1.0]
         } else {
             [0.4, 0.4, 0.4]
@@ -103,7 +71,7 @@ pub fn build_hotbar(
         add_quad(x0, y0, x1, y1, border_color);
 
         // Layer 2: background — inset by `border` on all sides.
-        let bg_color = if i == selected_slot {
+        let bg_color = if i == inventory.selected_hotbar as usize {
             [0.25, 0.25, 0.25]
         } else {
             [0.12, 0.12, 0.12]
@@ -116,13 +84,13 @@ pub fn build_hotbar(
             bg_color,
         );
 
-        // Layer 3: block color swatch — inset by 18% of slot size on all sides.
-        let block = HOTBAR_SLOTS[i];
-        let [r, g, b] = block.color();
-        let block_color = [r, g, b];
-        let pad = slot_size * 0.18;
-        let pad_h = pad * aspect;
-        add_quad(x0 + pad, y0 + pad_h, x1 - pad, y1 - pad_h, block_color);
+        // Layer 3: item preview. Empty slots deliberately have no swatch.
+        if let Some(stack) = inventory.get_flat(27 + i) {
+            let block_color = block_for_item(stack.item).map(|block| block.color()).unwrap_or([0.8, 0.8, 0.8]);
+            let pad = slot_size * 0.18;
+            let pad_h = pad * aspect;
+            add_quad(x0 + pad, y0 + pad_h, x1 - pad, y1 - pad_h, block_color);
+        }
     }
 
     let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

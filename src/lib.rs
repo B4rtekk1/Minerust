@@ -58,8 +58,8 @@ mod shader_utils;
 
 pub use constants::*;
 pub use constants::{get_chunk_worker_count, get_mesh_worker_count};
-pub use core::{Biome, BlockType, Chunk, GameItem, SubChunk, SubChunkStorage, Uniforms, Vertex};
-pub use player::{Camera, DiggingState, InputState, Inventory, InventoryItem};
+pub use core::{Biome, BlockType, Chunk, ItemDefinition, ItemId, ItemKind, ItemRegistry, ItemStack, ItemState, SubChunk, SubChunkStorage, Uniforms, Vertex, item_registry};
+pub use player::{Camera, DiggingState, InputState, Inventory, InventoryUiState, PlayerInventory, PlayerSlot};
 pub use render::{
     AABB, DrawIndirect, IndirectBufferBudget, IndirectManager, MeshLoader, PackedQuad, SubchunkKey,
     add_greedy_quad, add_quad, build_block_outline, build_crosshair, build_item_model,
@@ -68,5 +68,5 @@ pub use render::{
 };
 pub use save::{DEFAULT_WORLD_FILE, SavedWorld, load_world, save_world};
 pub use vertex::OutlineVertex;
-pub use world::{block_for_item, drop_for_block, EntityId, ItemEntity, ItemId};
+pub use world::{block_for_item, drop_for_block, EntityId, ItemEntity};
 pub use world::{ChunkGenResult, ChunkGenerator, ChunkLoader, World};

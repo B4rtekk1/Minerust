@@ -15,8 +15,8 @@ use crate::ui::menu::GameState;
 use super::state::{State, WorldSnapshot, WorldWriteOps};
 
 impl State {
-    /// Runs world-drop physics and transfers an item only when the whole stack
-    /// fits in the inventory. This prevents silently deleting overflow items.
+    /// Runs world-drop physics and transfers as much as fits, leaving the
+    /// remainder in the physical world entity.
     fn update_item_entities(&mut self, dt: f32) {
         let mut entities = std::mem::take(&mut self.item_entities);
         let player_position = self.camera.position;
@@ -28,14 +28,9 @@ impl State {
             if entity.pickup_delay > 0.0 || entity.position.distance(player_position) >= 1.5 {
                 return true;
             }
-            let Some(item) = minerust::core::game_item::get_item(entity.item_id) else {
-                return false;
-            };
-            if self.inventory.can_add(item, entity.quantity) {
-                self.inventory.add_item(item.clone(), entity.quantity);
-                false
-            } else {
-                true
+            match self.inventory.insert(entity.stack.clone(), minerust::item_registry()) {
+                None => false,
+                Some(remainder) => { entity.stack = remainder; true }
             }
         });
         drop(world);
@@ -50,8 +45,7 @@ impl State {
         self.next_entity_id = self.next_entity_id.wrapping_add(1).max(1);
         let mut entity = minerust::ItemEntity::new(
             id,
-            item_id,
-            1,
+            minerust::ItemStack::new(item_id, 1),
             Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
         );
         // A small deterministic burst keeps repeated drops from occupying one point.
@@ -530,11 +524,13 @@ impl State {
             self.digging.progress = 0.0;
         }
 
+        let mut placed_from_inventory = false;
         if let Some((px, py, pz, block_to_place)) =
             self.update_held_block_placement(snapshot.raycast_result, dt)
         {
             write_ops.block_places.push((px, py, pz, block_to_place));
             write_ops.mark_dirty.push((px, py, pz));
+            placed_from_inventory = true;
         }
 
         // --- 7. World write ---
@@ -672,6 +668,13 @@ impl State {
             for key in dirty_meshes {
                 self.enqueue_dirty_mesh(key);
             }
+        }
+        // Placement is committed above before touching the selected stack.
+        // `update_held_block_placement` only yields a block backed by it.
+        if placed_from_inventory {
+            debug_assert!(self.inventory.selected_stack().is_some());
+            let _ = self.inventory.consume_selected(1);
+            self.hotbar_dirty = true;
         }
 
         // Dirty-marking runs outside the write-lock window above to avoid

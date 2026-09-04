@@ -5,7 +5,6 @@ use winit::window::CursorGrabMode;
 
 use crate::logger::{LogLevel, log};
 use crate::ui::menu::{MenuField, MenuHit, MenuLayout};
-use crate::ui::ui::HOTBAR_SLOTS;
 
 use super::state::State;
 
@@ -31,46 +30,41 @@ impl State {
     pub fn handle_inventory_click(&mut self, x: f32, y: f32, right_click: bool) {
         let layout = crate::ui::inventory::InventoryLayout::new(self.config.width, self.config.height);
         let Some(slot) = layout.slot_at(x, y) else { return; };
+        let Some(slot) = minerust::PlayerSlot::from_flat(slot) else { return; };
         if self.modifiers.shift_key() && !right_click {
-            self.inventory.shift_click(slot);
+            self.inventory.quick_move(slot, minerust::item_registry());
             return;
         }
         if right_click {
-            if self.inventory.cursor_item.is_none() {
-                let _ = self.inventory.split_stack(slot, None);
+            if self.inventory_ui.cursor_stack.is_none() {
+                let Some(mut stack) = self.inventory.take(slot) else { return; };
+                let amount = stack.count.div_ceil(2);
+                stack.count -= amount;
+                if stack.count > 0 { self.inventory.set(slot, Some(stack.clone())); }
+                self.inventory_ui.cursor_stack = Some(minerust::ItemStack { count: amount, ..stack });
             } else {
-                let cursor = self.inventory.cursor_item.as_mut().unwrap();
-                let target = &mut self.inventory.slots[slot];
-                if target.is_none() {
-                    *target = Some(minerust::InventoryItem::new(cursor.item.clone(), 1));
-                    cursor.quantity -= 1;
-                } else if let Some(stack) = target.as_mut() {
-                    if stack.item.id == cursor.item.id && stack.quantity < stack.max_quantity() {
-                        stack.quantity += 1;
-                        cursor.quantity -= 1;
+                let mut cursor = self.inventory_ui.cursor_stack.take().unwrap();
+                match self.inventory.get(slot).cloned() {
+                    None => { self.inventory.set(slot, Some(minerust::ItemStack { count: 1, ..cursor.clone() })); cursor.count -= 1; }
+                    Some(mut target) if target.can_stack_with(&cursor) && target.count < minerust::item_registry().get(target.item).max_stack => {
+                        target.count += 1; cursor.count -= 1; self.inventory.set(slot, Some(target));
                     }
+                    _ => {}
                 }
-                if self.inventory.cursor_item.as_ref().is_some_and(|item| item.quantity == 0) {
-                    self.inventory.cursor_item = None;
-                }
+                if cursor.count > 0 { self.inventory_ui.cursor_stack = Some(cursor); }
             }
             return;
         }
-        match self.inventory.cursor_item.take() {
-            None => self.inventory.cursor_item = self.inventory.slots[slot].take(),
-            Some(mut cursor) => match self.inventory.slots[slot].as_mut() {
-                None => self.inventory.slots[slot] = Some(cursor),
-                Some(stack) if stack.item.id == cursor.item.id && stack.item.stackable => {
-                    let room = stack.max_quantity().saturating_sub(stack.quantity);
-                    let moved = room.min(cursor.quantity);
-                    stack.quantity += moved;
-                    cursor.quantity -= moved;
-                    if cursor.quantity > 0 { self.inventory.cursor_item = Some(cursor); }
+        match self.inventory_ui.cursor_stack.take() {
+            None => self.inventory_ui.cursor_stack = self.inventory.take(slot),
+            Some(mut cursor) => match self.inventory.get(slot).cloned() {
+                None => { self.inventory.set(slot, Some(cursor)); }
+                Some(mut target) if target.can_stack_with(&cursor) => {
+                    let moved = minerust::item_registry().get(target.item).max_stack.saturating_sub(target.count).min(cursor.count);
+                    target.count += moved; cursor.count -= moved; self.inventory.set(slot, Some(target));
+                    if cursor.count > 0 { self.inventory_ui.cursor_stack = Some(cursor); }
                 }
-                Some(_) => {
-                    let old = self.inventory.slots[slot].replace(cursor);
-                    self.inventory.cursor_item = old;
-                }
+                Some(target) => { self.inventory.set(slot, Some(cursor)); self.inventory_ui.cursor_stack = Some(target); }
             },
         }
     }
@@ -163,6 +157,7 @@ impl State {
         self.placement = Default::default();
         self.inventory_open = false;
         self.inventory = Default::default();
+        self.inventory_ui = Default::default();
         self.item_entities.clear();
         self.next_entity_id = 1;
         self.camera = minerust::Camera::new(spawn);
@@ -247,10 +242,13 @@ impl State {
             return None;
         }
 
+        let stack = self.inventory.selected_stack()?;
+        let block = minerust::item_registry().get(stack.item).placeable_block()?;
+
         self.record_line_placement(place_pos);
         self.placement.cooldown = BLOCK_PLACE_REPEAT_INTERVAL;
 
-        Some((px, py, pz, HOTBAR_SLOTS[self.hotbar_slot]))
+        Some((px, py, pz, block))
     }
 
     fn accept_line_placement(&self, pos: (i32, i32, i32)) -> bool {
