@@ -620,6 +620,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                         state.camera.position.z,
                                     ),
                                     (state.camera.yaw, state.camera.pitch),
+                                    &state.inventory,
                                 );
                                 if let Err(e) = save_world(DEFAULT_WORLD_FILE, &saved) {
                                     log(LogLevel::Error, &format!("Failed to save world: {}", e));
@@ -660,6 +661,9 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     state.camera.position.z = saved.player_z;
                                     state.camera.yaw = saved.player_yaw;
                                     state.camera.pitch = saved.player_pitch;
+                                    state.inventory = saved.inventory.into_inventory(minerust::item_registry());
+                                    state.inventory_ui = Default::default();
+                                    state.hotbar_dirty = true;
 
                                     // Overwrite sub-chunk block data with the
                                     // serialized player edits.  Block data is

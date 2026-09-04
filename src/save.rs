@@ -6,6 +6,47 @@ use std::path::Path;
 
 use crate::block::BlockType;
 use crate::constants::*;
+use crate::{Inventory, ItemRegistry, ItemStack, ItemState, PlayerSlot};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedItemStack {
+    /// Stable resource key, never a runtime `ItemId`.
+    pub item: String,
+    pub count: u16,
+    pub durability: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SavedInventory {
+    pub slots: Vec<Option<SavedItemStack>>,
+    pub selected_hotbar: u8,
+}
+
+impl SavedInventory {
+    pub fn from_inventory(inventory: &Inventory, registry: &ItemRegistry) -> Self {
+        let slots = (0..36).map(|index| inventory.get_flat(index).map(|stack| SavedItemStack {
+            item: registry.get(stack.item).key.to_owned(),
+            count: stack.count,
+            durability: stack.state.durability,
+        })).collect();
+        Self { slots, selected_hotbar: inventory.selected_hotbar }
+    }
+
+    pub fn into_inventory(self, registry: &ItemRegistry) -> Inventory {
+        let mut inventory = Inventory::default();
+        inventory.select_hotbar(self.selected_hotbar);
+        for (index, saved) in self.slots.into_iter().enumerate().take(36) {
+            let Some(saved) = saved else { continue };
+            let Some(item) = registry.resolve(&saved.item) else { continue };
+            let count = saved.count.min(registry.get(item).max_stack);
+            if count == 0 { continue; }
+            if let Some(slot) = PlayerSlot::from_flat(index) {
+                inventory.set(slot, Some(ItemStack { item, count, state: ItemState { durability: saved.durability } }));
+            }
+        }
+        inventory
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SavedChunk {
@@ -22,6 +63,8 @@ pub struct SavedWorld {
     pub player_z: f32,
     pub player_yaw: f32,
     pub player_pitch: f32,
+    #[serde(default)]
+    pub inventory: SavedInventory,
     pub chunks: Vec<SavedChunk>,
 }
 
@@ -31,6 +74,7 @@ impl SavedWorld {
         seed: u32,
         player_pos: (f32, f32, f32),
         player_rot: (f32, f32),
+        inventory: &Inventory,
     ) -> Self {
         let mut saved_chunks = Vec::new();
 
@@ -73,6 +117,7 @@ impl SavedWorld {
             player_z: player_pos.2,
             player_yaw: player_rot.0,
             player_pitch: player_rot.1,
+            inventory: SavedInventory::from_inventory(inventory, crate::item_registry()),
             chunks: saved_chunks,
         }
     }
@@ -96,3 +141,24 @@ pub fn load_world<P: AsRef<Path>>(path: P) -> Result<SavedWorld, String> {
 
 pub const WORLD_FILE_EXTENSION: &str = "minerust";
 pub const DEFAULT_WORLD_FILE: &str = "world.minerust";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{item_registry, ItemStack};
+
+    #[test]
+    fn inventory_round_trip_uses_resource_keys() {
+        let registry = item_registry();
+        let stone = registry.resolve("minerust:stone").unwrap();
+        let mut inventory = Inventory::default();
+        inventory.select_hotbar(4);
+        inventory.set(PlayerSlot::Hotbar(4), Some(ItemStack::new(stone, 23)));
+
+        let saved = SavedInventory::from_inventory(&inventory, registry);
+        assert_eq!(saved.slots[31].as_ref().unwrap().item, "minerust:stone");
+        let restored = saved.into_inventory(registry);
+        assert_eq!(restored.selected_hotbar, 4);
+        assert_eq!(restored.selected_stack().unwrap().count, 23);
+    }
+}

@@ -41,13 +41,15 @@ impl State {
         let Some(item_id) = minerust::drop_for_block(block) else {
             return;
         };
+        self.spawn_item_stack(minerust::ItemStack::new(item_id, 1), Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5));
+    }
+
+    /// Spawns a stack as a physical drop. Used when a UI cursor cannot be
+    /// returned to player storage, preventing item loss on inventory close.
+    pub(crate) fn spawn_item_stack(&mut self, stack: minerust::ItemStack, position: Vec3) {
         let id = self.next_entity_id;
         self.next_entity_id = self.next_entity_id.wrapping_add(1).max(1);
-        let mut entity = minerust::ItemEntity::new(
-            id,
-            minerust::ItemStack::new(item_id, 1),
-            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-        );
+        let mut entity = minerust::ItemEntity::new(id, stack, position);
         // A small deterministic burst keeps repeated drops from occupying one point.
         entity.velocity.x = ((id.wrapping_mul(37) % 100) as f32 / 100.0 - 0.5) * 2.0;
         entity.velocity.z = ((id.wrapping_mul(71) % 100) as f32 / 100.0 - 0.5) * 2.0;

@@ -36,6 +36,12 @@ pub struct PlayerInventory {
 #[derive(Debug, Clone, Default)]
 pub struct InventoryUiState { pub cursor_stack: Option<ItemStack> }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryAction { LeftClick(PlayerSlot), RightClick(PlayerSlot), QuickMove(PlayerSlot) }
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryTransactionResult { pub changed: bool }
+
 /// Transitional public name retained while callers migrate to PlayerInventory.
 pub type Inventory = PlayerInventory;
 
@@ -62,6 +68,52 @@ impl PlayerInventory {
         let remainder = self.insert_into(stack, registry, targets.into_iter());
         if let Some(stack) = remainder { self.set(source, Some(stack)); }
         true
+    }
+
+    /// Applies UI semantics without exposing container storage to input code.
+    pub fn apply_action(&mut self, ui: &mut InventoryUiState, action: InventoryAction, registry: &ItemRegistry) -> InventoryTransactionResult {
+        match action {
+            InventoryAction::QuickMove(slot) => InventoryTransactionResult { changed: self.quick_move(slot, registry) },
+            InventoryAction::LeftClick(slot) => {
+                match ui.cursor_stack.take() {
+                    None => { ui.cursor_stack = self.take(slot); }
+                    Some(mut cursor) => match self.get(slot).cloned() {
+                        None => { self.set(slot, Some(cursor)); }
+                        Some(mut target) if target.can_stack_with(&cursor) => {
+                            let moved = registry.get(target.item).max_stack.saturating_sub(target.count).min(cursor.count);
+                            target.count += moved;
+                            cursor.count -= moved;
+                            self.set(slot, Some(target));
+                            if cursor.count > 0 { ui.cursor_stack = Some(cursor); }
+                        }
+                        Some(target) => { self.set(slot, Some(cursor)); ui.cursor_stack = Some(target); }
+                    },
+                }
+                InventoryTransactionResult { changed: true }
+            }
+            InventoryAction::RightClick(slot) => {
+                if ui.cursor_stack.is_none() {
+                    let Some(mut stack) = self.take(slot) else { return InventoryTransactionResult::default() };
+                    let amount = stack.count.div_ceil(2);
+                    stack.count -= amount;
+                    if stack.count > 0 { self.set(slot, Some(stack.clone())); }
+                    ui.cursor_stack = Some(ItemStack { count: amount, ..stack });
+                    return InventoryTransactionResult { changed: true };
+                }
+                let mut cursor = ui.cursor_stack.take().expect("cursor checked above");
+                match self.get(slot).cloned() {
+                    None => { self.set(slot, Some(ItemStack { count: 1, ..cursor.clone() })); cursor.count -= 1; }
+                    Some(mut target) if target.can_stack_with(&cursor) && target.count < registry.get(target.item).max_stack => {
+                        target.count += 1;
+                        cursor.count -= 1;
+                        self.set(slot, Some(target));
+                    }
+                    _ => {}
+                }
+                if cursor.count > 0 { ui.cursor_stack = Some(cursor); }
+                InventoryTransactionResult { changed: true }
+            }
+        }
     }
 
     pub fn consume_selected(&mut self, count: u16) -> bool {
@@ -122,5 +174,15 @@ mod tests {
         for i in 0..MAIN_SLOT_COUNT { inventory.set(PlayerSlot::Main(i as u8), Some(stone(64))); }
         for i in 0..HOTBAR_SLOT_COUNT { inventory.set(PlayerSlot::Hotbar(i as u8), Some(stone(64))); }
         assert_eq!(inventory.insert(stone(3), item_registry()).unwrap().count, 3);
+    }
+
+    #[test]
+    fn quick_move_merges_before_using_an_empty_hotbar_slot() {
+        let mut inventory = PlayerInventory::default();
+        inventory.set(PlayerSlot::Main(0), Some(stone(20)));
+        inventory.set(PlayerSlot::Hotbar(1), Some(stone(50)));
+        inventory.apply_action(&mut InventoryUiState::default(), InventoryAction::QuickMove(PlayerSlot::Main(0)), item_registry());
+        assert_eq!(inventory.get(PlayerSlot::Hotbar(1)).unwrap().count, 64);
+        assert_eq!(inventory.get(PlayerSlot::Hotbar(0)).unwrap().count, 6);
     }
 }

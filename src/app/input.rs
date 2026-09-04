@@ -11,7 +11,18 @@ use super::state::State;
 const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.4;
 
 impl State {
+    fn resolve_inventory_cursor(&mut self) {
+        let Some(stack) = self.inventory_ui.cursor_stack.take() else { return; };
+        if let Some(remainder) = self.inventory.insert(stack, minerust::item_registry()) {
+            self.spawn_item_stack(remainder, self.camera.position + glam::Vec3::new(0.0, -0.4, 0.0));
+        }
+        self.hotbar_dirty = true;
+    }
+
     pub fn toggle_inventory(&mut self) {
+        if self.inventory_open {
+            self.resolve_inventory_cursor();
+        }
         self.inventory_open = !self.inventory_open;
         self.input = Default::default();
         self.digging = Default::default();
@@ -31,42 +42,15 @@ impl State {
         let layout = crate::ui::inventory::InventoryLayout::new(self.config.width, self.config.height);
         let Some(slot) = layout.slot_at(x, y) else { return; };
         let Some(slot) = minerust::PlayerSlot::from_flat(slot) else { return; };
-        if self.modifiers.shift_key() && !right_click {
-            self.inventory.quick_move(slot, minerust::item_registry());
-            return;
-        }
-        if right_click {
-            if self.inventory_ui.cursor_stack.is_none() {
-                let Some(mut stack) = self.inventory.take(slot) else { return; };
-                let amount = stack.count.div_ceil(2);
-                stack.count -= amount;
-                if stack.count > 0 { self.inventory.set(slot, Some(stack.clone())); }
-                self.inventory_ui.cursor_stack = Some(minerust::ItemStack { count: amount, ..stack });
-            } else {
-                let mut cursor = self.inventory_ui.cursor_stack.take().unwrap();
-                match self.inventory.get(slot).cloned() {
-                    None => { self.inventory.set(slot, Some(minerust::ItemStack { count: 1, ..cursor.clone() })); cursor.count -= 1; }
-                    Some(mut target) if target.can_stack_with(&cursor) && target.count < minerust::item_registry().get(target.item).max_stack => {
-                        target.count += 1; cursor.count -= 1; self.inventory.set(slot, Some(target));
-                    }
-                    _ => {}
-                }
-                if cursor.count > 0 { self.inventory_ui.cursor_stack = Some(cursor); }
-            }
-            return;
-        }
-        match self.inventory_ui.cursor_stack.take() {
-            None => self.inventory_ui.cursor_stack = self.inventory.take(slot),
-            Some(mut cursor) => match self.inventory.get(slot).cloned() {
-                None => { self.inventory.set(slot, Some(cursor)); }
-                Some(mut target) if target.can_stack_with(&cursor) => {
-                    let moved = minerust::item_registry().get(target.item).max_stack.saturating_sub(target.count).min(cursor.count);
-                    target.count += moved; cursor.count -= moved; self.inventory.set(slot, Some(target));
-                    if cursor.count > 0 { self.inventory_ui.cursor_stack = Some(cursor); }
-                }
-                Some(target) => { self.inventory.set(slot, Some(cursor)); self.inventory_ui.cursor_stack = Some(target); }
-            },
-        }
+        let action = if self.modifiers.shift_key() && !right_click {
+            minerust::InventoryAction::QuickMove(slot)
+        } else if right_click {
+            minerust::InventoryAction::RightClick(slot)
+        } else {
+            minerust::InventoryAction::LeftClick(slot)
+        };
+        let result = self.inventory.apply_action(&mut self.inventory_ui, action, minerust::item_registry());
+        if result.changed { self.hotbar_dirty = true; }
     }
     /// Translates a raw mouse-click position into a menu action.
     ///
