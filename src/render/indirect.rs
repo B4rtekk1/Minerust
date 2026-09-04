@@ -171,6 +171,9 @@ pub struct IndirectManager {
     /// Shared culling slots. Only the terrain manager owns these; its metadata
     /// contains draw ranges for both terrain and water.
     cull_allocations: FxHashMap<SubchunkKey, usize>,
+    /// CPU copy of the AABB for every shared metadata slot. This lets a quad
+    /// arena relocation rebuild draw ranges for all live subchunks.
+    cull_aabbs: FxHashMap<SubchunkKey, AABB>,
     /// One past the highest culling slot, bounding the single dispatch.
     max_slot_bound: u32,
     free_slots: Vec<usize>,
@@ -197,6 +200,8 @@ pub struct IndirectManager {
     max_quads: usize,
     /// Set after the arena is replaced; the renderer must rebuild its vertex-pulling bind group.
     quad_buffer_rebind_pending: bool,
+    /// Set when compaction changes existing allocation offsets.
+    cull_metadata_refresh_pending: bool,
     /// Short label used in logs.
     label: &'static str,
 }
@@ -405,6 +410,7 @@ impl IndirectManager {
             next_quad_offset: 0,
             active_subchunk_count: 0,
             cull_allocations: FxHashMap::default(),
+            cull_aabbs: FxHashMap::default(),
             max_slot_bound: 0,
             // Pre-populate the free-slot stack in reverse so slot 0 is popped first.
             free_slots: {
@@ -421,6 +427,7 @@ impl IndirectManager {
             coalesce_counter: 0,
             max_quads,
             quad_buffer_rebind_pending: false,
+            cull_metadata_refresh_pending: false,
             label,
         }
     }
@@ -632,6 +639,7 @@ impl IndirectManager {
                 .collect();
             live.sort_by_key(|(_, alloc)| alloc.quad_offset);
             let mut next_offset = 0u32;
+            let mut relocated = false;
             for (key, old) in live {
                 let byte_count = old.quad_count as u64 * size_of::<PackedQuad>() as u64;
                 encoder.copy_buffer_to_buffer(
@@ -645,11 +653,13 @@ impl IndirectManager {
                     .allocations
                     .get_mut(&key)
                     .expect("live allocation disappeared");
+                relocated |= old.quad_offset != next_offset;
                 alloc.quad_offset = next_offset;
                 next_offset += old.quad_count;
             }
             self.next_quad_offset = next_offset;
             self.free_quad_blocks.clear();
+            self.cull_metadata_refresh_pending |= relocated;
         } else if self.next_quad_offset > 0 {
             encoder.copy_buffer_to_buffer(
                 &self.unified_quad_buffer,
@@ -668,6 +678,13 @@ impl IndirectManager {
     /// Returns whether a replaced arena requires a new vertex-pulling bind group.
     pub fn take_quad_buffer_rebind(&mut self) -> bool {
         std::mem::take(&mut self.quad_buffer_rebind_pending)
+    }
+
+    /// Returns whether compaction relocated live quad ranges since the last
+    /// call. The terrain manager owns the shared metadata and uses this after
+    /// both terrain and water uploads have completed.
+    pub fn take_cull_metadata_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.cull_metadata_refresh_pending)
     }
 
     /// Frees geometry belonging to `key`. Shared culling metadata is updated by
@@ -746,6 +763,7 @@ impl IndirectManager {
         };
 
         let meta = if has_geometry {
+            self.cull_aabbs.insert(key, *aabb);
             SubchunkGpuMeta {
                 aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
                 aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, 0.0],
@@ -753,6 +771,7 @@ impl IndirectManager {
                 water_draw_data: water_draw,
             }
         } else {
+            self.cull_aabbs.remove(&key);
             SubchunkGpuMeta::zeroed()
         };
         queue.write_buffer(
@@ -762,12 +781,46 @@ impl IndirectManager {
         );
     }
 
+    /// Rebuilds every shared culling record after either quad arena was
+    /// compacted.  Both draw ranges are reconstructed together because the
+    /// records are shared by the terrain and water managers.
+    pub fn refresh_cull_metadata(&self, queue: &wgpu::Queue, water: &IndirectManager) {
+        for (key, &slot) in &self.cull_allocations {
+            let aabb = self
+                .cull_aabbs
+                .get(key)
+                .expect("active culling slot is missing its AABB");
+            let terrain_draw = self
+                .allocations
+                .get(key)
+                .map(|alloc| [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1])
+                .unwrap_or([0; 4]);
+            let water_draw = water
+                .allocations
+                .get(key)
+                .map(|alloc| [alloc.quad_count * 6, alloc.quad_offset * 6, 0, 1])
+                .unwrap_or([0; 4]);
+            let meta = SubchunkGpuMeta {
+                aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
+                aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z, 0.0],
+                terrain_draw_data: terrain_draw,
+                water_draw_data: water_draw,
+            };
+            queue.write_buffer(
+                self.subchunk_meta_buffer(),
+                (slot * size_of::<SubchunkGpuMeta>()) as u64,
+                bytemuck::bytes_of(&meta),
+            );
+        }
+    }
+
     /// Removes a shared culling record once both geometry managers have freed it.
     pub fn remove_cull_subchunk(&mut self, queue: &wgpu::Queue, key: SubchunkKey) {
         let Some(slot) = self.cull_allocations.remove(&key) else {
             return;
         };
         self.free_slots.push(slot);
+        self.cull_aabbs.remove(&key);
         self.max_slot_bound = self
             .cull_allocations
             .values()
@@ -874,7 +927,9 @@ impl IndirectManager {
         self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
         self.cull_allocations.clear();
+        self.cull_aabbs.clear();
         self.max_slot_bound = 0;
+        self.cull_metadata_refresh_pending = false;
         self.free_quad_blocks.clear();
 
         self.free_slots.clear();
@@ -1041,7 +1096,9 @@ impl IndirectManager {
         self.next_quad_offset = 0;
         self.active_subchunk_count = 0;
         self.cull_allocations.clear();
+        self.cull_aabbs.clear();
         self.max_slot_bound = 0;
+        self.cull_metadata_refresh_pending = false;
         self.free_slots.clear();
         self.free_slots.extend((0..MAX_SUBCHUNKS).rev());
         self.free_quad_blocks.clear();
