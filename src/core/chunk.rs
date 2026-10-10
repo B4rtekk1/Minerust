@@ -246,6 +246,36 @@ mod tests {
             SubChunkStorage::Uniform(BlockType::Air)
         ));
     }
+
+    #[test]
+    fn highest_opaque_scan_handles_uniform_dense_and_raw_writes() {
+        let mut chunk = Chunk::new(-1, 2);
+        chunk.subchunks[0].storage = SubChunkStorage::Uniform(BlockType::Stone);
+        chunk.subchunks[3].storage = SubChunkStorage::Uniform(BlockType::Water);
+        chunk.subchunks[5].storage = SubChunkStorage::Uniform(BlockType::Stone);
+        for y in 5 * SUBCHUNK_HEIGHT..6 * SUBCHUNK_HEIGHT {
+            chunk.set_block_raw(1, y, 2, BlockType::Air);
+        }
+        chunk.set_block_raw(3, WORLD_HEIGHT - 2, 4, BlockType::Leaves);
+        chunk.set_block_raw(3, WORLD_HEIGHT - 3, 4, BlockType::Stone);
+        // Raw writes leave metadata stale; the scan must use actual storage.
+        chunk.rebuild_metadata();
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let expected = (0..WORLD_HEIGHT)
+                    .rev()
+                    .find(|&y| chunk.get_block(x, y, z).is_solid_opaque())
+                    .map_or(-1, |y| y as i16);
+                assert_eq!(chunk.highest_opaque_y(x, z), expected);
+            }
+        }
+        chunk.set_block(3, WORLD_HEIGHT - 3, 4, BlockType::Air);
+        assert_eq!(
+            chunk.highest_opaque_y(3, 4),
+            (6 * SUBCHUNK_HEIGHT - 1) as i16
+        );
+        assert_eq!(chunk.highest_opaque_y(1, 2), (SUBCHUNK_HEIGHT - 1) as i16);
+    }
 }
 
 /// A full-height vertical column of [`SubChunk`]s at a fixed `(x, z)` position.
@@ -371,9 +401,22 @@ impl Chunk {
     }
 
     fn find_highest_opaque_in_column(&self, x: i32, z: i32) -> i16 {
-        for y in (0..WORLD_HEIGHT).rev() {
-            if self.get_block(x, y, z).is_solid_opaque() {
-                return y as i16;
+        for (sy, subchunk) in self.subchunks.iter().enumerate().rev() {
+            let base_y = sy as i32 * SUBCHUNK_HEIGHT;
+            match &subchunk.storage {
+                SubChunkStorage::Uniform(block) => {
+                    if block.is_solid_opaque() {
+                        return (base_y + SUBCHUNK_HEIGHT - 1) as i16;
+                    }
+                }
+                SubChunkStorage::Dense(blocks) => {
+                    for local_y in (0..SUBCHUNK_HEIGHT as usize).rev() {
+                        let index = SubChunk::block_index(x as usize, local_y, z as usize);
+                        if blocks[index].is_solid_opaque() {
+                            return (base_y + local_y as i32) as i16;
+                        }
+                    }
+                }
             }
         }
         -1

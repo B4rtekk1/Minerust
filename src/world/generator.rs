@@ -101,12 +101,23 @@ struct BiomePoint {
 }
 
 #[derive(Clone, Copy)]
+struct BiomeNoiseSample {
+    continental: f64,
+    erosion: f64,
+    weirdness: f64,
+    temperature: f32,
+    moisture: f32,
+    river_value: f32,
+    river_threshold: f32,
+    lake: f32,
+    island: f32,
+}
+
+#[derive(Clone, Copy)]
 struct TerrainNoiseSample {
     continental: f64,
     biome_continental: f32,
     terrain: f64,
-    temperature: f32,
-    moisture: f32,
     river_value: f32,
     river_threshold: f32,
     lake: f32,
@@ -123,7 +134,6 @@ struct TerrainNoiseSample {
 
 #[derive(Clone, Copy)]
 struct ColumnSample {
-    biome: Biome,
     height: f64,
 }
 
@@ -297,53 +307,31 @@ impl ChunkGenerator {
         let mut bordered_heights = [[0i32; HEIGHT_MAP_SIZE]; HEIGHT_MAP_SIZE];
         for sample_x in -HEIGHT_MAP_BORDER..=(CHUNK_SIZE - 1 + HEIGHT_MAP_BORDER) {
             for sample_z in -HEIGHT_MAP_BORDER..=(CHUNK_SIZE - 1 + HEIGHT_MAP_BORDER) {
-                let sample = self.sample_column(base_x + sample_x, base_z + sample_z);
-                bordered_heights[(sample_x + HEIGHT_MAP_BORDER) as usize]
-                    [(sample_z + HEIGHT_MAP_BORDER) as usize] =
-                    (sample.height as i32).clamp(1, WORLD_HEIGHT - 20);
-                if sample_x >= 0 && sample_x < CHUNK_SIZE && sample_z >= 0 && sample_z < CHUNK_SIZE
-                {
-                    biome_map[sample_x as usize][sample_z as usize] = sample.biome;
-                    height_map[sample_x as usize][sample_z as usize] = sample.height as i32;
+                let x = base_x + sample_x;
+                let z = base_z + sample_z;
+                if (0..CHUNK_SIZE).contains(&sample_x) && (0..CHUNK_SIZE).contains(&sample_z) {
+                    // Interior heights come from the density field in pass 2.
+                    // Biome selection does not need the five terrain-only fields.
+                    biome_map[sample_x as usize][sample_z as usize] = self.get_biome(x, z);
+                } else {
+                    bordered_heights[(sample_x + HEIGHT_MAP_BORDER) as usize]
+                        [(sample_z + HEIGHT_MAP_BORDER) as usize] =
+                        (self.sample_column(x, z).height as i32).clamp(1, WORLD_HEIGHT - 20);
                 }
             }
         }
-
         let mut slope_map = [[0i32; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let center_height = height_map[lx as usize][lz as usize];
-                let mut max_delta = 0;
-
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        if dx == 0 && dz == 0 {
-                            continue;
-                        }
-
-                        let nx = (lx + HEIGHT_MAP_BORDER + dx) as usize;
-                        let nz = (lz + HEIGHT_MAP_BORDER + dz) as usize;
-                        max_delta = max_delta.max((center_height - bordered_heights[nx][nz]).abs());
-                    }
-                }
-
-                slope_map[lx as usize][lz as usize] = max_delta;
-            }
-        }
 
         // ── Pass 2: coarse 3-D terrain-density lattice ──────────────────── //
-        // The lattice uses the same coarse XZ samples as its shape cache.
-        // This avoids re-sampling all 2-D terrain noise for every lattice
-        // point after the column pass has already evaluated that location.
-        let first_shape = self.terrain_shape(&self.sample_terrain_noise(base_x, base_z));
-        let mut density_shapes = [[first_shape; DENSITY_XZ_SAMPLES]; DENSITY_XZ_SAMPLES];
-        for ix in 0..DENSITY_XZ_SAMPLES {
-            for iz in 0..DENSITY_XZ_SAMPLES {
+        // Terrain-only parameters are needed at coarse lattice columns and
+        // the border, rather than at every interior voxel column.
+        let density_shapes = std::array::from_fn(|ix| {
+            std::array::from_fn(|iz| {
                 let x = base_x + ix as i32 * DENSITY_CELL_SIZE;
                 let z = base_z + iz as i32 * DENSITY_CELL_SIZE;
-                density_shapes[ix][iz] = self.terrain_shape(&self.sample_terrain_noise(x, z));
-            }
-        }
+                self.terrain_shape(&self.sample_terrain_noise(x, z))
+            })
+        });
         let density_lattice = self.build_density_lattice(base_x, base_z, &density_shapes);
         // Interpolate the horizontal dimensions once per voxel column. The
         // resulting values are vertical lattice endpoints, so individual
@@ -415,17 +403,13 @@ impl ChunkGenerator {
                 // exist; retaining sea level covers ocean and lake water.
                 let max_y = surface_height.max(SEA_LEVEL).min(WORLD_HEIGHT - 1);
                 let density_column = &density_columns[lx as usize][lz as usize];
+                let cave_column = self.cave_vertical_column(&cave_lattice, lx, lz, surface_height);
+                let mut fluid_level = None;
                 for y in 0..=max_y {
                     let terrain_density = Self::sample_density_column(density_column, y);
-                    let cave_density = self.sample_cave_lattice(
-                        &cave_lattice,
-                        lx,
-                        y,
-                        lz,
-                        surface_height,
-                        is_entrance,
-                    );
-                    let is_solid = terrain_density.min(cave_density) > 0.0;
+                    let is_solid = terrain_density > 0.0
+                        && Self::sample_cave_column(&cave_column, y, surface_height, is_entrance)
+                            > 0.0;
 
                     if is_solid {
                         let block = self.get_block_for_biome(
@@ -440,7 +424,8 @@ impl ChunkGenerator {
                         if block != BlockType::Air {
                             chunk.set_block_raw(lx, y, lz, block);
                         }
-                    } else if self.has_fluid(world_x, y, world_z, surface_height) {
+                    } else if self.has_fluid(world_x, y, world_z, surface_height, &mut fluid_level)
+                    {
                         if biome == Biome::Tundra && y == SEA_LEVEL - 1 {
                             chunk.set_block_raw(lx, y, lz, BlockType::Ice);
                         } else {
@@ -555,10 +540,9 @@ impl ChunkGenerator {
 
     fn sample_column(&self, x: i32, z: i32) -> ColumnSample {
         let noise = self.sample_terrain_noise(x, z);
-        let biome = self.classify_biome(&noise);
         let shape = self.terrain_shape(&noise);
         let height = self.preliminary_surface_level(&shape, &noise);
-        ColumnSample { biome, height }
+        ColumnSample { height }
     }
 
     fn terrain_warp(&self, x: i32, z: i32) -> (f32, f32) {
@@ -583,8 +567,8 @@ impl ChunkGenerator {
         (wx, wz)
     }
 
-    fn sample_terrain_noise(&self, x: i32, z: i32) -> TerrainNoiseSample {
-        let (wx, wz) = self.terrain_warp(x, z);
+    /// Samples only fields shared by biome selection and terrain shaping.
+    fn sample_biome_noise(&self, wx: f32, wz: f32) -> BiomeNoiseSample {
         let continental = self.noise_continents.get_noise_2d(wx, wz) as f64;
         let erosion = self.noise_erosion.get_noise_2d(wx, wz) as f64;
         let river_noise = self.noise_river.get_noise_2d(wx, wz);
@@ -596,48 +580,62 @@ impl ChunkGenerator {
         ) as f32;
 
         let weirdness = self.noise_weirdness.get_noise_2d(wx, wz) as f64;
-        TerrainNoiseSample {
+        BiomeNoiseSample {
             continental,
-            biome_continental: continental as f32,
-            terrain: self.noise_terrain.get_noise_2d(wx, wz) as f64,
+            erosion,
+            weirdness,
             temperature: self.noise_temperature.get_noise_2d(wx, wz),
             moisture: self.noise_moisture.get_noise_2d(wx, wz),
             river_value: 1.0 - river_noise.abs() * 2.0,
             river_threshold,
             lake: self.noise_lake.get_noise_2d(wx, wz),
             island: self.noise_island.get_noise_2d(wx, wz),
-            erosion,
-            biome_erosion: erosion as f32,
+        }
+    }
+
+    fn sample_terrain_noise(&self, x: i32, z: i32) -> TerrainNoiseSample {
+        let (wx, wz) = self.terrain_warp(x, z);
+        let biome = self.sample_biome_noise(wx, wz);
+        TerrainNoiseSample {
+            continental: biome.continental,
+            biome_continental: biome.continental as f32,
+            terrain: self.noise_terrain.get_noise_2d(wx, wz) as f64,
+            river_value: biome.river_value,
+            river_threshold: biome.river_threshold,
+            lake: biome.lake,
+            island: biome.island,
+            erosion: biome.erosion,
+            biome_erosion: biome.erosion as f32,
             ridged: self.noise_ridged.get_noise_2d(wx, wz) as f64,
             mountain_chain: self.noise_ridged.get_noise_2d(wx * 0.18, wz * 0.18) as f64,
-            biome_peaks_valleys: peaks_and_valleys(weirdness) as f32,
-            weirdness,
+            biome_peaks_valleys: peaks_and_valleys(biome.weirdness) as f32,
+            weirdness: biome.weirdness,
             plateau: self.noise_plateau.get_noise_2d(wx, wz) as f64,
             valley: self.noise_valley.get_noise_2d(wx, wz) as f64,
         }
     }
 
-    fn classify_biome(&self, noise: &TerrainNoiseSample) -> Biome {
-        if noise.river_value > noise.river_threshold && noise.biome_continental > -0.28 {
+    fn classify_biome(&self, noise: &BiomeNoiseSample) -> Biome {
+        if noise.river_value > noise.river_threshold && (noise.continental as f32) > -0.28 {
             return Biome::River;
         }
 
         if noise.lake < LAKE_THRESHOLD
-            && noise.biome_continental > -0.12
-            && noise.biome_erosion > -0.35
+            && (noise.continental as f32) > -0.12
+            && (noise.erosion as f32) > -0.35
         {
             return Biome::Lake;
         }
 
-        if noise.biome_continental < -0.42 {
+        if (noise.continental as f32) < -0.42 {
             if noise.island > 0.58 && noise.weirdness > -0.45 {
                 return Biome::Island;
             }
             return Biome::Ocean;
         }
 
-        if noise.biome_continental < -0.18
-            || (noise.biome_continental < -0.08 && noise.weirdness < -0.55)
+        if (noise.continental as f32) < -0.18
+            || ((noise.continental as f32) < -0.08 && noise.weirdness < -0.55)
         {
             return Biome::Beach;
         }
@@ -645,8 +643,8 @@ impl ChunkGenerator {
         self.select_land_biome(Climate {
             temperature: noise.temperature as f64,
             humidity: noise.moisture as f64,
-            continentalness: noise.biome_continental as f64,
-            erosion: noise.biome_erosion as f64,
+            continentalness: (noise.continental as f32) as f64,
+            erosion: (noise.erosion as f32) as f64,
             weirdness: noise.weirdness,
         })
     }
@@ -757,8 +755,8 @@ impl ChunkGenerator {
     /// (scale 0.005, Z offset +200) so biome boundaries and height boundaries
     /// are always coherent — no more mismatched warp between the two systems.
     pub fn get_biome(&self, x: i32, z: i32) -> Biome {
-        let noise = self.sample_terrain_noise(x, z);
-        self.classify_biome(&noise)
+        let (wx, wz) = self.terrain_warp(x, z);
+        self.classify_biome(&self.sample_biome_noise(wx, wz))
     }
 
     // ── Terrain height ────────────────────────────────────────────────────── //
@@ -1047,20 +1045,30 @@ impl ChunkGenerator {
         }
     }
 
-    fn has_fluid(&self, x: i32, y: i32, z: i32, preliminary_surface: i32) -> bool {
-        // Open ocean and lakes retain a shared sea level. Underground cavities
-        // use a local aquifer level, so adjacent caves can be dry or flooded.
+    fn has_fluid(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        preliminary_surface: i32,
+        fluid_level: &mut Option<i32>,
+    ) -> bool {
         if preliminary_surface < SEA_LEVEL && y < SEA_LEVEL {
             return true;
         }
-        let n = self
-            .noise_aquifer
-            .get_noise_3d(x as f32, y as f32, z as f32) as f64;
-        let cell = self
-            .noise_aquifer
-            .get_noise_3d(x as f32 + 4000.0, 0.0, z as f32 - 4000.0) as f64;
-        let fluid_level = 24 + ((cell + 1.0) * 0.5 * 34.0) as i32;
-        y <= fluid_level && n > 0.10
+        // The aquifer level is invariant along a column. Evaluate it lazily,
+        // only if a cavity needs it, then skip 3-D noise above that level.
+        let level = *fluid_level.get_or_insert_with(|| {
+            let cell =
+                self.noise_aquifer
+                    .get_noise_3d(x as f32 + 4000.0, 0.0, z as f32 - 4000.0) as f64;
+            24 + ((cell + 1.0) * 0.5 * 34.0) as i32
+        });
+        y <= level
+            && self
+                .noise_aquifer
+                .get_noise_3d(x as f32, y as f32, z as f32) as f64
+                > 0.10
     }
 
     fn is_cave_entrance(&self, x: i32, z: i32, surface_height: i32) -> bool {
@@ -1155,13 +1163,42 @@ impl ChunkGenerator {
         base_z: i32,
         shapes: &[[TerrainShape; DENSITY_XZ_SAMPLES]; DENSITY_XZ_SAMPLES],
     ) -> [f64; DENSITY_LATTICE_LEN] {
-        let mut lattice = [0.0; DENSITY_LATTICE_LEN];
+        // FastNoiseLite's fields are bounded by [-1, 1]. Use twice that
+        // amplitude as a conservative margin. Above the first plane whose
+        // upper bound is negative for every shape, all horizontal/vertical
+        // interpolants remain negative. Keep that first plane's exact values
+        // because they can still interpolate with a positive plane below.
+        let first_air_plane = (0..DENSITY_Y_SAMPLES).find(|&iy| {
+            let y = iy as i32 * DENSITY_CELL_SIZE;
+            shapes.iter().flatten().all(|shape| {
+                let depth = self.y_gradient(y) + shape.offset;
+                let shaped = (depth + shape.jaggedness.abs() * 2.0) * shape.factor;
+                debug_assert!(shape.factor > 0.0);
+                4.0 * quarter_negative(shaped) + shape.density3d_strength.abs() * 2.0 < -0.001
+            })
+        });
+        // The symmetric lower bound skips guaranteed solid deep terrain.
+        // Retain the last all-solid plane exactly for the transition above it.
+        let last_solid_plane = (0..DENSITY_Y_SAMPLES).rev().find(|&iy| {
+            let y = iy as i32 * DENSITY_CELL_SIZE;
+            shapes.iter().flatten().all(|shape| {
+                let depth = self.y_gradient(y) + shape.offset;
+                let shaped = (depth - shape.jaggedness.abs() * 2.0) * shape.factor;
+                4.0 * quarter_negative(shaped) - shape.density3d_strength.abs() * 2.0 > 0.001
+            })
+        });
+        let sample_start = last_solid_plane.unwrap_or(0);
+        let sample_end = first_air_plane.map_or(DENSITY_Y_SAMPLES, |iy| iy + 1);
+        let mut lattice = [-1.0; DENSITY_LATTICE_LEN];
         for ix in 0..DENSITY_XZ_SAMPLES {
             for iz in 0..DENSITY_XZ_SAMPLES {
                 let x = base_x + ix as i32 * DENSITY_CELL_SIZE;
                 let z = base_z + iz as i32 * DENSITY_CELL_SIZE;
                 let shape = shapes[ix][iz];
-                for iy in 0..DENSITY_Y_SAMPLES {
+                for iy in 0..sample_start {
+                    lattice[Self::density_index(ix, iy, iz)] = 1.0;
+                }
+                for iy in sample_start..sample_end {
                     let y = iy as i32 * DENSITY_CELL_SIZE;
                     lattice[Self::density_index(ix, iy, iz)] =
                         self.terrain_density(x, y, z, &shape);
@@ -1222,6 +1259,58 @@ impl ChunkGenerator {
         lerp(column[iy], column[y1], ty)
     }
 
+    /// Keep the original X-then-Z-then-Y lerp order so thresholds are identical.
+    fn cave_vertical_column(
+        &self,
+        lattice: &[f64; CAVE_LATTICE_LEN],
+        lx: i32,
+        lz: i32,
+        surface_height: i32,
+    ) -> [f64; CAVE_Y_SAMPLES] {
+        let ix = (lx / CAVE_CELL_SIZE) as usize;
+        let iz = (lz / CAVE_CELL_SIZE) as usize;
+        let tx = lx.rem_euclid(CAVE_CELL_SIZE) as f64 / CAVE_CELL_SIZE as f64;
+        let tz = lz.rem_euclid(CAVE_CELL_SIZE) as f64 / CAVE_CELL_SIZE as f64;
+        let x1 = (ix + 1).min(CAVE_XZ_SAMPLES - 1);
+        let z1 = (iz + 1).min(CAVE_XZ_SAMPLES - 1);
+        let mut column = [1.0; CAVE_Y_SAMPLES];
+        let last = (surface_height as usize / CAVE_CELL_SIZE as usize).min(CAVE_Y_SAMPLES - 1);
+        for (iy, value) in column.iter_mut().enumerate().take(last + 1) {
+            let at = |x, z| lattice[Self::cave_index(x, iy, z)];
+            *value = lerp(
+                lerp(at(ix, iz), at(x1, iz), tx),
+                lerp(at(ix, z1), at(x1, z1), tx),
+                tz,
+            );
+        }
+        column
+    }
+
+    fn sample_cave_column(
+        column: &[f64; CAVE_Y_SAMPLES],
+        y: i32,
+        surface_height: i32,
+        is_entrance: bool,
+    ) -> f64 {
+        if y <= 4 || y >= surface_height {
+            return 1.0;
+        }
+        let min_surface_dist = if is_entrance {
+            let t = ((surface_height - y) as f32 / 18.0).clamp(0.0, 1.0);
+            (2.0 + t * 10.0) as i32
+        } else {
+            18
+        };
+        if y >= surface_height - min_surface_dist {
+            return 1.0;
+        }
+        let iy = (y / CAVE_CELL_SIZE) as usize;
+        let ty = y.rem_euclid(CAVE_CELL_SIZE) as f64 / CAVE_CELL_SIZE as f64;
+        let y1 = (iy + 1).min(CAVE_Y_SAMPLES - 1);
+        lerp(column[iy], column[y1], ty)
+    }
+
+    #[cfg(test)]
     fn sample_cave_lattice(
         &self,
         lattice: &[f64; CAVE_LATTICE_LEN],
@@ -2112,6 +2201,159 @@ fn quarter_negative(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_matches_pre_optimization_fixtures() {
+        // FNV-1a hashes captured before optimization, including every block,
+        // highest opaque Y, empty flags and opaque flags, in this exact order.
+        let fixtures = [
+            (0, 0x0bb9aca2542dcde3u64),
+            (12, 0xd683314afef9b61d),
+            (42, 0xd418dd6e88a65aaa),
+            (77, 0x455fc0c1dffdb103),
+            (1337, 0x8c3924fe6dfe2c4b),
+            (2026, 0x10ab725aba2c9a5a),
+            (90_210, 0x72c5cc6a8af18ddd),
+            (u32::MAX, 0x5ed215688cd54039),
+        ];
+        for (seed, expected) in fixtures {
+            let generator = ChunkGenerator::new(seed);
+            let mut hash = 0xcbf29ce484222325u64;
+            let mut feed = |byte: u8| {
+                hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
+            };
+            for (cx, cz) in [(0, 0), (2, -3), (-256, 128), (17, -91)] {
+                let chunk = generator.generate_chunk(cx, cz);
+                for x in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        for byte in chunk.highest_opaque_y(x, z).to_le_bytes() {
+                            feed(byte);
+                        }
+                        for y in 0..WORLD_HEIGHT {
+                            feed(chunk.get_block(x, y, z) as u8);
+                        }
+                    }
+                }
+                for subchunk in &chunk.subchunks {
+                    feed(subchunk.is_empty as u8);
+                    feed(subchunk.is_fully_opaque as u8);
+                }
+            }
+            assert_eq!(hash, expected, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn density_bounds_preserve_all_voxel_signs_and_heights() {
+        for seed in [0, 42, 2026, u32::MAX] {
+            let generator = ChunkGenerator::new(seed);
+            for (cx, cz) in [(0, 0), (2, -3), (-256, 128), (17, -91)] {
+                let base_x = cx * CHUNK_SIZE;
+                let base_z = cz * CHUNK_SIZE;
+                let shapes = std::array::from_fn(|ix| {
+                    std::array::from_fn(|iz| {
+                        generator.terrain_shape(&generator.sample_terrain_noise(
+                            base_x + ix as i32 * DENSITY_CELL_SIZE,
+                            base_z + iz as i32 * DENSITY_CELL_SIZE,
+                        ))
+                    })
+                });
+                let actual = generator.build_density_lattice(base_x, base_z, &shapes);
+                let mut reference = [0.0; DENSITY_LATTICE_LEN];
+                for ix in 0..DENSITY_XZ_SAMPLES {
+                    for iz in 0..DENSITY_XZ_SAMPLES {
+                        for iy in 0..DENSITY_Y_SAMPLES {
+                            reference[ChunkGenerator::density_index(ix, iy, iz)] = generator
+                                .terrain_density(
+                                    base_x + ix as i32 * DENSITY_CELL_SIZE,
+                                    iy as i32 * DENSITY_CELL_SIZE,
+                                    base_z + iz as i32 * DENSITY_CELL_SIZE,
+                                    &shapes[ix][iz],
+                                );
+                        }
+                    }
+                }
+                // Include boundary columns used by the cave lattice as well.
+                for lx in 0..=CHUNK_SIZE {
+                    for lz in 0..=CHUNK_SIZE {
+                        let a = generator.density_vertical_column(&actual, lx, lz);
+                        let b = generator.density_vertical_column(&reference, lx, lz);
+                        assert_eq!(
+                            ChunkGenerator::density_surface_height(&a),
+                            ChunkGenerator::density_surface_height(&b)
+                        );
+                        for y in 0..WORLD_HEIGHT {
+                            assert_eq!(
+                                ChunkGenerator::sample_density_column(&a, y) > 0.0,
+                                ChunkGenerator::sample_density_column(&b, y) > 0.0,
+                                "seed {seed}, chunk ({cx}, {cz}), voxel ({lx}, {y}, {lz})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cave_columns_match_trilinear_reference_exactly() {
+        let generator = ChunkGenerator::new(42);
+        // Mixed signs and a nontrivial field exercise all interpolation weights.
+        let lattice = std::array::from_fn(|i| ((i * 17 % 101) as f64 - 50.0) / 50.0);
+        for surface in [1, 5, 18, 64, 97, WORLD_HEIGHT - 1, WORLD_HEIGHT] {
+            for lx in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    let column = generator.cave_vertical_column(&lattice, lx, lz, surface);
+                    for is_entrance in [false, true] {
+                        for y in 0..WORLD_HEIGHT {
+                            let actual = ChunkGenerator::sample_cave_column(
+                                &column,
+                                y,
+                                surface,
+                                is_entrance,
+                            );
+                            let expected = generator.sample_cave_lattice(
+                                &lattice,
+                                lx,
+                                y,
+                                lz,
+                                surface,
+                                is_entrance,
+                            );
+                            assert_eq!(actual.to_bits(), expected.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_aquifer_matches_per_voxel_reference() {
+        for seed in [42, 2026, u32::MAX] {
+            let generator = ChunkGenerator::new(seed);
+            for (x, z) in [(0, 0), (31, -17), (-4096, 2048)] {
+                for surface in [32, SEA_LEVEL, 88, WORLD_HEIGHT - 1] {
+                    let mut level = None;
+                    for y in 0..WORLD_HEIGHT {
+                        let n = generator
+                            .noise_aquifer
+                            .get_noise_3d(x as f32, y as f32, z as f32)
+                            as f64;
+                        let cell = generator.noise_aquifer.get_noise_3d(
+                            x as f32 + 4000.0,
+                            0.0,
+                            z as f32 - 4000.0,
+                        ) as f64;
+                        let old_level = 24 + ((cell + 1.0) * 0.5 * 34.0) as i32;
+                        let expected =
+                            (surface < SEA_LEVEL && y < SEA_LEVEL) || (y <= old_level && n > 0.10);
+                        assert_eq!(generator.has_fluid(x, y, z, surface, &mut level), expected);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn peaks_and_valleys_has_peak_and_valley_bands() {

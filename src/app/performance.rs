@@ -34,9 +34,38 @@ pub fn process_cpu_time_ms() -> Option<f64> {
     }
 }
 
-/// Platforms without a process CPU-time API use the elapsed wall-clock time.
-/// Keeping this fallback preserves the HUD on non-Windows builds.
-#[cfg(not(target_os = "windows"))]
+/// Includes CPU time of all threads, including generation and mesh workers.
+#[cfg(target_os = "linux")]
+pub fn process_cpu_time_ms() -> Option<f64> {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: clock_gettime initializes the valid output pointer on success.
+    // Only read the timespec after checking its return value.
+    if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let time = unsafe { time.assume_init() };
+    Some(time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0)
+}
+
+/// Other platforms retain the elapsed wall-clock fallback in the HUD.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn process_cpu_time_ms() -> Option<f64> {
     None
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_clock_accounts_for_cpu_work() {
+        let before = process_cpu_time_ms().expect("process CPU clock unavailable");
+        let mut value = 1u64;
+        for i in 0..100_000u64 {
+            value = std::hint::black_box(value.wrapping_mul(31).wrapping_add(i));
+        }
+        std::hint::black_box(value);
+        let after = process_cpu_time_ms().unwrap();
+        assert!(after.is_finite() && after > before);
+    }
 }
