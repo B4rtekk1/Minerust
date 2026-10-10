@@ -1535,7 +1535,7 @@ impl State {
 
         let render_mode_text = match self.config.present_mode {
             wgpu::PresentMode::Fifo => "RENDER MODE: VSYNC",
-            _ => "RENDER MODE: INSTANT",
+            _ => "RENDER MODE: AUTO",
         };
         self.menu_render_mode_button_buffer.set_text(
             render_mode_text,

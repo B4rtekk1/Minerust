@@ -99,7 +99,7 @@ impl State {
     ///    `MULTI_DRAW_INDIRECT_COUNT` when the adapter supports it so the
     ///    indirect draw manager can cull invisible chunks on the GPU.
     /// 3. **Swap-chain configuration** – prefers an sRGB surface format and
-    ///    `PresentMode::Immediate` (uncapped frame rate) with 4× MSAA.
+    ///    `PresentMode::AutoNoVsync` (preferring uncapped frame rate) with 4× MSAA.
     /// 4. **Shader compilation** – compiles all WGSL shaders (terrain, water,
     ///    sky, sun, UI, Hi-Z, depth-resolve, composite).
     /// 5. **Buffers & textures** – allocates the uniform buffer,
@@ -262,9 +262,9 @@ impl State {
             format: surface_format,
             width: size.width,
             height: size.height,
-            // `Immediate` disables vsync so the frame rate is uncapped.
-            // Switch to `Fifo` (vsync) to reduce GPU power consumption.
-            present_mode: wgpu::PresentMode::Immediate,
+            // Prefer Immediate, then Mailbox, then Fifo according to support.
+            // In particular, Wayland surfaces may not support Immediate.
+            present_mode: wgpu::PresentMode::AutoNoVsync,
             // A game window must never expose the desktop through its
             // swap-chain. Prefer an opaque compositor surface; premultiplied
             // alpha occasionally makes the whole window translucent on Windows.

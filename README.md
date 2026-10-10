@@ -51,6 +51,8 @@ and multiplayer foundations are already present.
 ### 🎨 Rendering
 
 - **wgpu 30.0.1** renderer with Vulkan / Direct3D 12 / Metal backend support through wgpu.
+- **Portable presentation modes**: AUTO prefers Immediate, then Mailbox, then Fifo
+  according to surface support (including Linux/Wayland); the menu can switch to VSYNC (Fifo).
 - **GPU-driven terrain submission** using compute-generated visibility lists.
 - **`multi_draw_indirect_count`** when supported by the active GPU, with a fallback path.
 - **GPU frustum culling** for subchunks.

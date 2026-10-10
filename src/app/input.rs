@@ -92,12 +92,11 @@ impl State {
         }
     }
 
-    /// Switches immediately between uncapped presentation and display-synced
-    /// presentation. Both modes are supported by the active surface because
-    /// the initial configuration uses `Immediate` and `Fifo` is mandatory.
+    /// Switches between automatic low-latency and display-synced presentation.
+    /// AutoNoVsync falls back to a supported mode; Fifo is mandatory.
     fn toggle_present_mode(&mut self) {
         self.config.present_mode = match self.config.present_mode {
-            wgpu::PresentMode::Fifo => wgpu::PresentMode::Immediate,
+            wgpu::PresentMode::Fifo => wgpu::PresentMode::AutoNoVsync,
             _ => wgpu::PresentMode::Fifo,
         };
         self.surface.configure(&self.device, &self.config);
