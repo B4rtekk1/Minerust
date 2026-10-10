@@ -103,7 +103,7 @@ impl State {
     /// 4. **Shader compilation** – compiles all WGSL shaders (terrain, water,
     ///    sky, sun, UI, Hi-Z, depth-resolve, composite).
     /// 5. **Buffers & textures** – allocates the uniform buffer,
-    ///    SSR color/depth targets, MSAA resolve targets, and the
+    ///    Opaque scene color, MSAA resolve targets, and the
     ///    hierarchical-Z (Hi-Z) mip chain.
     /// 6. **Bind group layouts & bind groups** – wires textures, samplers, and
     ///    buffers to the correct shader bindings for each pipeline.
@@ -264,7 +264,7 @@ impl State {
             height: size.height,
             // Prefer Immediate, then Mailbox, then Fifo according to support.
             // In particular, Wayland surfaces may not support Immediate.
-            present_mode: wgpu::PresentMode::AutoNoVsync,
+            present_mode: minerust::DEFAULT_PRESENT_MODE,
             // A game window must never expose the desktop through its
             // swap-chain. Prefer an opaque compositor surface; premultiplied
             // alpha occasionally makes the whole window translucent on Windows.
@@ -452,14 +452,12 @@ impl State {
         // SSR (Screen-Space Reflections) targets
         // ------------------------------------------------------------------ //
 
-        // The terrain pass renders into these textures first.  The water
-        // shader then samples them to produce planar reflections of the scene
-        // above the water surface.
-        let (ssr_color_texture, ssr_color_view, ssr_depth_texture, ssr_depth_view) =
+        // Resolve opaque color before water samples it for distortion.
+        // The active water shader uses no separate scene-depth texture.
+        let (ssr_color_texture, ssr_color_view) =
             super::resize::create_ssr_targets(&device, &config, surface_format);
 
-        // Nearest-neighbor sampler for SSR lookups; bilinear filtering would
-        // blur the reflected image and cause incorrect depth comparisons.
+        // Keep the existing nearest-neighbor sampling of opaque scene color.
         let ssr_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("SSR Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -524,7 +522,6 @@ impl State {
 
         // Extends the base uniform/atlas layout with SSR and flow-map bindings:
         //   8 – SSR color texture (fragment)
-        //   9 – SSR depth texture  (fragment)
         //   10 – SSR sampler       (fragment)
         //   11 – flow map texture  (fragment)
         //   12 – flow sampler      (fragment)
@@ -564,18 +561,6 @@ impl State {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // SSR depth – used to detect where the reflection ray intersects
-                    // the opaque scene for refraction and ray termination.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 9,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -625,10 +610,6 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(&ssr_color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -1172,9 +1153,8 @@ impl State {
         // ------------------------------------------------------------------ //
 
         // After the MSAA opaque pass we resolve the multisampled depth buffer
-        // into two single-sampled outputs:
-        //   • `hiz_mips[0]`    – conservative max-depth seed for Hi-Z
-        //   • `ssr_depth_view` – closest-depth copy for water refraction
+        // directly into the half-resolution conservative Hi-Z seed.
+        // The water shader reads opaque color and needs no depth copy.
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Resolve Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_resolve.wgsl").into()),
@@ -1189,22 +1169,12 @@ impl State {
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
                             view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: true, // must match the MSAA depth texture
+                            multisampled: true,
                         },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::R32Float,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -1392,17 +1362,17 @@ impl State {
         // Hierarchical-Z (Hi-Z) occlusion buffer
         // ------------------------------------------------------------------ //
 
-        // The Hi-Z buffer is a full mip-chain of R32Float textures that
+        // The Hi-Z buffer is a half-resolution mip-chain of R32Float textures that
         // approximates the scene depth at progressively coarser resolutions.
         // The occlusion-cull compute shader compares each chunk's AABB against
         // the nearest (finest) mip level that covers the AABB's projected
         // screen extent, rejecting chunks whose farthest depth sample is
         // shallower than the depth at that mip level.
 
-        let hiz_size = [config.width, config.height];
-        let hiz_max_dim = config.width.max(config.height);
+        let hiz_size = minerust::render::depth::hiz_base_size([config.width, config.height]);
+        let hiz_max_dim = hiz_size[0].max(hiz_size[1]);
         // Number of mip levels needed to downsample to 1×1.
-        let hiz_mips_count = (hiz_max_dim as f32).log2().floor() as u32 + 1;
+        let hiz_mips_count = hiz_max_dim.ilog2() + 1;
 
         let hiz_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Hi-Z Texture"),
@@ -1518,10 +1488,6 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&hiz_mips[0]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&ssr_depth_view),
                 },
             ],
         });
@@ -1662,15 +1628,11 @@ impl State {
             player_model_vertex_capacity: 0,
             player_model_index_capacity: 0,
             chunk_loader,
-            last_gen_player_cx: i32::MIN,
-            last_gen_player_cz: i32::MIN,
             visible_chunk_columns: Vec::new(),
             visible_chunk_cache_center: (i32::MIN, i32::MIN),
             visible_chunk_columns_dirty: true,
             ssr_color_texture,
             ssr_color_view,
-            ssr_depth_texture,
-            ssr_depth_view,
             ssr_sampler,
             flow_map_texture,
             flow_map_view,
@@ -1712,6 +1674,7 @@ impl State {
             hiz_bind_groups,
             hiz_bind_group_layout,
             hiz_size,
+            hiz_valid: false,
             depth_resolve_pipeline,
             depth_resolve_bind_group,
             supports_indirect_count,

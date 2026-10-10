@@ -1,3 +1,4 @@
+use crate::constants::MAX_PENDING_MESHES;
 use crate::render::quad::PackedQuad;
 use crate::world::World;
 use crate::world::generator::ChunkGenerator;
@@ -72,8 +73,8 @@ impl MeshLoader {
     /// # Panics
     /// Panics if any worker thread cannot be spawned.
     pub fn new(world: Arc<parking_lot::RwLock<World>>, worker_count: usize) -> Self {
-        let (request_tx, request_rx) = bounded::<MeshRequest>(256);
-        let (result_tx, result_rx) = bounded::<MeshJobResult>(256);
+        let (request_tx, request_rx) = bounded::<MeshRequest>(MAX_PENDING_MESHES);
+        let (result_tx, result_rx) = bounded::<MeshJobResult>(MAX_PENDING_MESHES);
         let seed = world.read().seed;
 
         for i in 0..worker_count {
@@ -96,10 +97,8 @@ impl MeshLoader {
 
                         let result = match snapshot {
                             Some(snapshot) => {
-                                let meshes = World::build_subchunk_mesh_from_snapshot(
-                                    &generator,
-                                    &snapshot,
-                                );
+                                let meshes =
+                                    World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
                                 MeshJobResult::Built(MeshResult {
                                     cx: req.cx,
                                     cz: req.cz,
@@ -116,8 +115,7 @@ impl MeshLoader {
                             },
                         };
 
-                        if tx.send(result).is_err()
-                        {
+                        if tx.send(result).is_err() {
                             // The result receiver has been dropped — the
                             // MeshLoader is shutting down, so exit the loop.
                             break;
@@ -148,6 +146,9 @@ impl MeshLoader {
         let key = (cx, cz, sy);
         if self.pending.contains(&key) {
             return true;
+        }
+        if self.pending.len() >= MAX_PENDING_MESHES {
+            return false;
         }
         match self.request_tx.try_send(MeshRequest { cx, cz, sy }) {
             Ok(_) => {
@@ -194,5 +195,38 @@ impl MeshLoader {
     /// a worker. Useful for diagnosing streaming backlog.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_unpolled_jobs_remain_inside_pending_budget() {
+        let (request_tx, request_rx) = bounded(MAX_PENDING_MESHES);
+        let (result_tx, result_rx) = bounded(MAX_PENDING_MESHES);
+        let mut loader = MeshLoader {
+            request_tx,
+            result_rx,
+            pending: HashSet::new(),
+        };
+        for cx in 0..MAX_PENDING_MESHES as i32 {
+            assert!(loader.request_mesh(cx, 0, 0));
+            // Model a worker that already consumed the request.
+            let req = request_rx.try_recv().unwrap();
+            result_tx
+                .send(MeshJobResult::Cancelled {
+                    cx: req.cx,
+                    cz: req.cz,
+                    sy: req.sy,
+                })
+                .unwrap();
+        }
+        assert!(loader.request_mesh(0, 0, 0)); // Duplicate is already accepted.
+        assert!(!loader.request_mesh(MAX_PENDING_MESHES as i32, 0, 0));
+        assert!(loader.poll_result().is_none());
+        assert_eq!(loader.pending_count(), 0);
+        assert!(loader.request_mesh(MAX_PENDING_MESHES as i32, 0, 0));
     }
 }

@@ -1,3 +1,4 @@
+pub mod depth;
 pub mod frustum;
 pub mod indirect;
 pub mod mesh;

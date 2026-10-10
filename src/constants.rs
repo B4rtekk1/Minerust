@@ -11,6 +11,17 @@ pub const RENDER_DISTANCE: i32 = 32;
 pub const SIMULATION_DISTANCE: i32 = RENDER_DISTANCE / 2;
 pub const GENERATION_DISTANCE: i32 = RENDER_DISTANCE + 2;
 pub const SEA_LEVEL: i32 = 64;
+
+// Generation lattices and subchunk storage require exact cell boundaries.
+const _: () = {
+    assert!(CHUNK_SIZE > 0 && WORLD_HEIGHT > 0 && SUBCHUNK_HEIGHT > 0);
+    assert!(WORLD_HEIGHT % SUBCHUNK_HEIGHT == 0);
+    assert!(CAVE_CELL_SIZE > 0);
+    assert!(CHUNK_SIZE % CAVE_CELL_SIZE == 0 && WORLD_HEIGHT % CAVE_CELL_SIZE == 0);
+    assert!(RENDER_DISTANCE >= 0 && GENERATION_DISTANCE >= RENDER_DISTANCE);
+    assert!(CHUNK_UNLOAD_DISTANCE >= GENERATION_DISTANCE);
+};
+
 /// Temporary day-cycle speed. Set to zero to keep the sun fixed at noon.
 pub const SUN_MOVEMENT_SPEED: f32 = 0.0;
 pub const CHUNK_UNLOAD_DISTANCE: i32 = RENDER_DISTANCE + 5;
@@ -33,6 +44,9 @@ pub const TEX_DEAD_BUSH: f32 = 15.0;
 pub const TEXTURE_SIZE: u32 = 256;
 pub const ATLAS_SIZE: u32 = 4;
 
+/// Default presentation mode; selects Immediate, Mailbox, or Fifo by support.
+pub const DEFAULT_PRESENT_MODE: wgpu::PresentMode = wgpu::PresentMode::AutoNoVsync;
+
 /// Maximum number of chunk-generation requests submitted to workers per frame.
 pub const MAX_CHUNKS_PER_FRAME: usize = 8;
 /// Maximum number of subchunk mesh-build requests submitted to workers per frame.
@@ -43,10 +57,16 @@ pub const MAX_MESH_BUILDS_PER_FRAME: usize = 8;
 /// over consecutive frames.
 pub const MAX_CHUNK_COMMITS_PER_FRAME: usize = 2;
 /// Maximum number of completed mesh results committed/uploaded per frame.
-/// A GPU face-mesh dispatch currently creates and submits a command buffer per
-/// result, so keeping this small prevents a completed-worker burst from
-/// stalling the render thread.
+/// Limits main-thread mesh processing and GPU buffer uploads when many workers
+/// finish together, keeping completed-worker bursts spread over several frames.
 pub const MAX_MESH_COMMITS_PER_FRAME: usize = 2;
+/// Maximum outstanding requests in each background pipeline.
+pub const MAX_PENDING_CHUNKS: usize = 256;
+pub const MAX_PENDING_MESHES: usize = 256;
+/// CPU threads reserved for rendering, input and other foreground work.
+pub const RESERVED_CPU_THREADS: usize = 2;
+pub const MAX_CHUNK_WORKERS: usize = 8;
+pub const MAX_MESH_WORKERS: usize = 6;
 pub const ASYNC_WORKER_COUNT: usize = 4;
 
 pub const PLAYER_HEIGHT: f32 = 1.8;
@@ -63,17 +83,42 @@ pub const DEFAULT_FOV: f32 = 70.0 * std::f32::consts::PI / 180.0;
 pub const BLOCK_SIZE: f32 = 0.98;
 pub const BLOCK_OFFSET: f32 = (1.0 - BLOCK_SIZE) / 2.0;
 
+// The two pools share one budget. Each needs at least one worker even on
+// single-core systems; larger machines leave room for foreground work.
+fn worker_counts(cores: usize) -> (usize, usize) {
+    let budget = cores.saturating_sub(RESERVED_CPU_THREADS).max(2);
+    let mesh = (budget / 2).clamp(1, MAX_MESH_WORKERS);
+    let chunk = (budget - mesh).clamp(1, MAX_CHUNK_WORKERS);
+    (chunk, mesh)
+}
+
 pub fn get_chunk_worker_count() -> usize {
     let cores = num_cpus::get();
-    let workers = ((cores.saturating_sub(2)) / 2).max(2).min(8);
+    let (chunk, mesh) = worker_counts(cores);
     log(
         LogLevel::Info,
-        &format!("CPU cores: {}, chunk workers: {}", cores, workers),
+        &format!("CPU cores: {cores}, chunk workers: {chunk}, mesh workers: {mesh}"),
     );
-    workers
+    chunk
 }
 
 pub fn get_mesh_worker_count() -> usize {
-    let cores = num_cpus::get();
-    ((cores.saturating_sub(2)) / 2).max(2).min(6)
+    worker_counts(num_cpus::get()).1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_pools_share_a_bounded_cpu_budget() {
+        for cores in 0usize..=256 {
+            let (chunk, mesh) = worker_counts(cores);
+            assert!((1..=MAX_CHUNK_WORKERS).contains(&chunk));
+            assert!((1..=MAX_MESH_WORKERS).contains(&mesh));
+            assert!(chunk + mesh <= cores.saturating_sub(RESERVED_CPU_THREADS).max(2));
+        }
+        assert_eq!(worker_counts(4), (1, 1));
+        assert_eq!(worker_counts(8), (3, 3));
+    }
 }

@@ -1,5 +1,5 @@
 use minerust::camera::check_intersection;
-use minerust::{CHUNK_SIZE, RENDER_DISTANCE, World};
+use minerust::{CHUNK_SIZE, World};
 use winit::event::MouseButton;
 use winit::window::CursorGrabMode;
 
@@ -96,7 +96,7 @@ impl State {
     /// AutoNoVsync falls back to a supported mode; Fifo is mandatory.
     fn toggle_present_mode(&mut self) {
         self.config.present_mode = match self.config.present_mode {
-            wgpu::PresentMode::Fifo => wgpu::PresentMode::AutoNoVsync,
+            wgpu::PresentMode::Fifo => minerust::DEFAULT_PRESENT_MODE,
             _ => wgpu::PresentMode::Fifo,
         };
         self.surface.configure(&self.device, &self.config);
@@ -117,14 +117,6 @@ impl State {
             *world_lock = world;
             world_lock.generate_chunks_in_radius(spawn_cx, spawn_cz, 2);
         }
-        World::spawn_chunks_in_ring_async(
-            self.world.clone(),
-            spawn_cx,
-            spawn_cz,
-            2,
-            RENDER_DISTANCE,
-        );
-
         self.chunk_loader = minerust::ChunkLoader::new(seed);
         self.mesh_loader =
             minerust::MeshLoader::new(self.world.clone(), minerust::get_mesh_worker_count());
@@ -133,11 +125,10 @@ impl State {
         self.enqueue_all_dirty_meshes();
         self.indirect_manager.clear();
         self.water_indirect_manager.clear();
+        self.hiz_valid = false;
         self.visible_chunk_columns.clear();
         self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
         self.visible_chunk_columns_dirty = true;
-        self.last_gen_player_cx = i32::MIN;
-        self.last_gen_player_cz = i32::MIN;
         self.highlighted_block = None;
         self.input = Default::default();
         self.digging = Default::default();

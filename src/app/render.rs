@@ -1,3 +1,4 @@
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec3};
@@ -109,6 +110,49 @@ fn build_menu_input_box(
     (vertices, indices)
 }
 
+// Keep all HUD query slots current even when a GPU stage is disabled.
+fn write_empty_gpu_interval(
+    encoder: &mut wgpu::CommandEncoder,
+    query_set: Option<&wgpu::QuerySet>,
+    start: u32,
+    end: u32,
+) {
+    if let Some(query_set) = query_set {
+        let _pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Inactive GPU Stage Timestamps"),
+            timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(start),
+                end_of_pass_write_index: Some(end),
+            }),
+        });
+    }
+}
+
+// Sorting relative coordinates once preserves the previous distance/tie order
+// without sorting thousands of visible columns after each streamed insertion.
+static RENDER_OFFSETS: LazyLock<Vec<(i32, i32)>> = LazyLock::new(|| {
+    let mut offsets: Vec<_> = (-RENDER_DISTANCE..=RENDER_DISTANCE)
+        .flat_map(|dx| (-RENDER_DISTANCE..=RENDER_DISTANCE).map(move |dz| (dx, dz)))
+        .collect();
+    offsets.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+    offsets
+});
+
+fn collect_visible_columns(
+    out: &mut Vec<(i32, i32)>,
+    center: (i32, i32),
+    mut is_loaded: impl FnMut(i32, i32) -> bool,
+) {
+    out.clear();
+    for &(dx, dz) in RENDER_OFFSETS.iter() {
+        let (cx, cz) = (center.0 + dx, center.1 + dz);
+        if is_loaded(cx, cz) {
+            out.push((cx, cz));
+        }
+    }
+}
+
 impl State {
     fn rebuild_visible_chunk_cache(&mut self, player_cx: i32, player_cz: i32) {
         if !self.visible_chunk_columns_dirty
@@ -117,23 +161,15 @@ impl State {
             return;
         }
 
-        self.visible_chunk_columns.clear();
         {
             let world = self.world.read();
-            for cx in (player_cx - RENDER_DISTANCE)..=(player_cx + RENDER_DISTANCE) {
-                for cz in (player_cz - RENDER_DISTANCE)..=(player_cz + RENDER_DISTANCE) {
-                    if world.chunks.contains_key(&(cx, cz)) {
-                        self.visible_chunk_columns.push((cx, cz));
-                    }
-                }
-            }
+            collect_visible_columns(
+                &mut self.visible_chunk_columns,
+                (player_cx, player_cz),
+                |cx, cz| world.chunks.contains_key(&(cx, cz)),
+            );
         }
 
-        self.visible_chunk_columns.sort_by_key(|&(cx, cz)| {
-            let dx = cx - player_cx;
-            let dz = cz - player_cz;
-            dx * dx + dz * dz
-        });
         self.visible_chunk_cache_center = (player_cx, player_cz);
         self.visible_chunk_columns_dirty = false;
     }
@@ -155,8 +191,7 @@ impl State {
     /// 5. **Opaque pass** – sky dome -> terrain -> remote player models -> sun/moon.
     ///    Resolves MSAA into `ssr_color_view` for later water reflections.
     /// 6. **Depth resolve compute** – resolves the multisampled depth buffer
-    ///    into `ssr_depth_view` (for water refraction) and the first Hi-Z mip
-    ///    level (for next-frame occlusion culling).
+    ///    directly into a half-resolution Hi-Z base for next-frame culling.
     /// 7. **Hi-Z generation** (compute) – downsamples the depth mip chain.
     /// 8. **Transparent pass** – water surfaces, alpha-blended on top of the
     ///    opaque result.  Resolves MSAA into `scene_color_view`.
@@ -463,7 +498,7 @@ impl State {
         // A zero Hi-Z size makes the compute shader accept every
         // frustum-visible subchunk. F4 uses this to distinguish temporal
         // occlusion artifacts from a meshing-streaming backlog.
-        let hiz_size_f = if self.occlusion_culling_enabled {
+        let hiz_size_f = if self.occlusion_culling_enabled && self.hiz_valid {
             [self.hiz_size[0] as f32, self.hiz_size[1] as f32]
         } else {
             [0.0, 0.0]
@@ -590,7 +625,7 @@ impl State {
         // The opaque pass above produced the depth buffer, eliminating the
         // former terrain depth prepass. Culling at the start of this frame reads
         // the previous pyramid; this freshly built pyramid is consumed next frame.
-        if render_world_scene {
+        if render_world_scene && self.occlusion_culling_enabled {
             let mut depth_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Depth Resolve Compute Pass"),
                 timestamp_writes: timestamp_query_set.as_ref().map(|query_set| {
@@ -604,8 +639,8 @@ impl State {
             depth_resolve_pass.set_pipeline(&self.depth_resolve_pipeline);
             depth_resolve_pass.set_bind_group(0, &self.depth_resolve_bind_group, &[]);
             depth_resolve_pass.dispatch_workgroups(
-                (self.config.width + 15) / 16,
-                (self.config.height + 15) / 16,
+                self.hiz_size[0].div_ceil(16),
+                self.hiz_size[1].div_ceil(16),
                 1,
             );
             drop(depth_resolve_pass);
@@ -633,6 +668,16 @@ impl State {
                 let mip_height = (self.hiz_size[1] / div).max(1);
                 hiz_pass.dispatch_workgroups((mip_width + 15) / 16, (mip_height + 15) / 16, 1);
             }
+            // A 1x1 base has no downsampling passes but still needs fresh
+            // timestamps; otherwise the HUD would reuse queries from old frames.
+            if self.hiz_bind_groups.is_empty() {
+                write_empty_gpu_interval(&mut encoder, timestamp_query_set.as_ref(), 6, 7);
+            }
+            self.hiz_valid = true;
+        } else {
+            self.hiz_valid = false;
+            write_empty_gpu_interval(&mut encoder, timestamp_query_set.as_ref(), 4, 5);
+            write_empty_gpu_interval(&mut encoder, timestamp_query_set.as_ref(), 6, 7);
         }
 
         // ── Transparent (water) pass ──────────────────────────────────────── //
@@ -1589,4 +1634,32 @@ impl State {
     /// - `_width`     – Surface width in pixels (unused by the stub).
     /// - `_height`    – Surface height in pixels (unused by the stub).
     pub fn render_remote_players(&mut self, _view_proj: &glam::Mat4, _width: f32, _height: f32) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_visibility_order_matches_full_sort_for_sparse_and_loaded_worlds() {
+        for center in [(0, 0), (-21, 34)] {
+            for sparse in [false, true] {
+                let is_loaded = |cx: i32, cz: i32| !sparse || (cx + cz).rem_euclid(3) == 0;
+                let mut expected = Vec::new();
+                for cx in center.0 - RENDER_DISTANCE..=center.0 + RENDER_DISTANCE {
+                    for cz in center.1 - RENDER_DISTANCE..=center.1 + RENDER_DISTANCE {
+                        if is_loaded(cx, cz) {
+                            expected.push((cx, cz));
+                        }
+                    }
+                }
+                expected.sort_by_key(|&(cx, cz)| (cx - center.0).pow(2) + (cz - center.1).pow(2));
+                let mut actual = vec![(i32::MIN, i32::MIN)];
+                collect_visible_columns(&mut actual, center, is_loaded);
+                assert_eq!(actual, expected);
+                collect_visible_columns(&mut actual, center, |_, _| false);
+                assert!(actual.is_empty());
+            }
+        }
+    }
 }

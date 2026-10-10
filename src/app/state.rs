@@ -17,6 +17,8 @@ use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 use rustc_hash::FxHashSet;
 
 pub(super) const MSAA_SAMPLE_COUNT: u32 = 4;
+// depth_resolve.wgsl explicitly loads the four depth samples.
+const _: () = assert!(MSAA_SAMPLE_COUNT == 4);
 
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
 #[derive(Default)]
@@ -275,7 +277,7 @@ pub struct State {
     /// Full-screen composite pipeline that resolves MSAA and applies post-FX.
     pub composite_pipeline: wgpu::RenderPipeline,
     /// Compute pipeline that resolves the MSAA depth buffer into Hi-Z seed
-    /// level 0 and the single-sampled SSR depth texture.
+    /// half-resolution Hi-Z base in one pass.
     pub depth_resolve_pipeline: wgpu::ComputePipeline,
 
     // -------------------------------------------------------------------------
@@ -314,7 +316,7 @@ pub struct State {
     pub terrain_quad_bind_group: wgpu::BindGroup,
     /// Descriptor and subchunk metadata buffers for water vertex pulling.
     pub water_quad_bind_group: wgpu::BindGroup,
-    /// Bind group for the water pass (SSR color/depth textures + sampler).
+    /// Bind group for the water pass (opaque scene color + sampler).
     pub water_bind_group: wgpu::BindGroup,
     /// Layout of `water_bind_group`; kept alive so the bind group can be rebuilt
     /// when the window resizes.
@@ -346,10 +348,6 @@ pub struct State {
     pub ssr_color_texture: wgpu::Texture,
     /// View of `ssr_color_texture`.
     pub ssr_color_view: wgpu::TextureView,
-    /// Single-sampled depth buffer used by the SSR pass for ray-marching.
-    pub ssr_depth_texture: wgpu::Texture,
-    /// View of `ssr_depth_texture` as an `R32Float` texture.
-    pub ssr_depth_view: wgpu::TextureView,
     /// Sampler used when reading SSR textures in the water and composite passes.
     pub ssr_sampler: wgpu::Sampler,
     /// The 16-layer `Texture2DArray` holding all block textures.
@@ -388,8 +386,10 @@ pub struct State {
     pub hiz_bind_groups: Vec<wgpu::BindGroup>,
     /// Layout shared by all `hiz_bind_groups`.
     pub hiz_bind_group_layout: wgpu::BindGroupLayout,
-    /// Pixel dimensions of the Hi-Z base level `[width, height]`.
+    /// Half-resolution pixel dimensions of the Hi-Z base level.
     pub hiz_size: [u32; 2],
+    /// Whether the pyramid has been produced for the current world and surface.
+    pub hiz_valid: bool,
 
     // -------------------------------------------------------------------------
     // World, camera, and input
@@ -474,10 +474,6 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Submits chunk generation requests to background threads and collects results.
     pub chunk_loader: ChunkLoader,
-    /// Chunk-column X coordinate of the player's position on the last generation scan.
-    pub last_gen_player_cx: i32,
-    /// Chunk-column Z coordinate of the player's position on the last generation scan.
-    pub last_gen_player_cz: i32,
     /// Submits subchunk mesh-build requests to background threads and collects results.
     pub mesh_loader: minerust::MeshLoader,
     /// Dirty subchunks awaiting a mesh-worker request.  This is populated at
@@ -644,9 +640,6 @@ pub struct State {
 /// Gathering all read queries in one pass minimizes the time the lock is held
 /// and avoids repeated acquisitions across the `update` method.
 pub struct WorldSnapshot {
-    /// Chunks within `GENERATION_DISTANCE` that are not yet loaded or pending.
-    /// Each entry is `(chunk_x, chunk_z, squared_distance_priority)`.
-    pub missing_chunks: Vec<(i32, i32, i32)>,
     /// Result of the block raycast: `(hit_x, hit_y, hit_z, face_nx, face_ny, face_nz)`,
     /// or `None` if the ray missed or no mouse button is held.
     pub raycast_result: Option<(i32, i32, i32, i32, i32, i32)>,

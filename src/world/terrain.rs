@@ -63,6 +63,14 @@ pub struct World {
     generator: ChunkGenerator,
 }
 
+/// Evicted column keys and the rendered geometry removed with them.
+#[derive(Default)]
+pub struct ChunkUnloadResult {
+    pub chunks: Vec<(i32, i32)>,
+    pub rendered_columns: u32,
+    pub rendered_subchunks: u32,
+}
+
 const MESH_CACHE_PAD: usize = 1;
 const MESH_CACHE_SIZE: usize = CHUNK_SIZE as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_HEIGHT: usize = SUBCHUNK_HEIGHT as usize + MESH_CACHE_PAD * 2;
@@ -178,33 +186,44 @@ impl World {
     /// The list of `(cx, cz)` keys that were removed.  The caller uses this
     /// to invalidate GPU buffers for those chunk columns.
     pub fn update_chunks_around_player(&mut self, player_x: f32, player_z: f32) -> Vec<(i32, i32)> {
+        self.unload_chunks_around_player(player_x, player_z).chunks
+    }
+
+    /// Performs one unload sweep and counts rendered geometry only for removed
+    /// columns. No map traversal is needed while the player stays in a column.
+    pub fn unload_chunks_around_player(
+        &mut self,
+        player_x: f32,
+        player_z: f32,
+    ) -> ChunkUnloadResult {
         let player_cx = (player_x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (player_z / CHUNK_SIZE as f32).floor() as i32;
 
         // Early exit: player is still in the same chunk column.
         if player_cx == self.last_cleanup_cx && player_cz == self.last_cleanup_cz {
-            return Vec::new();
+            return ChunkUnloadResult::default();
         }
         self.last_cleanup_cx = player_cx;
         self.last_cleanup_cz = player_cz;
 
-        // Collect keys to remove; can't remove while iterating.
-        let chunks_to_remove: Vec<(i32, i32)> = self
-            .chunks
-            .keys()
-            .filter(|(cx, cz)| {
-                let dx = (*cx - player_cx).abs();
-                let dz = (*cz - player_cz).abs();
-                dx > CHUNK_UNLOAD_DISTANCE || dz > CHUNK_UNLOAD_DISTANCE
-            })
-            .cloned()
-            .collect();
-
-        for key in &chunks_to_remove {
-            self.chunks.remove(key);
-        }
-
-        chunks_to_remove
+        let mut removed = ChunkUnloadResult::default();
+        self.chunks.retain(|&(cx, cz), chunk| {
+            if (cx - player_cx).abs() <= CHUNK_UNLOAD_DISTANCE
+                && (cz - player_cz).abs() <= CHUNK_UNLOAD_DISTANCE
+            {
+                return true;
+            }
+            let subchunks = chunk
+                .subchunks
+                .iter()
+                .filter(|subchunk| subchunk.num_quads > 0 || subchunk.num_water_quads > 0)
+                .count() as u32;
+            removed.rendered_columns += u32::from(subchunks > 0);
+            removed.rendered_subchunks += subchunks;
+            removed.chunks.push((cx, cz));
+            false
+        });
+        removed
     }
 
     // ── Generator pass-throughs ───────────────────────────────────────────── //
@@ -363,21 +382,19 @@ impl World {
 
         const SAMPLE_OFFSETS: [(i32, i32); 5] = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)];
 
-        let start_y = (y + 1).clamp(0, WORLD_HEIGHT);
         let mut visibility_sum = 0.0;
-
         for (dx, dz) in SAMPLE_OFFSETS {
-            let mut column_visibility = 1.0;
-
-            for sample_y in start_y..WORLD_HEIGHT {
-                let block = self.get_block(x + dx, sample_y, z + dz);
-                if block.is_solid_opaque() {
-                    column_visibility = 0.0;
-                    break;
-                }
+            let wx = x + dx;
+            let wz = z + dz;
+            let highest = self
+                .chunks
+                .get(&(wx.div_euclid(CHUNK_SIZE), wz.div_euclid(CHUNK_SIZE)))
+                .map_or(-1, |chunk| {
+                    chunk.highest_opaque_y(wx.rem_euclid(CHUNK_SIZE), wz.rem_euclid(CHUNK_SIZE))
+                });
+            if i32::from(highest) <= y {
+                visibility_sum += 1.0;
             }
-
-            visibility_sum += column_visibility;
         }
 
         visibility_sum / SAMPLE_OFFSETS.len() as f32
@@ -500,10 +517,7 @@ impl World {
         for bx in min_x..=max_x {
             for by in min_y..=max_y {
                 for bz in min_z..=max_z {
-                    let chunk_coords = (
-                        bx.div_euclid(CHUNK_SIZE),
-                        bz.div_euclid(CHUNK_SIZE),
-                    );
+                    let chunk_coords = (bx.div_euclid(CHUNK_SIZE), bz.div_euclid(CHUNK_SIZE));
                     if !self.chunks.contains_key(&chunk_coords) {
                         return false;
                     }
@@ -605,73 +619,58 @@ impl World {
             .get(subchunk_y as usize)?
             .mesh_version;
 
-        let base_x = chunk_x * CHUNK_SIZE;
         let base_y = subchunk_y * SUBCHUNK_HEIGHT;
-        let base_z = chunk_z * CHUNK_SIZE;
 
         let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
         let mut sky_height_cache = [-1i16; MESH_SKY_CACHE_LEN];
         let mut has_blocks = false;
 
-        for px in 0..MESH_CACHE_SIZE as i32 {
-            for py in 0..MESH_CACHE_HEIGHT as i32 {
-                for pz in 0..MESH_CACHE_SIZE as i32 {
-                    let wx = base_x + px - MESH_CACHE_PAD as i32;
-                    let wy = base_y + py - MESH_CACHE_PAD as i32;
-                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
-                    let block = if wy < 0 || wy >= WORLD_HEIGHT {
-                        BlockType::Air
-                    } else {
-                        let cx = wx.div_euclid(CHUNK_SIZE);
-                        let cz = wz.div_euclid(CHUNK_SIZE);
-                        let lx = wx.rem_euclid(CHUNK_SIZE);
-                        let lz = wz.rem_euclid(CHUNK_SIZE);
-                        if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                            chunk.get_block(lx, wy, lz)
-                        } else if wy < SEA_LEVEL {
-                            BlockType::Water
-                        } else {
-                            BlockType::Air
-                        }
-                    };
+        // Resolve the nine columns once, rather than hashing for every voxel.
+        let neighbors: [[Option<&Chunk>; 3]; 3] = std::array::from_fn(|nx| {
+            std::array::from_fn(|nz| {
+                self.chunks
+                    .get(&(chunk_x + nx as i32 - 1, chunk_z + nz as i32 - 1))
+            })
+        });
+        for px in 0..MESH_CACHE_SIZE {
+            let x = px as i32 - MESH_CACHE_PAD as i32;
+            let nx = (x.div_euclid(CHUNK_SIZE) + 1) as usize;
+            let lx = x.rem_euclid(CHUNK_SIZE);
+            for pz in 0..MESH_CACHE_SIZE {
+                let z = pz as i32 - MESH_CACHE_PAD as i32;
+                let nz = (z.div_euclid(CHUNK_SIZE) + 1) as usize;
+                let lz = z.rem_euclid(CHUNK_SIZE);
+                let chunk = neighbors[nx][nz];
+                sky_height_cache[px * MESH_CACHE_SIZE + pz] =
+                    chunk.map_or(-1, |chunk| chunk.highest_opaque_y(lx, lz));
 
+                for py in 0..MESH_CACHE_HEIGHT {
+                    let wy = base_y + py as i32 - MESH_CACHE_PAD as i32;
+                    let block = if !(0..WORLD_HEIGHT).contains(&wy) {
+                        BlockType::Air
+                    } else if let Some(chunk) = chunk {
+                        chunk.get_block(lx, wy, lz)
+                    } else if wy < SEA_LEVEL {
+                        BlockType::Water
+                    } else {
+                        BlockType::Air
+                    };
                     if px > 0
-                        && px < (MESH_CACHE_SIZE - 1) as i32
+                        && px < MESH_CACHE_SIZE - 1
                         && py > 0
-                        && py < (MESH_CACHE_HEIGHT - 1) as i32
+                        && py < MESH_CACHE_HEIGHT - 1
                         && pz > 0
-                        && pz < (MESH_CACHE_SIZE - 1) as i32
+                        && pz < MESH_CACHE_SIZE - 1
                         && block != BlockType::Air
                     {
                         has_blocks = true;
                     }
-
-                    block_cache[(px as usize) * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE
-                        + (py as usize) * MESH_CACHE_SIZE
-                        + (pz as usize)] = block;
+                    block_cache[(px * MESH_CACHE_HEIGHT + py) * MESH_CACHE_SIZE + pz] = block;
                 }
             }
         }
-
-        if has_blocks {
-            for px in 0..MESH_CACHE_SIZE as i32 {
-                for pz in 0..MESH_CACHE_SIZE as i32 {
-                    let wx = base_x + px - MESH_CACHE_PAD as i32;
-                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
-                    let cx = wx.div_euclid(CHUNK_SIZE);
-                    let cz = wz.div_euclid(CHUNK_SIZE);
-                    let lx = wx.rem_euclid(CHUNK_SIZE);
-                    let lz = wz.rem_euclid(CHUNK_SIZE);
-                    let highest_opaque = self
-                        .chunks
-                        .get(&(cx, cz))
-                        .map(|chunk| chunk.highest_opaque_y(lx, lz))
-                        .unwrap_or(-1);
-
-                    sky_height_cache[(px as usize) * MESH_CACHE_SIZE + pz as usize] =
-                        highest_opaque;
-                }
-            }
+        if !has_blocks {
+            sky_height_cache.fill(-1);
         }
 
         Some(SubchunkMeshSnapshot {
@@ -709,12 +708,11 @@ impl World {
         Vec<crate::render::quad::PackedQuad>,
         Vec<crate::render::quad::PackedQuad>,
     ) {
-        let mut terrain_quads = Vec::with_capacity(512);
-        let mut water_quads = Vec::with_capacity(128);
-
         if !snapshot.has_blocks {
             return (Vec::new(), Vec::new());
         }
+        let mut terrain_quads = Vec::with_capacity(512);
+        let mut water_quads = Vec::with_capacity(128);
 
         let chunk_x = snapshot.chunk_x;
         let chunk_z = snapshot.chunk_z;
@@ -1419,6 +1417,220 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_snapshot(
+        world: &World,
+        chunk_x: i32,
+        chunk_z: i32,
+        subchunk_y: i32,
+    ) -> Option<SubchunkMeshSnapshot> {
+        let mesh_version = world
+            .chunks
+            .get(&(chunk_x, chunk_z))?
+            .subchunks
+            .get(subchunk_y as usize)?
+            .mesh_version;
+
+        let base_x = chunk_x * CHUNK_SIZE;
+        let base_y = subchunk_y * SUBCHUNK_HEIGHT;
+        let base_z = chunk_z * CHUNK_SIZE;
+
+        let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
+        let mut sky_height_cache = [-1i16; MESH_SKY_CACHE_LEN];
+        let mut has_blocks = false;
+
+        for px in 0..MESH_CACHE_SIZE as i32 {
+            for py in 0..MESH_CACHE_HEIGHT as i32 {
+                for pz in 0..MESH_CACHE_SIZE as i32 {
+                    let wx = base_x + px - MESH_CACHE_PAD as i32;
+                    let wy = base_y + py - MESH_CACHE_PAD as i32;
+                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
+                    let block = if !(0..WORLD_HEIGHT).contains(&wy) {
+                        BlockType::Air
+                    } else {
+                        let cx = wx.div_euclid(CHUNK_SIZE);
+                        let cz = wz.div_euclid(CHUNK_SIZE);
+                        let lx = wx.rem_euclid(CHUNK_SIZE);
+                        let lz = wz.rem_euclid(CHUNK_SIZE);
+                        if let Some(chunk) = world.chunks.get(&(cx, cz)) {
+                            chunk.get_block(lx, wy, lz)
+                        } else if wy < SEA_LEVEL {
+                            BlockType::Water
+                        } else {
+                            BlockType::Air
+                        }
+                    };
+
+                    if px > 0
+                        && px < (MESH_CACHE_SIZE - 1) as i32
+                        && py > 0
+                        && py < (MESH_CACHE_HEIGHT - 1) as i32
+                        && pz > 0
+                        && pz < (MESH_CACHE_SIZE - 1) as i32
+                        && block != BlockType::Air
+                    {
+                        has_blocks = true;
+                    }
+
+                    block_cache[(px as usize) * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE
+                        + (py as usize) * MESH_CACHE_SIZE
+                        + (pz as usize)] = block;
+                }
+            }
+        }
+
+        if has_blocks {
+            for px in 0..MESH_CACHE_SIZE as i32 {
+                for pz in 0..MESH_CACHE_SIZE as i32 {
+                    let wx = base_x + px - MESH_CACHE_PAD as i32;
+                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
+                    let cx = wx.div_euclid(CHUNK_SIZE);
+                    let cz = wz.div_euclid(CHUNK_SIZE);
+                    let lx = wx.rem_euclid(CHUNK_SIZE);
+                    let lz = wz.rem_euclid(CHUNK_SIZE);
+                    let highest_opaque = world
+                        .chunks
+                        .get(&(cx, cz))
+                        .map(|chunk| chunk.highest_opaque_y(lx, lz))
+                        .unwrap_or(-1);
+
+                    sky_height_cache[(px as usize) * MESH_CACHE_SIZE + pz as usize] =
+                        highest_opaque;
+                }
+            }
+        }
+
+        Some(SubchunkMeshSnapshot {
+            chunk_x,
+            chunk_z,
+            subchunk_y,
+            mesh_version,
+            has_blocks,
+            block_cache,
+            sky_height_cache,
+        })
+    }
+
+    fn snapshot_fixture() -> World {
+        let mut world = World::new_empty_with_seed(1);
+        // Include negative coordinates, diagonal padding, and an absent neighbor.
+        for cx in -2i32..=1 {
+            for cz in -2i32..=1 {
+                if (cx, cz) == (0, -1) {
+                    continue;
+                }
+                let mut chunk = Chunk::new(cx, cz);
+                for x in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        for y in [0, 15, 16, 63, 64, 127, 255] {
+                            let block = match (x + z + y + cx + cz).rem_euclid(4) {
+                                0 => BlockType::Stone,
+                                1 => BlockType::Water,
+                                2 => BlockType::Leaves,
+                                _ => BlockType::Air,
+                            };
+                            chunk.set_block_raw(x, y, z, block);
+                        }
+                    }
+                }
+                chunk.rebuild_metadata();
+                world.chunks.insert((cx, cz), chunk);
+            }
+        }
+        world
+    }
+
+    #[test]
+    fn cached_snapshot_matches_voxel_reference_at_world_and_chunk_boundaries() {
+        let world = snapshot_fixture();
+        for (cx, cz) in [(-1, -1), (0, 0)] {
+            for sy in 0..NUM_SUBCHUNKS {
+                let expected = reference_snapshot(&world, cx, cz, sy).unwrap();
+                let actual = world.snapshot_subchunk_mesh(cx, cz, sy).unwrap();
+                assert_eq!(actual.block_cache, expected.block_cache, "{cx}, {cz}, {sy}");
+                assert_eq!(actual.sky_height_cache, expected.sky_height_cache);
+                assert_eq!(actual.has_blocks, expected.has_blocks);
+                assert_eq!(actual.mesh_version, expected.mesh_version);
+            }
+        }
+        assert!(world.snapshot_subchunk_mesh(0, -1, 0).is_none());
+        assert!(world.snapshot_subchunk_mesh(0, 0, -1).is_none());
+        assert!(world.snapshot_subchunk_mesh(0, 0, NUM_SUBCHUNKS).is_none());
+    }
+
+    #[test]
+    fn cached_sky_visibility_matches_vertical_scan_after_edits() {
+        let mut world = snapshot_fixture();
+        for (x, z) in [(-1, -1), (0, 0), (15, 15), (16, -16), (32, 32)] {
+            // Removing the highest opaque block must expose the next one.
+            world.set_block(x, WORLD_HEIGHT - 1, z, BlockType::Stone);
+            world.set_block(x, WORLD_HEIGHT - 1, z, BlockType::Air);
+            for y in [-1, 0, 15, 63, 64, 127, 254, 255, 256] {
+                let expected = if y < 0 {
+                    0.0
+                } else {
+                    [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .into_iter()
+                        .filter(|&(dx, dz)| {
+                            !(y + 1..WORLD_HEIGHT)
+                                .any(|sy| world.get_block(x + dx, sy, z + dz).is_solid_opaque())
+                        })
+                        .count() as f32
+                        / 5.0
+                };
+                assert_eq!(world.sky_visibility_at(x, y, z), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn unload_counts_geometry_once_and_keeps_radius_boundary() {
+        let mut world = World::new_empty_with_seed(1);
+        for cx in [
+            -CHUNK_UNLOAD_DISTANCE,
+            CHUNK_UNLOAD_DISTANCE,
+            CHUNK_UNLOAD_DISTANCE + 1,
+        ] {
+            let mut chunk = Chunk::new(cx, 0);
+            chunk.subchunks[0].num_quads = 1;
+            chunk.subchunks[1].num_water_quads = 1;
+            world.chunks.insert((cx, 0), chunk);
+        }
+        let removed = world.unload_chunks_around_player(0.0, 0.0);
+        assert_eq!(removed.chunks, vec![(CHUNK_UNLOAD_DISTANCE + 1, 0)]);
+        assert_eq!(
+            (removed.rendered_columns, removed.rendered_subchunks),
+            (1, 2)
+        );
+        let repeated = world.unload_chunks_around_player(0.0, 0.0);
+        assert!(repeated.chunks.is_empty());
+        assert_eq!(repeated.rendered_subchunks, 0);
+        assert_eq!(world.chunks.len(), 2);
+        let moved = world.unload_chunks_around_player(-1.0, 0.0);
+        assert_eq!(moved.chunks, vec![(CHUNK_UNLOAD_DISTANCE, 0)]);
+    }
+
+    #[test]
+    #[ignore = "manual CPU snapshot benchmark; run with an optimized test profile"]
+    fn benchmark_mesh_snapshot() {
+        use std::{hint::black_box, time::Instant};
+        let world = snapshot_fixture();
+        let iterations = 20_000;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(reference_snapshot(black_box(&world), -1, -1, 3));
+        }
+        let reference = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(world.snapshot_subchunk_mesh(-1, -1, 3));
+        }
+        let cached = start.elapsed();
+        eprintln!(
+            "snapshot: {iterations} iterations, reference={reference:?}, cached={cached:?}, speedup={:.2}x",
+            reference.as_secs_f64() / cached.as_secs_f64()
+        );
+    }
 
     #[test]
     fn placing_player_block_on_grass_turns_support_to_dirt() {

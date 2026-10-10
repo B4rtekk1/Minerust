@@ -2,9 +2,8 @@ use glam::Vec3;
 use std::time::Instant;
 
 use minerust::{
-    BlockType, SubchunkKey, CHUNK_SIZE, CHUNK_UNLOAD_DISTANCE, GENERATION_DISTANCE,
-    MAX_CHUNKS_PER_FRAME, MAX_CHUNK_COMMITS_PER_FRAME, MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS,
-    SUBCHUNK_HEIGHT,
+    BlockType, CHUNK_SIZE, GENERATION_DISTANCE, MAX_CHUNK_COMMITS_PER_FRAME, MAX_CHUNKS_PER_FRAME,
+    MAX_MESH_COMMITS_PER_FRAME, NUM_SUBCHUNKS, SUBCHUNK_HEIGHT, SubchunkKey,
 };
 use rustc_hash::FxHashSet;
 
@@ -28,9 +27,15 @@ impl State {
             if entity.pickup_delay > 0.0 || entity.position.distance(player_position) >= 1.5 {
                 return true;
             }
-            match self.inventory.insert(entity.stack.clone(), minerust::item_registry()) {
+            match self
+                .inventory
+                .insert(entity.stack.clone(), minerust::item_registry())
+            {
                 None => false,
-                Some(remainder) => { entity.stack = remainder; true }
+                Some(remainder) => {
+                    entity.stack = remainder;
+                    true
+                }
             }
         });
         drop(world);
@@ -38,7 +43,10 @@ impl State {
     }
 
     fn spawn_block_drop(&mut self, block: BlockType, x: i32, y: i32, z: i32) {
-        let canonical = match block { BlockType::WoodLogX | BlockType::WoodLogZ => BlockType::Wood, other => other };
+        let canonical = match block {
+            BlockType::WoodLogX | BlockType::WoodLogZ => BlockType::Wood,
+            other => other,
+        };
         for stack in minerust::item_registry().roll_block_loot(canonical) {
             if let Some(remainder) = self
                 .inventory
@@ -324,8 +332,8 @@ impl State {
     /// 4. **Read-locked snapshot** – run camera physics and collect all
     ///    read-only world queries (raycast, eye-block check) in one pass to
     ///    avoid repeated lock acquisitions.
-    /// 5. **Chunk requests** – sort missing chunks by squared distance and
-    ///    submit up to `MAX_CHUNKS_PER_FRAME * 2` requests to the loader.
+    /// 5. **Chunk requests** – continue the nearest-first generation scan and
+    ///    submit up to `MAX_CHUNKS_PER_FRAME` requests to the loader.
     /// 6. **Digging** – accumulate break progress for the targeted block.
     /// 7. **World write** – insert newly generated chunks, break blocks, and
     ///    evict out-of-range chunks (all in a single write-lock window).
@@ -367,8 +375,6 @@ impl State {
 
         let player_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
         let player_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
-        let player_chunk_moved =
-            player_cx != self.last_gen_player_cx || player_cz != self.last_gen_player_cz;
 
         // --- 4. Read-locked snapshot ---
         // Acquire the read lock once and do all read-only queries inside a
@@ -396,26 +402,6 @@ impl State {
 
             if chunks_loaded {
                 self.camera.update(&*world, dt, &self.input);
-            }
-
-            // Collect chunks that need to be generated.
-            let mut missing_chunks = Vec::new();
-            if player_chunk_moved || self.chunk_loader.pending_count() < 32 {
-                for cx in (player_cx - GENERATION_DISTANCE)..=(player_cx + GENERATION_DISTANCE) {
-                    for cz in (player_cz - GENERATION_DISTANCE)..=(player_cz + GENERATION_DISTANCE)
-                    {
-                        if !world.chunks.contains_key(&(cx, cz))
-                            && !self.chunk_loader.is_pending(cx, cz)
-                        {
-                            // Use squared distance as the priority so nearer
-                            // chunks are generated first (no sqrt needed).
-                            let dx = cx - player_cx;
-                            let dz = cz - player_cz;
-                            let priority = dx * dx + dz * dz;
-                            missing_chunks.push((cx, cz, priority));
-                        }
-                    }
-                }
             }
 
             // Raycast whenever the player is actively controlling the camera
@@ -451,7 +437,6 @@ impl State {
             }
 
             WorldSnapshot {
-                missing_chunks,
                 raycast_result,
                 target_block,
                 eye_block,
@@ -470,20 +455,20 @@ impl State {
             .raycast_result
             .map(|(bx, by, bz, _, _, _)| (bx, by, bz));
 
-        // Update the cached player chunk position after releasing the lock.
-        if player_chunk_moved {
-            self.last_gen_player_cx = player_cx;
-            self.last_gen_player_cz = player_cz;
-        }
-
         // --- 5. Chunk requests ---
-        // Sort by ascending priority (smallest squared distance first) and cap
-        // at twice the per-frame chunk limit to allow some look-ahead.
+        // Visit a reusable near-to-far order, continuing where the previous
+        // frame stopped. Polled results are already on their way into World.
         let section_start = Instant::now();
-        let mut requests = snapshot.missing_chunks;
-        requests.sort_by_key(|&(_, _, priority)| priority);
-        for (cx, cz, priority) in requests.into_iter().take(MAX_CHUNKS_PER_FRAME * 2) {
-            self.chunk_loader.request_chunk(cx, cz, priority);
+        {
+            let world = self.world.read();
+            self.chunk_loader.request_missing_chunks(
+                (player_cx, player_cz),
+                MAX_CHUNKS_PER_FRAME,
+                |cx, cz| {
+                    world.chunks.contains_key(&(cx, cz))
+                        || completed_chunks.iter().any(|r| r.cx == cx && r.cz == cz)
+                },
+            );
         }
         self.frame_profile.chunk_requests_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
@@ -643,33 +628,11 @@ impl State {
                 }
             }
 
-            // Evict chunks that have moved outside the generation radius and
-            // collect their identifiers so their GPU data can be freed below.
-            // Statistics are maintained incrementally.  Traversing a removed
-            // column here is an infrequent streaming event, not render work.
-            let cleanup_cx = (self.camera.position.x / CHUNK_SIZE as f32).floor() as i32;
-            let cleanup_cz = (self.camera.position.z / CHUNK_SIZE as f32).floor() as i32;
-            let (removed_columns_rendered, removed_subchunks_rendered) = world
-                .chunks
-                .iter()
-                .filter(|&(&(cx, cz), _)| {
-                    (cx - cleanup_cx).abs() > CHUNK_UNLOAD_DISTANCE
-                        || (cz - cleanup_cz).abs() > CHUNK_UNLOAD_DISTANCE
-                })
-                .map(|(_, chunk)| {
-                    let subchunks = chunk
-                        .subchunks
-                        .iter()
-                        .filter(|subchunk| subchunk.num_quads > 0 || subchunk.num_water_quads > 0)
-                        .count() as u32;
-                    (u32::from(subchunks > 0), subchunks)
-                })
-                .fold((0, 0), |(columns, subchunks), (c, s)| {
-                    (columns + c, subchunks + s)
-                });
-
-            let removed_chunks =
-                world.update_chunks_around_player(self.camera.position.x, self.camera.position.z);
+            let unloaded =
+                world.unload_chunks_around_player(self.camera.position.x, self.camera.position.z);
+            let removed_columns_rendered = unloaded.rendered_columns;
+            let removed_subchunks_rendered = unloaded.rendered_subchunks;
+            let removed_chunks = unloaded.chunks;
 
             drop(world); // Release the write lock before GPU work.
 
@@ -696,7 +659,11 @@ impl State {
             let _ = self.inventory.consume_selected(1);
             self.hotbar_dirty = true;
         }
-        if broke_block && self.inventory.damage_selected_tool(minerust::item_registry()) {
+        if broke_block
+            && self
+                .inventory
+                .damage_selected_tool(minerust::item_registry())
+        {
             self.hotbar_dirty = true;
         }
 
@@ -912,18 +879,15 @@ impl State {
             }
             // Clear rendering buffers and loaders to match the empty world
             self.chunk_loader = minerust::ChunkLoader::new(seed);
-            self.mesh_loader = minerust::MeshLoader::new(
-                self.world.clone(),
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(2),
-            );
+            self.mesh_loader =
+                minerust::MeshLoader::new(self.world.clone(), minerust::get_mesh_worker_count());
             self.dirty_mesh_queue.clear();
             self.dirty_mesh_queued.clear();
             self.chunks_rendered = 0;
             self.subchunks_rendered = 0;
             self.indirect_manager.clear_gpu_data(&self.queue);
             self.water_indirect_manager.clear_gpu_data(&self.queue);
+            self.hiz_valid = false;
             self.visible_chunk_columns.clear();
             self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
             self.visible_chunk_columns_dirty = true;

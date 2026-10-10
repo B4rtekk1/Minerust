@@ -726,6 +726,19 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    // Discard previous-world jobs and recreate generators
+                                    // with the restored seed before streaming resumes.
+                                    state.chunk_loader = minerust::ChunkLoader::new(saved.seed);
+                                    state.mesh_loader = minerust::MeshLoader::new(
+                                        state.world.clone(),
+                                        minerust::get_mesh_worker_count(),
+                                    );
+                                    state.chunks_rendered = 0;
+                                    state.subchunks_rendered = 0;
+                                    state.hiz_valid = false;
+                                    state.visible_chunk_columns.clear();
+                                    state.visible_chunk_cache_center = (i32::MIN, i32::MIN);
+                                    state.visible_chunk_columns_dirty = true;
                                     state.enqueue_all_dirty_meshes();
                                     log(
                                         LogLevel::Info,

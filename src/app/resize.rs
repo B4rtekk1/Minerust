@@ -6,12 +6,7 @@ pub(super) fn create_ssr_targets(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
     format: wgpu::TextureFormat,
-) -> (
-    wgpu::Texture,
-    wgpu::TextureView,
-    wgpu::Texture,
-    wgpu::TextureView,
-) {
+) -> (wgpu::Texture, wgpu::TextureView) {
     let size = wgpu::Extent3d {
         width: config.width,
         height: config.height,
@@ -30,19 +25,7 @@ pub(super) fn create_ssr_targets(
     });
     let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("SSR Depth Texture"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R32Float,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-    (color_texture, color_view, depth_texture, depth_view)
+    (color_texture, color_view)
 }
 
 impl State {
@@ -62,18 +45,18 @@ impl State {
     /// | Surface configuration | Swap-chain must match the new pixel dimensions. |
     /// | Depth texture (MSAA) | Multisampled depth must match the color target size. |
     /// | MSAA color texture | Render target size changed. |
-    /// | SSR color/depth textures + water bind group | Reflection targets must match the surface. |
+    /// | Opaque scene color texture + water bind group | Reflection targets must match the surface. |
     /// | `depth_resolve_bind_group` | References the new multisampled depth view. |
     /// | `glyphon` viewport | Text renderer needs the physical resolution for HiDPI. |
     /// | Scene color texture + view | MSAA resolve target for the composite pass. |
     /// | `composite_bind_group` | References the new scene color view. |
-    /// | Hi-Z texture + mips + bind groups | Only when the mip count changes (see below). |
+    /// | Hi-Z texture + mips + bind groups | When the half-resolution base dimensions change. |
     ///
     /// # Hi-Z conditional rebuild
-    /// The hierarchical-Z texture mip count is `⌊log₂(max(w, h))⌋ + 1`.
+    /// The Hi-Z base dimensions are `max(1, floor(surface / 2))` per axis.
     /// Because both the texture dimensions and the mip count depend on the
-    /// surface size, the Hi-Z resources are rebuilt when `[width, height]`
-    /// differs from the previously stored `hiz_size`.
+    /// surface size, the Hi-Z resources are rebuilt when their base dimensions
+    /// differ from the previously stored `hiz_size`.
     /// Rebuilding also rewires the two `IndirectManager` bind groups so the
     /// GPU cull compute shader continues to read from the correct texture.
     ///
@@ -97,6 +80,7 @@ impl State {
         );
         self.rebuild_water_bind_group();
         self.rebuild_composite_bind_groups();
+        self.hiz_valid = false;
         self.recreate_hiz_targets();
         self.rebuild_depth_resolve_bind_group();
     }
@@ -129,12 +113,10 @@ impl State {
             .scene_color_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let (color_texture, color_view, depth_texture, depth_view) =
+        let (color_texture, color_view) =
             create_ssr_targets(&self.device, &self.config, self.surface_format);
         self.ssr_color_texture = color_texture;
         self.ssr_color_view = color_view;
-        self.ssr_depth_texture = depth_texture;
-        self.ssr_depth_view = depth_view;
     }
 
     fn rebuild_water_bind_group(&mut self) {
@@ -157,10 +139,6 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(&self.ssr_color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -229,7 +207,7 @@ impl State {
     }
 
     fn recreate_hiz_targets(&mut self) {
-        let new_hiz_size = [self.config.width, self.config.height];
+        let new_hiz_size = minerust::render::depth::hiz_base_size([self.config.width, self.config.height]);
         if new_hiz_size == self.hiz_size {
             return;
         }
@@ -288,6 +266,7 @@ impl State {
             &hiz_view,
             &self.water_indirect_manager,
         );
+        self.hiz_valid = false;
         self.hiz_size = new_hiz_size;
         self.hiz_texture = hiz_texture;
         self.hiz_view = hiz_view;
@@ -307,10 +286,6 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&self.hiz_mips[0]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&self.ssr_depth_view),
                 },
             ],
         });
