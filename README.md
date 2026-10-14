@@ -608,9 +608,9 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for additional project guidelines.
 
 ## 📦 Releases
 
-The repository includes a GitHub Actions workflow that builds a Windows release when a
-version tag matching `v*` is pushed. The workflow packages the executable together with
-the `assets/` directory into a ZIP archive.
+The repository includes a GitHub Actions workflow that builds Windows and Linux releases
+when a version tag matching `v*` is pushed. The workflow packages each executable together
+with the `assets/` directory as a ZIP archive for Windows and a `.tar.gz` archive for Linux.
 
 ---
 
