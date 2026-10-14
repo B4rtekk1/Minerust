@@ -154,21 +154,26 @@ impl TerrainSpline {
     /// |  0.60  | 78              | Highland base      |
     /// |  1.00  | 85              | Continental core   |
     pub fn continental() -> Self {
+        // Minecraft-like shelf: deep ocean floor, shallow shelf, crisp coast
+        // near sea level, then a calm continental interior. Mountains come
+        // from low erosion + peaks/valleys, not from continentalness alone.
         Self::new(&[
-            (-1.0, 18.0),
-            (-0.78, 27.0),
-            (-0.58, 38.0),
-            (-0.45, 48.0),
-            (-0.34, 55.0),
-            (-0.23, 61.0),
-            (-0.15, 64.0),
-            (0.0, 67.0),
-            (0.20, 68.0),
-            (0.35, 72.0),
-            (0.50, 78.0),
-            (0.65, 84.0),
-            (0.80, 91.0),
-            (1.0, 96.0),
+            (-1.0, 16.0),
+            (-0.85, 22.0),
+            (-0.70, 32.0),
+            (-0.55, 42.0),
+            (-0.40, 52.0),
+            (-0.28, 58.0),
+            (-0.19, 62.0),
+            (-0.11, 64.0),
+            (0.0, 66.0),
+            (0.15, 67.0),
+            (0.30, 69.0),
+            (0.45, 72.0),
+            (0.60, 76.0),
+            (0.75, 80.0),
+            (0.90, 84.0),
+            (1.0, 88.0),
         ])
     }
 

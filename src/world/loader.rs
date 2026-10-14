@@ -253,6 +253,9 @@ impl ChunkLoader {
         mut is_loaded: impl FnMut(i32, i32) -> bool,
     ) {
         if self.scan_center != Some(center) {
+            if self.scan_center.is_some() {
+                self.refresh_queued_requests(center);
+            }
             self.scan_center = Some(center);
             self.scan_cursor = 0;
         }
@@ -268,6 +271,32 @@ impl ChunkLoader {
             self.request_chunk(cx, cz, priority);
             submitted += 1;
         }
+    }
+
+    /// Retire obsolete work before a worker starts spending CPU on it. Requests
+    /// already popped by workers stay pending until their results are polled.
+    /// Holding the queue lock makes the distinction atomic with worker pops.
+    fn refresh_queued_requests(&mut self, center: (i32, i32)) {
+        let (lock, _) = &*self.request_queue;
+        let mut queue = lock.lock().expect("chunk request queue poisoned");
+        let requests = std::mem::take(&mut queue.requests).into_vec();
+        queue.requests = requests
+            .into_iter()
+            .filter_map(|mut request| {
+                let dx = i64::from(request.cx) - i64::from(center.0);
+                let dz = i64::from(request.cz) - i64::from(center.1);
+                if dx.abs() > i64::from(GENERATION_DISTANCE)
+                    || dz.abs() > i64::from(GENERATION_DISTANCE)
+                {
+                    self.pending.remove(&(request.cx, request.cz));
+                    None
+                } else {
+                    request.priority = (dx * dx + dz * dz) as i32;
+                    Some(request)
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
     }
 
     /// Submits multiple chunk requests in a single call, sorted by priority
@@ -500,6 +529,69 @@ mod tests {
         loader.clear_pending();
         loader.request_missing_chunks((0, 0), 1, |_, _| false);
         assert!(loader.is_pending(0, 0));
+    }
+
+    #[test]
+    fn teleport_retires_queued_work_but_tracks_running_and_unpolled_work() {
+        let mut loader = ChunkLoader::with_worker_count(0, 1);
+        loader.request_missing_chunks((0, 0), MAX_PENDING_CHUNKS, |_, _| false);
+        // Model the worker's atomic pop. This job can no longer be cancelled.
+        let running = {
+            let (lock, _) = &*loader.request_queue;
+            lock.lock().unwrap().requests.pop().unwrap()
+        };
+        loader.request_missing_chunks((1000, -1000), 0, |_, _| panic!("zero budget"));
+        assert!(queued(&loader).is_empty());
+        assert_eq!(loader.pending_count(), 1);
+        assert!(loader.is_pending(running.cx, running.cz));
+        assert_eq!(loader.scan_cursor, 0);
+
+        // Returning before the old result is consumed must not duplicate it.
+        loader.request_missing_chunks((0, 0), MAX_PENDING_CHUNKS, |_, _| false);
+        assert_eq!(loader.pending_count(), MAX_PENDING_CHUNKS);
+        assert_eq!(queued(&loader).len(), MAX_PENDING_CHUNKS - 1);
+        assert!(
+            queued(&loader)
+                .iter()
+                .all(|r| (r.0, r.1) != (running.cx, running.cz))
+        );
+        let (tx, rx) = bounded(1);
+        loader.result_rx = rx;
+        tx.send(ChunkGenResult {
+            cx: running.cx,
+            cz: running.cz,
+            chunk: Chunk::new(running.cx, running.cz),
+        })
+        .unwrap();
+        assert_eq!(loader.poll_results(1).len(), 1);
+        assert!(!loader.is_pending(running.cx, running.cz));
+    }
+
+    #[test]
+    fn moving_center_reprioritizes_retained_work_and_keeps_radius_boundary() {
+        let mut loader = ChunkLoader::with_worker_count(0, 1);
+        loader.request_missing_chunks((0, 0), 0, |_, _| true);
+        loader.request_chunks(&[
+            (0, 0, 0),
+            (10, 0, 100),
+            (10 + GENERATION_DISTANCE, 0, 1),
+            (10 - GENERATION_DISTANCE - 1, 0, 1),
+        ]);
+        loader.request_missing_chunks((10, 0), 0, |_, _| panic!("zero budget"));
+        assert_eq!(
+            queued(&loader),
+            vec![
+                (10, 0, 0),
+                (0, 0, 100),
+                (
+                    10 + GENERATION_DISTANCE,
+                    0,
+                    GENERATION_DISTANCE * GENERATION_DISTANCE
+                ),
+            ]
+        );
+        assert_eq!(loader.pending_count(), 3);
+        assert!(!loader.is_pending(10 - GENERATION_DISTANCE - 1, 0));
     }
 
     #[test]

@@ -83,17 +83,19 @@ impl Biome {
     /// [`Self::has_trees`] before sampling noise to avoid unnecessary work.
     pub fn tree_density(&self) -> f64 {
         match self {
-            Biome::Plains => 0.75,
-            Biome::Forest => 0.35,
+            // Lower threshold = denser trees. Forest/swamp stay lush; plains
+            // keep sparse oak-like scatter like Minecraft meadows/plains.
+            Biome::Plains => 0.82,
+            Biome::Forest => 0.28,
             Biome::Desert => 1.0,
-            Biome::Tundra => 0.85,
-            Biome::Mountains => 0.80,
-            Biome::Swamp => 0.60,
+            Biome::Tundra => 0.88,
+            Biome::Mountains => 0.84,
+            Biome::Swamp => 0.52,
             Biome::Ocean => 1.0,
             Biome::Beach => 1.0,
             Biome::River => 1.0,
             Biome::Lake => 1.0,
-            Biome::Island => 0.65,
+            Biome::Island => 0.70,
         }
     }
 
