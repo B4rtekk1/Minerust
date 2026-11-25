@@ -751,12 +751,12 @@ impl IndirectManager {
             }
         } else if let Some(slot) = self.cull_allocations.remove(&key) {
             self.free_slots.push(slot);
-            self.max_slot_bound = self
-                .cull_allocations
-                .values()
-                .map(|slot| *slot as u32 + 1)
-                .max()
-                .unwrap_or(0);
+            // Freed slots hold zeroed metadata that the cull shader skips, so
+            // the bound stays at its high-water mark; rescanning every
+            // allocation on each removal was quadratic during unloads.
+            if self.cull_allocations.is_empty() {
+                self.max_slot_bound = 0;
+            }
             slot
         } else {
             return;
@@ -821,12 +821,10 @@ impl IndirectManager {
         };
         self.free_slots.push(slot);
         self.cull_aabbs.remove(&key);
-        self.max_slot_bound = self
-            .cull_allocations
-            .values()
-            .map(|slot| *slot as u32 + 1)
-            .max()
-            .unwrap_or(0);
+        // See `update_cull_subchunk`: zeroed slots are skipped by the shader.
+        if self.cull_allocations.is_empty() {
+            self.max_slot_bound = 0;
+        }
         queue.write_buffer(
             self.subchunk_meta_buffer(),
             (slot * size_of::<SubchunkGpuMeta>()) as u64,

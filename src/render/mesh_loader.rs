@@ -1,7 +1,6 @@
 use crate::constants::MAX_PENDING_MESHES;
 use crate::render::quad::PackedQuad;
 use crate::world::World;
-use crate::world::generator::ChunkGenerator;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -75,13 +74,11 @@ impl MeshLoader {
     pub fn new(world: Arc<parking_lot::RwLock<World>>, worker_count: usize) -> Self {
         let (request_tx, request_rx) = bounded::<MeshRequest>(MAX_PENDING_MESHES);
         let (result_tx, result_rx) = bounded::<MeshJobResult>(MAX_PENDING_MESHES);
-        let seed = world.read().seed;
 
         for i in 0..worker_count {
             let rx = request_rx.clone();
             let tx = result_tx.clone();
             let world = Arc::clone(&world);
-            let generator = ChunkGenerator::new(seed);
 
             thread::Builder::new()
                 .name(format!("mesh-worker-{}", i))
@@ -98,7 +95,7 @@ impl MeshLoader {
                         let result = match snapshot {
                             Some(snapshot) => {
                                 let meshes =
-                                    World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
+                                    World::build_subchunk_mesh_from_snapshot(&snapshot);
                                 MeshJobResult::Built(MeshResult {
                                     cx: req.cx,
                                     cz: req.cz,

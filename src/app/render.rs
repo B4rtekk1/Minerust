@@ -134,6 +134,7 @@ fn write_empty_gpu_interval(
 static RENDER_OFFSETS: LazyLock<Vec<(i32, i32)>> = LazyLock::new(|| {
     let mut offsets: Vec<_> = (-RENDER_DISTANCE..=RENDER_DISTANCE)
         .flat_map(|dx| (-RENDER_DISTANCE..=RENDER_DISTANCE).map(move |dz| (dx, dz)))
+        .filter(|&(dx, dz)| dx * dx + dz * dz <= RENDER_DISTANCE * RENDER_DISTANCE)
         .collect();
     offsets.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
     offsets
@@ -420,7 +421,7 @@ impl State {
                 rain_factor: 0.0,
                 sky_visibility: self.sky_visibility,
                 menu_blur: if menu_visible { 1.0 } else { 0.0 },
-                _pad_uniforms: 0.0,
+                fog_far: (minerust::RENDER_DISTANCE * minerust::CHUNK_SIZE) as f32,
             }]),
         );
         self.frame_profile.uniform_upload_ms = section_start.elapsed().as_secs_f32() * 1000.0;
@@ -450,6 +451,20 @@ impl State {
                 .and_then(|chunk| chunk.subchunks.get(key.subchunk_y as usize))
                 .is_some_and(|subchunk| subchunk.mesh_dirty && !subchunk.is_empty);
             if !still_dirty {
+                continue;
+            }
+            // Meshing against a missing neighbour bakes in fake boundary
+            // faces. Skip it: inserting the neighbour dirties this subchunk
+            // again, so it is queued once its surroundings are complete.
+            let neighbours_loaded = {
+                let world = self.world.read();
+                [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dz)| {
+                    world
+                        .chunks
+                        .contains_key(&(key.chunk_x + dx, key.chunk_z + dz))
+                })
+            };
+            if !neighbours_loaded {
                 continue;
             }
             if !self
@@ -1648,7 +1663,10 @@ mod tests {
                 let mut expected = Vec::new();
                 for cx in center.0 - RENDER_DISTANCE..=center.0 + RENDER_DISTANCE {
                     for cz in center.1 - RENDER_DISTANCE..=center.1 + RENDER_DISTANCE {
-                        if is_loaded(cx, cz) {
+                        let (dx, dz) = (cx - center.0, cz - center.1);
+                        if dx * dx + dz * dz <= RENDER_DISTANCE * RENDER_DISTANCE
+                            && is_loaded(cx, cz)
+                        {
                             expected.push((cx, cz));
                         }
                     }

@@ -4,6 +4,7 @@ use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
 use crate::render::quad::{PackedQuad, emit_packed_quad};
 use crate::world::generator::ChunkGenerator;
+use crate::world::skylight;
 use parking_lot::RwLock;
 use rand::random;
 use rustc_hash::FxHashMap;
@@ -75,7 +76,6 @@ const MESH_CACHE_PAD: usize = 1;
 const MESH_CACHE_SIZE: usize = CHUNK_SIZE as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_HEIGHT: usize = SUBCHUNK_HEIGHT as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_LEN: usize = MESH_CACHE_SIZE * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE;
-const MESH_SKY_CACHE_LEN: usize = MESH_CACHE_SIZE * MESH_CACHE_SIZE;
 
 #[derive(Clone)]
 pub struct SubchunkMeshSnapshot {
@@ -84,8 +84,16 @@ pub struct SubchunkMeshSnapshot {
     pub subchunk_y: i32,
     pub mesh_version: u64,
     pub has_blocks: bool,
+    pub has_stairs: bool,
+    /// Climate tint palette index of each column of the meshed chunk,
+    /// indexed `x * CHUNK_SIZE + z`.
+    pub tint_cache: [u8; (CHUNK_SIZE * CHUNK_SIZE) as usize],
     pub block_cache: [BlockType; MESH_CACHE_LEN],
-    pub sky_height_cache: [i16; MESH_SKY_CACHE_LEN],
+    /// Light transport medium of every cell in the padded light region
+    /// (see [`crate::world::skylight`]).
+    pub light_media: Box<[u8]>,
+    /// Highest opaque block (world Y) of every light-region column.
+    pub light_sky_height: Box<[i16]>,
 }
 
 impl World {
@@ -231,6 +239,13 @@ impl World {
     /// Returns the biome at world position `(x, z)`.
     pub fn get_biome(&self, x: i32, z: i32) -> Biome {
         self.generator.get_biome(x, z)
+    }
+
+    /// Column near the origin chosen by the generator as a pleasant place to
+    /// start (dry, flat land). Generate the chunks around it before calling
+    /// [`Self::find_spawn_point`].
+    pub fn spawn_column(&self) -> (i32, i32) {
+        self.generator.find_spawn_column()
     }
 
     /// Returns the terrain surface height at world position `(x, z)`.
@@ -472,11 +487,16 @@ impl World {
     /// suitable column is found within radius 50 (which should never happen in
     /// practice for non-degenerate worlds).
     pub fn find_spawn_point(&self) -> (f32, f32, f32) {
-        for radius in 0..50 {
+        let (origin_x, origin_z) = self.spawn_column();
+        // Rings only: the inner square was already rejected.
+        for radius in 0i32..50 {
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
-                    let x = dx;
-                    let z = dz;
+                    if dx.abs() != radius && dz.abs() != radius {
+                        continue;
+                    }
+                    let x = origin_x + dx;
+                    let z = origin_z + dz;
                     let height = self.get_terrain_height(x, z);
                     let biome = self.get_biome(x, z);
                     let spawn_x = x as f32 + 0.3;
@@ -588,14 +608,10 @@ impl World {
     ///
     /// ## Lighting and texture selection
     ///
-    /// The packed vertex color stores a coarse local GI tint rather than
-    /// material albedo. It is derived from whether the exposed air cell can see
-    /// the sky and how open the nearby voxel neighborhood is. Texture color
-    /// still comes from the atlas.
-    ///
-    /// GI colors are quantized to the packed vertex color precision before
-    /// storage in `FaceAttrs` so that hidden floating-point differences do not
-    /// prevent adjacent faces from being merged.
+    /// Each face corner carries a smooth world-space sky light level (see
+    /// [`crate::world::skylight`]), solved over a region padded by
+    /// `LIGHT_PAD` blocks, together with the classic per-corner voxel AO.
+    /// Texture color still comes from the atlas.
     ///
     /// # Parameters
     /// - `chunk_x`   – Chunk column X coordinate.
@@ -622,8 +638,12 @@ impl World {
         let base_y = subchunk_y * SUBCHUNK_HEIGHT;
 
         let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
-        let mut sky_height_cache = [-1i16; MESH_SKY_CACHE_LEN];
+        let mut light_media = vec![skylight::MEDIUM_AIR; skylight::LIGHT_LEN].into_boxed_slice();
+        let mut light_sky_height =
+            vec![-1i16; skylight::LIGHT_SIZE * skylight::LIGHT_SIZE].into_boxed_slice();
         let mut has_blocks = false;
+        let mut has_stairs = false;
+        let mut tint_cache = [0u8; (CHUNK_SIZE * CHUNK_SIZE) as usize];
 
         // Resolve the nine columns once, rather than hashing for every voxel.
         let neighbors: [[Option<&Chunk>; 3]; 3] = std::array::from_fn(|nx| {
@@ -632,20 +652,26 @@ impl World {
                     .get(&(chunk_x + nx as i32 - 1, chunk_z + nz as i32 - 1))
             })
         });
-        for px in 0..MESH_CACHE_SIZE {
-            let x = px as i32 - MESH_CACHE_PAD as i32;
+        // One pass over the padded light region fills both the light media
+        // and, for the inner one-block-padded box, the mesher's block cache.
+        let pad = skylight::LIGHT_PAD;
+        let inner = -(MESH_CACHE_PAD as i32)..(CHUNK_SIZE + MESH_CACHE_PAD as i32);
+        let inner_y = -(MESH_CACHE_PAD as i32)..(SUBCHUNK_HEIGHT + MESH_CACHE_PAD as i32);
+        for rx in 0..skylight::LIGHT_SIZE {
+            let x = rx as i32 - pad;
             let nx = (x.div_euclid(CHUNK_SIZE) + 1) as usize;
             let lx = x.rem_euclid(CHUNK_SIZE);
-            for pz in 0..MESH_CACHE_SIZE {
-                let z = pz as i32 - MESH_CACHE_PAD as i32;
+            for rz in 0..skylight::LIGHT_SIZE {
+                let z = rz as i32 - pad;
                 let nz = (z.div_euclid(CHUNK_SIZE) + 1) as usize;
                 let lz = z.rem_euclid(CHUNK_SIZE);
                 let chunk = neighbors[nx][nz];
-                sky_height_cache[px * MESH_CACHE_SIZE + pz] =
+                light_sky_height[rx * skylight::LIGHT_SIZE + rz] =
                     chunk.map_or(-1, |chunk| chunk.highest_opaque_y(lx, lz));
 
-                for py in 0..MESH_CACHE_HEIGHT {
-                    let wy = base_y + py as i32 - MESH_CACHE_PAD as i32;
+                for ry in 0..skylight::LIGHT_HEIGHT {
+                    let y = ry as i32 - pad;
+                    let wy = base_y + y;
                     let block = if !(0..WORLD_HEIGHT).contains(&wy) {
                         BlockType::Air
                     } else if let Some(chunk) = chunk {
@@ -655,22 +681,31 @@ impl World {
                     } else {
                         BlockType::Air
                     };
-                    if px > 0
-                        && px < MESH_CACHE_SIZE - 1
-                        && py > 0
-                        && py < MESH_CACHE_HEIGHT - 1
-                        && pz > 0
-                        && pz < MESH_CACHE_SIZE - 1
+                    light_media[skylight::light_index(rx, ry, rz)] = skylight::medium(block);
+                    if !(inner.contains(&x) && inner_y.contains(&y) && inner.contains(&z)) {
+                        continue;
+                    }
+                    let px = (x + MESH_CACHE_PAD as i32) as usize;
+                    let py = (y + MESH_CACHE_PAD as i32) as usize;
+                    let pz = (z + MESH_CACHE_PAD as i32) as usize;
+                    if (0..CHUNK_SIZE).contains(&x)
+                        && (0..SUBCHUNK_HEIGHT).contains(&y)
+                        && (0..CHUNK_SIZE).contains(&z)
                         && block != BlockType::Air
                     {
                         has_blocks = true;
                     }
+                    has_stairs |= block == BlockType::WoodStairs;
                     block_cache[(px * MESH_CACHE_HEIGHT + py) * MESH_CACHE_SIZE + pz] = block;
                 }
             }
         }
-        if !has_blocks {
-            sky_height_cache.fill(-1);
+        if let Some(chunk) = neighbors[1][1] {
+            for x in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    tint_cache[(x * CHUNK_SIZE + z) as usize] = chunk.column_tint(x, z);
+                }
+            }
         }
 
         Some(SubchunkMeshSnapshot {
@@ -679,8 +714,11 @@ impl World {
             subchunk_y,
             mesh_version,
             has_blocks,
+            has_stairs,
+            tint_cache,
             block_cache,
-            sky_height_cache,
+            light_media,
+            light_sky_height,
         })
     }
 
@@ -698,11 +736,10 @@ impl World {
             None => return (Vec::new(), Vec::new()),
         };
 
-        Self::build_subchunk_mesh_from_snapshot(&self.generator, &snapshot)
+        Self::build_subchunk_mesh_from_snapshot(&snapshot)
     }
 
     pub fn build_subchunk_mesh_from_snapshot(
-        _generator: &ChunkGenerator,
         snapshot: &SubchunkMeshSnapshot,
     ) -> (
         Vec<crate::render::quad::PackedQuad>,
@@ -759,90 +796,63 @@ impl World {
             block_cache[(px as usize) * SH * S + (py as usize) * S + pz as usize]
         };
 
-        let sky_open_column = |wx: i32, wy: i32, wz: i32| -> f32 {
-            let px = wx - base_x + PAD as i32;
-            let pz = wz - base_z + PAD as i32;
-
-            if px < 0 || px >= S as i32 || pz < 0 || pz >= S as i32 {
-                return 1.0;
+        // ── Global sky light ──────────────────────────────────────────────── //
+        // Solved over the padded light region; depends only on the world.
+        let light = skylight::solve(
+            &snapshot.light_media,
+            &snapshot.light_sky_height,
+            base_y - skylight::LIGHT_PAD,
+        );
+        let light_at = |wx: i32, wy: i32, wz: i32| -> Option<u8> {
+            let rx = (wx - base_x + skylight::LIGHT_PAD) as usize;
+            let ry = (wy - base_y + skylight::LIGHT_PAD) as usize;
+            let rz = (wz - base_z + skylight::LIGHT_PAD) as usize;
+            if rx >= skylight::LIGHT_SIZE || ry >= skylight::LIGHT_HEIGHT || rz >= skylight::LIGHT_SIZE {
+                return Some(skylight::MAX_SKY_LIGHT);
             }
-
-            let highest_opaque = snapshot.sky_height_cache[(px as usize) * S + pz as usize];
-            if highest_opaque < 0 || wy >= highest_opaque as i32 {
-                1.0
+            let i = skylight::light_index(rx, ry, rz);
+            (snapshot.light_media[i] != skylight::MEDIUM_OPAQUE).then_some(light[i])
+        };
+        // Smooth light at one face corner: the average of the open cells
+        // among the four in front of the face that touch the corner. The
+        // diagonal cell is ignored when both side cells are opaque, so light
+        // does not leak around solid corners.
+        let corner_light = |front: (i32, i32, i32), a: (i32, i32, i32), b: (i32, i32, i32)| -> u8 {
+            let (fx, fy, fz) = front;
+            let centre = light_at(fx, fy, fz).unwrap_or(0);
+            let side_a = light_at(fx + a.0, fy + a.1, fz + a.2);
+            let side_b = light_at(fx + b.0, fy + b.1, fz + b.2);
+            let diagonal = if side_a.is_none() && side_b.is_none() {
+                None
             } else {
-                0.0
-            }
-        };
-
-        let sample_sky_aperture = |wx: i32, wy: i32, wz: i32| -> f32 {
-            const SKY_OFFSETS: [(i32, i32, f32); 5] = [
-                (0, 0, 0.52),
-                (1, 0, 0.12),
-                (-1, 0, 0.12),
-                (0, 1, 0.12),
-                (0, -1, 0.12),
-            ];
-
-            let mut sky = 0.0;
-            let mut weight = 0.0;
-
-            for (dx, dz, w) in SKY_OFFSETS {
-                sky += sky_open_column(wx + dx, wy, wz + dz) * w;
-                weight += w;
-            }
-
-            sky / weight
-        };
-
-        let sample_local_openness = |wx: i32, wy: i32, wz: i32| -> f32 {
-            const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
-                (-1, 0, 0),
-                (1, 0, 0),
-                (0, -1, 0),
-                (0, 1, 0),
-                (0, 0, -1),
-                (0, 0, 1),
-            ];
-
-            let mut open = 0.0;
-            for (dx, dy, dz) in NEIGHBOR_OFFSETS {
-                if get_block_world_safe(wx + dx, wy + dy, wz + dz).is_transparent() {
-                    open += 1.0;
-                }
-            }
-
-            open / NEIGHBOR_OFFSETS.len() as f32
-        };
-
-        let face_gi_tint = |face_dir: i32, wx: i32, wy: i32, wz: i32| -> [f32; 3] {
-            let (sx, sy, sz) = match face_dir {
-                0 => (wx - 1, wy, wz),
-                1 => (wx + 1, wy, wz),
-                2 => (wx, wy - 1, wz),
-                3 => (wx, wy + 1, wz),
-                4 => (wx, wy, wz - 1),
-                5 => (wx, wy, wz + 1),
-                _ => unreachable!(),
+                light_at(fx + a.0 + b.0, fy + a.1 + b.1, fz + a.2 + b.2)
             };
-
-            let sky = sample_sky_aperture(sx, sy, sz);
-            let openness = sample_local_openness(sx, sy, sz);
-            let facing_sky = match face_dir {
-                3 => 0.95,
-                0 | 1 | 4 | 5 => 0.68,
-                2 => 0.24,
-                _ => 0.0,
-            };
-            let bounce = sky * openness;
-            let energy =
-                (0.13 + sky * facing_sky * 0.86 + bounce * 0.20 + openness * 0.05).clamp(0.10, 1.0);
-
-            [
-                energy * (0.88 + sky * 0.08 + bounce * 0.04),
-                energy * (0.91 + sky * 0.06 + bounce * 0.03),
-                energy * (0.98 + sky * 0.02),
-            ]
+            let (mut sum, mut count) = (u32::from(centre), 1u32);
+            for value in [side_a, side_b, diagonal].into_iter().flatten() {
+                sum += u32::from(value);
+                count += 1;
+            }
+            ((sum + count / 2) / count) as u8
+        };
+        // Corner order matches `face_corner_ao` (and therefore the shader).
+        let face_corner_light = |face_dir: i32, wx: i32, wy: i32, wz: i32| -> [u8; 4] {
+            let (front, axis_a, axis_b, signs): ((i32, i32, i32), (i32, i32, i32), (i32, i32, i32), [(i32, i32); 4]) =
+                match face_dir {
+                    0 => ((wx - 1, wy, wz), (0, 1, 0), (0, 0, 1), [(-1, -1), (-1, 1), (1, 1), (1, -1)]),
+                    1 => ((wx + 1, wy, wz), (0, 1, 0), (0, 0, 1), [(-1, 1), (-1, -1), (1, -1), (1, 1)]),
+                    2 => ((wx, wy - 1, wz), (1, 0, 0), (0, 0, 1), [(-1, 1), (-1, -1), (1, -1), (1, 1)]),
+                    3 => ((wx, wy + 1, wz), (1, 0, 0), (0, 0, 1), [(-1, -1), (-1, 1), (1, 1), (1, -1)]),
+                    4 => ((wx, wy, wz - 1), (1, 0, 0), (0, 1, 0), [(1, -1), (-1, -1), (-1, 1), (1, 1)]),
+                    5 => ((wx, wy, wz + 1), (1, 0, 0), (0, 1, 0), [(-1, -1), (1, -1), (1, 1), (-1, 1)]),
+                    _ => unreachable!(),
+                };
+            signs.map(|(sa, sb)| {
+                corner_light(
+                    front,
+                    (axis_a.0 * sa, axis_a.1 * sa, axis_a.2 * sa),
+                    (axis_b.0 * sb, axis_b.1 * sb, axis_b.2 * sb),
+                )
+            })
         };
 
         let occludes_ao = |wx: i32, wy: i32, wz: i32| -> bool {
@@ -930,15 +940,15 @@ impl World {
         };
 
         // ── FaceAttrs: per-cell data stored in the greedy mask ────────────── //
-        // Two faces can be merged only when all fields are equal, so local GI
-        // tints are pre-quantized (see `quantize_color`) to suppress
-        // floating-point rounding noise that would otherwise prevent merging.
+        // Two faces can be merged only when all fields are equal.
         #[derive(Clone, Copy, PartialEq)]
         struct FaceAttrs {
             block: BlockType,
             color: [u8; 3],
             ao: [u8; 4],
+            light: [u8; 4],
             tex_index: u8,
+            tint: u8,
             is_active: bool,
         }
 
@@ -948,21 +958,14 @@ impl World {
                     block: BlockType::Air,
                     color: [0, 0, 0],
                     ao: [3; 4],
+                    light: [skylight::MAX_SKY_LIGHT; 4],
                     tex_index: 0,
+                    tint: 0,
                     is_active: false,
                 }
             }
         }
 
-        // Quantize to the same 3-bit precision used by the packed vertex.
-        // This keeps greedy merging aligned with what the shader can display.
-        let quantize_color = |c: [f32; 3]| -> [u8; 3] {
-            [
-                (c[0].clamp(0.0, 1.0) * 7.0) as u8,
-                (c[1].clamp(0.0, 1.0) * 7.0) as u8,
-                (c[2].clamp(0.0, 1.0) * 7.0) as u8,
-            ]
-        };
         // Custom shapes (currently stairs) still describe their corners
         // explicitly, but write the compact descriptor immediately.
         let emit_corner_quad = |quads: &mut Vec<PackedQuad>,
@@ -971,7 +974,7 @@ impl World {
                                 v2: [f32; 3],
                                 _v3: [f32; 3],
                                 normal: [f32; 3],
-                                color: [f32; 3],
+                                light: u8,
                                 material: f32,
                                 _roughness: f32,
                                 _metallic: f32| {
@@ -1004,8 +1007,10 @@ impl World {
                 edge_len(v0, v1),
                 edge_len(v1, v2),
                 material as u8,
-                quantize_color(color),
+                [7, 7, 7],
                 [3; 4],
+                [light; 4],
+                0,
             );
         };
         let empty_face = FaceAttrs::default();
@@ -1015,7 +1020,8 @@ impl World {
         // Stair blocks are composed of two non-unit-height quads that cannot
         // be expressed as standard greedy-merged full faces.  They are emitted
         // here as explicit packed descriptors and excluded from pass 2.
-        for lx in 0..CHUNK_SIZE {
+        // Most subchunks hold no stairs, so the scan is skipped for them.
+        for lx in 0..(if snapshot.has_stairs { CHUNK_SIZE } else { 0 }) {
             for ly in 0..SUBCHUNK_HEIGHT {
                 for lz in 0..CHUNK_SIZE {
                     let y = base_y + ly;
@@ -1031,12 +1037,17 @@ impl World {
                         let x = world_x as f32;
                         let y_f = y as f32;
                         let z = world_z as f32;
-                        let light_neg_x = face_gi_tint(0, world_x, y, world_z);
-                        let light_pos_x = face_gi_tint(1, world_x, y, world_z);
-                        let light_neg_y = face_gi_tint(2, world_x, y, world_z);
-                        let light_pos_y = face_gi_tint(3, world_x, y, world_z);
-                        let light_neg_z = face_gi_tint(4, world_x, y, world_z);
-                        let light_pos_z = face_gi_tint(5, world_x, y, world_z);
+                        // Stairs are lit uniformly per face from the open
+                        // cell in front of it (or the stair cell itself).
+                        let own = light_at(world_x, y, world_z).unwrap_or(skylight::MAX_SKY_LIGHT);
+                        let face_light =
+                            |dx: i32, dy: i32, dz: i32| light_at(world_x + dx, y + dy, world_z + dz).unwrap_or(own);
+                        let light_neg_x = face_light(-1, 0, 0);
+                        let light_pos_x = face_light(1, 0, 0);
+                        let light_neg_y = face_light(0, -1, 0);
+                        let light_pos_y = face_light(0, 1, 0);
+                        let light_neg_z = face_light(0, 0, -1);
+                        let light_pos_z = face_light(0, 0, 1);
                         let tex_top = block.tex_top();
                         let tex_side = block.tex_side();
                         let r = block.roughness();
@@ -1247,7 +1258,7 @@ impl World {
                                     [x + 1.0, y_f + 1.0, z + 1.0],
                                     [x + 1.0, y_f + 1.0, z],
                                     [0.0, 1.0, 0.0],
-                                    block.color(),
+                                    skylight::MAX_SKY_LIGHT,
                                     block.tex_for_face(3),
                                     block.roughness(),
                                     block.metallic(),
@@ -1281,7 +1292,7 @@ impl World {
                             continue;
                         }
 
-                        let gi_tint = face_gi_tint(face_dir, world_x, y, world_z);
+                        let light = face_corner_light(face_dir, world_x, y, world_z);
                         let ao = if block == BlockType::Water {
                             [3; 4]
                         } else {
@@ -1292,11 +1303,18 @@ impl World {
                         let tex_index = block.tex_for_face(face_dir);
 
                         let idx = (d1 * dim2_size + d2) as usize;
+                        let tint = if crate::core::biome::tint_applies(tex_index as u8) {
+                            snapshot.tint_cache[(lx * CHUNK_SIZE + lz) as usize]
+                        } else {
+                            0
+                        };
                         mask[idx] = FaceAttrs {
                             block,
-                            color: quantize_color(gi_tint),
+                            color: [7, 7, 7],
+                            light,
                             ao,
                             tex_index: tex_index as u8,
+                            tint,
                             is_active: true,
                         };
                     }
@@ -1317,8 +1335,10 @@ impl World {
                         // AO is defined at the four corners of a unit face.
                         // Merging a partially occluded face would stretch those
                         // four values across many blocks and produces incorrect
-                        // gradients. Only fully open faces are safe to merge.
-                        let can_merge = face.ao == [3; 4];
+                        // gradients. Only fully open faces are safe to merge;
+                        // the same holds for the per-corner sky light.
+                        let can_merge = face.ao == [3; 4]
+                            && face.light.iter().all(|&l| l == face.light[0]);
 
                         // Extend width along d2 while faces match.
                         let mut width = 1i32;
@@ -1402,6 +1422,8 @@ impl World {
                             face.tex_index,
                             face.color,
                             face.ao,
+                            face.light,
+                            face.tint,
                         );
 
                         d2 += width; // advance past the merged run
@@ -1436,8 +1458,34 @@ mod tests {
         let base_z = chunk_z * CHUNK_SIZE;
 
         let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
-        let mut sky_height_cache = [-1i16; MESH_SKY_CACHE_LEN];
         let mut has_blocks = false;
+        let block_at = |wx: i32, wy: i32, wz: i32| {
+            if !(0..WORLD_HEIGHT).contains(&wy) {
+                return BlockType::Air;
+            }
+            let key = (wx.div_euclid(CHUNK_SIZE), wz.div_euclid(CHUNK_SIZE));
+            match world.chunks.get(&key) {
+                Some(chunk) => chunk.get_block(wx.rem_euclid(CHUNK_SIZE), wy, wz.rem_euclid(CHUNK_SIZE)),
+                None if wy < SEA_LEVEL => BlockType::Water,
+                None => BlockType::Air,
+            }
+        };
+        let pad = skylight::LIGHT_PAD;
+        let mut light_media = vec![0u8; skylight::LIGHT_LEN];
+        let mut light_sky_height = vec![-1i16; skylight::LIGHT_SIZE * skylight::LIGHT_SIZE];
+        for rx in 0..skylight::LIGHT_SIZE {
+            for rz in 0..skylight::LIGHT_SIZE {
+                let (wx, wz) = (base_x + rx as i32 - pad, base_z + rz as i32 - pad);
+                light_sky_height[rx * skylight::LIGHT_SIZE + rz] = world
+                    .chunks
+                    .get(&(wx.div_euclid(CHUNK_SIZE), wz.div_euclid(CHUNK_SIZE)))
+                    .map_or(-1, |c| c.highest_opaque_y(wx.rem_euclid(CHUNK_SIZE), wz.rem_euclid(CHUNK_SIZE)));
+                for ry in 0..skylight::LIGHT_HEIGHT {
+                    light_media[skylight::light_index(rx, ry, rz)] =
+                        skylight::medium(block_at(wx, base_y + ry as i32 - pad, wz));
+                }
+            }
+        }
 
         for px in 0..MESH_CACHE_SIZE as i32 {
             for py in 0..MESH_CACHE_HEIGHT as i32 {
@@ -1479,35 +1527,17 @@ mod tests {
             }
         }
 
-        if has_blocks {
-            for px in 0..MESH_CACHE_SIZE as i32 {
-                for pz in 0..MESH_CACHE_SIZE as i32 {
-                    let wx = base_x + px - MESH_CACHE_PAD as i32;
-                    let wz = base_z + pz - MESH_CACHE_PAD as i32;
-                    let cx = wx.div_euclid(CHUNK_SIZE);
-                    let cz = wz.div_euclid(CHUNK_SIZE);
-                    let lx = wx.rem_euclid(CHUNK_SIZE);
-                    let lz = wz.rem_euclid(CHUNK_SIZE);
-                    let highest_opaque = world
-                        .chunks
-                        .get(&(cx, cz))
-                        .map(|chunk| chunk.highest_opaque_y(lx, lz))
-                        .unwrap_or(-1);
-
-                    sky_height_cache[(px as usize) * MESH_CACHE_SIZE + pz as usize] =
-                        highest_opaque;
-                }
-            }
-        }
-
         Some(SubchunkMeshSnapshot {
             chunk_x,
             chunk_z,
             subchunk_y,
             mesh_version,
             has_blocks,
+            has_stairs: true,
+            tint_cache: [0; (CHUNK_SIZE * CHUNK_SIZE) as usize],
             block_cache,
-            sky_height_cache,
+            light_media: light_media.into_boxed_slice(),
+            light_sky_height: light_sky_height.into_boxed_slice(),
         })
     }
 
@@ -1548,7 +1578,8 @@ mod tests {
                 let expected = reference_snapshot(&world, cx, cz, sy).unwrap();
                 let actual = world.snapshot_subchunk_mesh(cx, cz, sy).unwrap();
                 assert_eq!(actual.block_cache, expected.block_cache, "{cx}, {cz}, {sy}");
-                assert_eq!(actual.sky_height_cache, expected.sky_height_cache);
+                assert_eq!(actual.light_media, expected.light_media);
+                assert_eq!(actual.light_sky_height, expected.light_sky_height);
                 assert_eq!(actual.has_blocks, expected.has_blocks);
                 assert_eq!(actual.mesh_version, expected.mesh_version);
             }

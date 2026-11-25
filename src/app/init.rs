@@ -375,7 +375,7 @@ impl State {
                 rain_factor: 0.0,
                 sky_visibility: 1.0,
                 menu_blur: 1.0,
-                _pad_uniforms: 0.0,
+                fog_far: (minerust::RENDER_DISTANCE * minerust::CHUNK_SIZE) as f32,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });

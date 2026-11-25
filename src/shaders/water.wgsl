@@ -4,8 +4,6 @@ const WATER_OPACITY:       f32 = 0.30;
 const FRESNEL_R0:          f32 = 0.020;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
 
-const FOG_NEAR: f32 = 0.0;
-const FOG_FAR:  f32 = 180.0;
 
 struct Uniforms {
     view_proj:      mat4x4<f32>,
@@ -26,14 +24,14 @@ struct Uniforms {
     rain_factor:    f32,
     sky_visibility: f32,
     menu_blur:      f32,
-    _pad_uniforms:  f32,
+    fog_far:        f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(8) var scene_color: texture_2d<f32>;
 @group(0) @binding(10) var scene_sampler: sampler;
 
-struct PackedQuad { origin_and_face: u32, size_material_ao: u32, }
+struct PackedQuad { origin_and_face: u32, size_material_ao: u32, light: u32, }
 struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, terrain_draw_data: vec4<u32>, water_draw_data: vec4<u32>, }
 @group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
 @group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
@@ -124,6 +122,31 @@ fn sky_reflection_color(view_dir: vec3<f32>, sun_dir: vec3<f32>, moon_intensity:
     return sky;
 }
 
+// Same aerial perspective as `terrain.wgsl`, so distant water and land fade
+// into the horizon together.
+fn horizon_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let day   = smoothstep(-0.02, 0.22, sun_dir.y);
+    let dusk  = 1.0 - smoothstep(0.02, 0.34, abs(sun_dir.y));
+    let night = clamp(-sun_dir.y * 4.0 - 0.05, 0.0, 1.0);
+    var color = vec3<f32>(0.70, 0.84, 0.98) * day
+        + vec3<f32>(0.010, 0.014, 0.034) * night
+        + vec3<f32>(0.96, 0.52, 0.30) * dusk * 0.55;
+    let towards_sun = max(dot(normalize(vec3<f32>(view_dir.x, 0.0, view_dir.z)),
+                              normalize(vec3<f32>(sun_dir.x, 0.0, sun_dir.z) + vec3<f32>(1e-4))), 0.0);
+    color += vec3<f32>(1.0, 0.72, 0.42) * pow(towards_sun, 6.0) * (0.10 * day + 0.35 * dusk);
+    return color;
+}
+
+fn aerial_perspective(color: vec3<f32>, world_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let to_frag = world_pos - uniforms.camera_pos;
+    let dist = length(to_frag.xz);
+    let fog_far = max(uniforms.fog_far, 64.0);
+    let aerial = (1.0 - exp(-dist / (fog_far * 1.6))) * 0.55;
+    let edge = smoothstep(fog_far * 0.55, fog_far * 0.96, dist);
+    let amount = max(aerial, edge) * mix(0.25, 1.0, clamp(uniforms.sky_visibility, 0.0, 1.0));
+    return mix(color, horizon_color(to_frag / max(length(to_frag), 1e-3), sun_dir), amount);
+}
+
 @fragment
 fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let to_camera = uniforms.camera_pos - in.world_pos;
@@ -157,9 +180,7 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
         water_color += vec3<f32>(1.0, 0.92, 0.72) * glint;
     }
 
-    let fog_t = clamp((dist - FOG_NEAR) / (FOG_FAR - FOG_NEAR), 0.0, 1.0);
-    let fog_color = mix(vec3<f32>(0.004, 0.010, 0.024), sky, 0.65 * day + 0.10);
-    water_color = mix(water_color, fog_color, fog_t * fog_t);
+    water_color = aerial_perspective(water_color, in.world_pos, sun_dir);
 
     let alpha = clamp(WATER_OPACITY + fresnel * 0.26 + (1.0 - dist_fade) * 0.10, 0.18, 0.72);
     return vec4<f32>(water_color, alpha);

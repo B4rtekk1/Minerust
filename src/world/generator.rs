@@ -1,537 +1,419 @@
+//! Procedural world generator.
+//!
+//! The world is built from a set of smooth 2-D fields evaluated per block
+//! column, so every column — and therefore every chunk — is a pure function of
+//! `(seed, x, z)`:
+//!
+//! 1. **Shape**: domain-warped *continentalness* sets land vs. ocean and the
+//!    base elevation; *erosion* decides whether land is flat or rugged; a
+//!    ridged field raises mountain ranges where erosion is low. Detail noise
+//!    adds hills, and hot, dry uplands are gently terraced into plateaus.
+//! 2. **Water**: a warped river field carves valleys and channels down to the
+//!    sea, lowland lakes and swamp pools are pressed below sea level, and
+//!    small islands rise out of the open ocean.
+//! 3. **Climate**: temperature (cooled with altitude) and humidity pick the
+//!    biome and a smooth vegetation tint (see [`crate::core::biome`]).
+//! 4. **Blocks**: surface rules by biome, slope and depth; caves from an
+//!    winding "worm" tunnels that open onto hillsides, ravines, deep
+//!    caverns and flooded underground lakes.
+//! 5. **Features**: trees, cacti, boulders, logs and ice spikes. Features are
+//!    anchored on a global jittered grid and evaluated for every anchor within
+//!    reach of the chunk, so trees that straddle a chunk border are generated
+//!    identically from both sides instead of being cut off.
+
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
-use once_cell::sync::Lazy;
 
 use crate::constants::*;
-use crate::core::biome::Biome;
+use crate::core::biome::{Biome, climate_tint};
 use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
-use crate::world::spline::TerrainSpline;
 
-/// Extra columns retained around the chunk. Surface material selection needs
-/// a real neighbour on every side to calculate a slope without chunk seams.
-const HEIGHT_MAP_BORDER: i32 = 1;
-const HEIGHT_MAP_SIZE: usize = CHUNK_SIZE as usize + HEIGHT_MAP_BORDER as usize * 2;
-/// Density is evaluated at this coarse resolution and trilinearly interpolated
-/// for individual voxels.  Keeping it aligned to the chunk edge makes it
-/// deterministic across neighbouring chunks.
-const DENSITY_CELL_SIZE: i32 = 4;
-const DENSITY_XZ_SAMPLES: usize = (CHUNK_SIZE / DENSITY_CELL_SIZE + 1) as usize;
-const DENSITY_Y_SAMPLES: usize = (WORLD_HEIGHT / DENSITY_CELL_SIZE + 1) as usize;
-const DENSITY_LATTICE_LEN: usize = DENSITY_XZ_SAMPLES * DENSITY_Y_SAMPLES * DENSITY_XZ_SAMPLES;
-/// Cave fields contain the most expensive 3-D noise in chunk generation.
-/// Keep their lattice independently tunable from terrain-density sampling.
-const CAVE_XZ_SAMPLES: usize = (CHUNK_SIZE / CAVE_CELL_SIZE + 1) as usize;
-const CAVE_Y_SAMPLES: usize = (WORLD_HEIGHT / CAVE_CELL_SIZE + 1) as usize;
-const CAVE_LATTICE_LEN: usize = CAVE_XZ_SAMPLES * CAVE_Y_SAMPLES * CAVE_XZ_SAMPLES;
-const TERRAIN_WARP_Z_OFFSET: f32 = 200.0;
-// Softer domain warp keeps large continental cells readable while still
-// breaking axis-aligned noise striping.
-const MACRO_WARP_AMPLITUDE: f32 = 160.0;
-const REGIONAL_WARP_AMPLITUDE: f32 = 32.0;
-const RIVER_THRESHOLD_MIN: f32 = 0.855;
-const RIVER_THRESHOLD_MAX: f32 = 0.920;
-const LAKE_THRESHOLD: f32 = -0.66;
+/// Columns sampled around a chunk so slopes at its edge use real neighbours.
+const BORDER: i32 = 1;
+const GRID: usize = (CHUNK_SIZE + BORDER * 2) as usize;
+/// Side of a feature anchor cell. Each cell holds at most one feature.
+const FEATURE_CELL: i32 = 3;
+/// Furthest a feature reaches from its anchor (giant jungle canopy).
+const FEATURE_REACH: i32 = 7;
+/// Chunks around a chunk whose tunnel systems can reach into it.
+const WORM_SOURCE_RADIUS: i32 = 8;
+/// Longest tunnel walk in steps (≈ blocks). A system starting just outside
+/// [`WORM_SOURCE_RADIUS`] must never reach the chunk, or it would be cut off.
+const WORM_MAX_LENGTH: i32 = 118;
+const _: () = assert!(WORM_MAX_LENGTH + 8 < WORM_SOURCE_RADIUS * CHUNK_SIZE);
+/// Carved cave space at or below this height fills with water.
+const CAVE_WATER_LEVEL: i32 = 10;
+/// Horizontal lattice points of the cave field across one chunk.
+const CAVE_XZ: usize = (CHUNK_SIZE / CAVE_CELL_SIZE + 1) as usize;
 
-static CONTINENTAL_SPLINE: Lazy<TerrainSpline> = Lazy::new(TerrainSpline::continental);
-/// High-erosion lands stay near the continental base: shallow valleys, gentle
-/// hills, almost no peak response. This is what makes Minecraft plains flat.
-static PV_OFFSET_ERODED: Lazy<TerrainSpline> = Lazy::new(|| {
-    TerrainSpline::new(&[
-        (-1.0, -0.10),
-        (-0.70, -0.06),
-        (-0.35, -0.02),
-        (0.0, 0.0),
-        (0.35, 0.02),
-        (0.70, 0.05),
-        (1.0, 0.08),
-    ])
-});
-/// Low-erosion bands form valleys and peaks. Valley depth is intentionally
-/// moderate — extreme negative offsets produced knife-cut pits between
-/// neighbouring density lattice samples.
-static PV_OFFSET_RUGGED: Lazy<TerrainSpline> = Lazy::new(|| {
-    TerrainSpline::new(&[
-        (-1.0, -0.22),
-        (-0.70, -0.16),
-        (-0.35, -0.08),
-        (0.0, 0.02),
-        (0.25, 0.12),
-        (0.50, 0.24),
-        (0.75, 0.40),
-        (1.0, 0.55),
-    ])
-});
-static PV_FACTOR_ERODED: Lazy<TerrainSpline> = Lazy::new(|| {
-    TerrainSpline::new(&[
-        (-1.0, 0.84),
-        (-0.50, 0.88),
-        (0.0, 0.92),
-        (0.50, 0.95),
-        (1.0, 0.98),
-    ])
-});
-/// Keep factor close to 1 so density responds gently to Y. High factors turn
-/// small offset changes into vertical cliffs / sudden hollows.
-static PV_FACTOR_RUGGED: Lazy<TerrainSpline> = Lazy::new(|| {
-    TerrainSpline::new(&[
-        (-1.0, 0.94),
-        (-0.50, 1.02),
-        (0.0, 1.10),
-        (0.35, 1.20),
-        (0.65, 1.32),
-        (1.0, 1.42),
-    ])
-});
-#[derive(Clone, Copy)]
-struct TerrainShape {
-    /// Vertical translation of the density field in normalized Y space.
-    offset: f64,
-    /// Terrain response to Y/depth; larger values form steeper relief.
-    factor: f64,
-    jaggedness: f64,
-    density3d_strength: f64,
+/// Smooth Hermite step from `e0` to `e1` (either order).
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
-#[derive(Clone, Copy)]
-struct Climate {
-    temperature: f64,
-    humidity: f64,
-    continentalness: f64,
-    erosion: f64,
-    weirdness: f64,
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
-#[derive(Clone, Copy)]
-struct BiomePoint {
-    biome: Biome,
-    climate: Climate,
+/// Piecewise smooth curve through `(input, output)` points (ascending input).
+fn curve(points: &[(f32, f32)], x: f32) -> f32 {
+    if x <= points[0].0 {
+        return points[0].1;
+    }
+    for pair in points.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        if x <= x1 {
+            return lerp(y0, y1, smoothstep(x0, x1, x));
+        }
+    }
+    points[points.len() - 1].1
 }
 
-#[derive(Clone, Copy)]
-struct BiomeNoiseSample {
-    continental: f64,
-    erosion: f64,
-    weirdness: f64,
-    temperature: f32,
-    moisture: f32,
-    river_value: f32,
-    river_threshold: f32,
-    lake: f32,
-    island: f32,
-}
+/// Base elevation for a continentalness value: deep ocean → shelf → coast →
+/// lowland → inland highland.
+const CONTINENT_CURVE: [(f32, f32); 11] = [
+    (-1.00, 26.0),
+    (-0.55, 33.0),
+    (-0.35, 44.0),
+    (-0.18, 54.0),
+    (-0.07, 60.5),
+    (0.00, 64.5),
+    (0.07, 66.5),
+    (0.22, 71.0),
+    (0.45, 79.0),
+    (0.75, 92.0),
+    (1.00, 100.0),
+];
 
-#[derive(Clone, Copy)]
-struct TerrainNoiseSample {
-    continental: f64,
-    biome_continental: f32,
-    terrain: f64,
-    river_value: f32,
-    river_threshold: f32,
-    lake: f32,
-    island: f32,
-    erosion: f64,
-    biome_erosion: f32,
-    ridged: f64,
-    mountain_chain: f64,
-    biome_peaks_valleys: f32,
-    weirdness: f64,
-    plateau: f64,
-    valley: f64,
-}
-
-#[derive(Clone, Copy)]
+/// Everything the generator knows about one block column before blocks are
+/// written.
+#[derive(Clone, Copy, Debug)]
 struct ColumnSample {
-    height: f64,
+    /// Terrain surface height (highest terrain block), unclamped.
+    height: f32,
+    continental: f32,
+    mountain: f32,
+    /// River channel strength (1 = river bed).
+    river: f32,
+    /// Lake strength (1 = lake bed).
+    lake: f32,
+    /// Island strength in open ocean.
+    island: f32,
+    swamp: f32,
+    temperature: f32,
+    humidity: f32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ChunkGenerator
-// ─────────────────────────────────────────────────────────────────────────────
+impl ColumnSample {
+    fn surface(&self) -> i32 {
+        (self.height.round() as i32).clamp(4, WORLD_HEIGHT - 24)
+    }
+}
 
-/// Produces fully-detailed [`Chunk`] data from a deterministic seed.
-///
-/// One `ChunkGenerator` instance is shared across all chunk-worker threads
-/// (via `Arc` or `Clone`); it is cheaply cloneable because cloning simply
-/// re-runs `new` with the same seed.
-///
-/// # Noise budget
-///
-/// Each field is a separate `FastNoiseLite` sampler with an independent seed
-/// offset and frequency.  Using distinct samplers (rather than one sampler
-/// with different offsets) ensures there are no cross-correlation artifacts
-/// between layers.
-///
-/// | Field | Role | Freq. | Type |
-/// |---|---|---|---|
-/// | `noise_continents` | Large-scale land/ocean shape | 0.0018 | FBm |
-/// | `noise_terrain` | Mid-scale terrain undulation | 0.007 | FBm |
-/// | `noise_detail` | Fine surface noise | 0.018 | FBm |
-/// | `noise_temperature` | Biome temperature axis | 0.006 | Simplex |
-/// | `noise_moisture` | Biome moisture axis | 0.008 | Simplex |
-/// | `noise_river` | Major river centerline carving | 0.004 | Simplex |
-/// | `noise_lake` | Lake basin placement | 0.022 | Simplex |
-/// | `noise_trees` | Tree/vegetation density | 0.12 | Simplex |
-/// | `noise_island` | Ocean island elevation | 0.045 | Simplex |
-/// | `noise_cave1/2/3` | 3-D cave volumes | 0.025/0.019/0.013 | 3-D Simplex |
-/// | `noise_erosion` | Erosion multiplier for slopes | 0.004 | FBm |
-/// | `noise_warp_x/z` | Domain warp for terrain/biomes | 0.005 | FBm |
-/// | `noise_ridged` | Ridged mountain peaks | 0.009 | Ridged FBm |
-/// | `noise_weirdness` | Rare regional variation | 0.0035 | FBm |
-/// | `noise_plateau` | Plateaus and terraces | 0.004 | FBm |
-/// | `noise_valley` | Broad valley carving | 0.003 | FBm |
-/// | `noise_river_width` | River width modulation | 0.0015 | FBm |
-/// | `noise_vegetation` | Tree clusters and shrubs | 0.045 | Simplex |
-/// | `noise_decor` | Clearings and small structure placement | 0.13 | Simplex |
-/// | `noise_cave_warp_x/z` | Domain warp inside caves | 0.018 | FBm |
+/// A fully classified column: shape, slope and biome.
+#[derive(Clone, Copy, Debug)]
+struct Column {
+    sample: ColumnSample,
+    surface: i32,
+    slope: i32,
+    biome: Biome,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TreeKind {
+    Oak,
+    BigOak,
+    Birch,
+    Spruce,
+    SmallSpruce,
+    Jungle,
+    JungleGiant,
+    Acacia,
+    SwampOak,
+    Palm,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Feature {
+    Tree(TreeKind),
+    Cactus,
+    DeadBush,
+    Boulder,
+    FallenLog,
+    IceSpike,
+}
+
+/// What a feature block may replace.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// Only into air (leaves, plants).
+    Soft,
+    /// Into air, leaves and small plants (trunks, logs).
+    Wood,
+    /// Into air, leaves, plants and soil surface blocks (boulders, spikes).
+    Rock,
+}
+
 pub struct ChunkGenerator {
-    noise_continents: FastNoiseLite,
-    noise_terrain: FastNoiseLite,
-    noise_detail: FastNoiseLite,
-    noise_temperature: FastNoiseLite,
-    noise_moisture: FastNoiseLite,
-    noise_river: FastNoiseLite,
-    noise_lake: FastNoiseLite,
-    noise_trees: FastNoiseLite,
-    noise_island: FastNoiseLite,
-    noise_cave1: FastNoiseLite,
-    noise_cave2: FastNoiseLite,
-    noise_cave3: FastNoiseLite,
-    noise_erosion: FastNoiseLite,
-    noise_warp_x: FastNoiseLite,
-    noise_warp_z: FastNoiseLite,
-    noise_ridged: FastNoiseLite,
-    noise_weirdness: FastNoiseLite,
-    noise_plateau: FastNoiseLite,
-    noise_valley: FastNoiseLite,
-    noise_river_width: FastNoiseLite,
-    noise_vegetation: FastNoiseLite,
-    #[allow(dead_code)]
-    noise_decor: FastNoiseLite,
-    noise_ore: FastNoiseLite,
-    noise_cave_warp_x: FastNoiseLite,
-    noise_cave_warp_z: FastNoiseLite,
-    noise_aquifer: FastNoiseLite,
+    warp_x: FastNoiseLite,
+    warp_z: FastNoiseLite,
+    continents: FastNoiseLite,
+    erosion: FastNoiseLite,
+    ridges: FastNoiseLite,
+    peaks: FastNoiseLite,
+    hills: FastNoiseLite,
+    river: FastNoiseLite,
+    river_width: FastNoiseLite,
+    lakes: FastNoiseLite,
+    islands: FastNoiseLite,
+    plateaus: FastNoiseLite,
+    temperature: FastNoiseLite,
+    humidity: FastNoiseLite,
+    forest: FastNoiseLite,
+    entrances: FastNoiseLite,
+    caverns: FastNoiseLite,
+    pockets: FastNoiseLite,
+    patches: FastNoiseLite,
+    ravines: FastNoiseLite,
+    ravine_mask: FastNoiseLite,
+    ravine_floor: FastNoiseLite,
     pub seed: u32,
+}
+
+impl Clone for ChunkGenerator {
+    fn clone(&self) -> Self {
+        Self::new(self.seed)
+    }
 }
 
 impl ChunkGenerator {
     pub fn new(seed: u32) -> Self {
+        let s = |i: u32| seed.wrapping_mul(0x9e37_79b9).wrapping_add(i.wrapping_mul(0x85eb_ca6b));
         ChunkGenerator {
-            // Larger continental cells and slower climate axes → readable
-            // Minecraft-scale landmasses and biome regions.
-            noise_continents: Self::create_fbm_noise(seed, 0.0012),
-            noise_terrain: Self::create_fbm_noise(seed.wrapping_add(1), 0.0045),
-            noise_detail: Self::create_fbm_noise(seed.wrapping_add(2), 0.012),
-            noise_temperature: Self::create_noise(seed.wrapping_add(3), 0.0011),
-            noise_moisture: Self::create_noise(seed.wrapping_add(4), 0.0015),
-            noise_river: Self::create_noise(seed.wrapping_add(5), 0.0032),
-            noise_lake: Self::create_noise(seed.wrapping_add(6), 0.018),
-            noise_trees: Self::create_noise(seed.wrapping_add(7), 0.12),
-            noise_island: Self::create_noise(seed.wrapping_add(8), 0.040),
-            // Cave samplers intentionally use unit frequency: their explicit
-            // X/Y/Z scales below are the one coordinate convention for caves.
-            noise_cave1: Self::create_unit_3d_noise(seed.wrapping_add(9)),
-            noise_cave2: Self::create_unit_3d_noise(seed.wrapping_add(10)),
-            noise_cave3: Self::create_unit_3d_noise(seed.wrapping_add(11)),
-            noise_erosion: Self::create_fbm_noise(seed.wrapping_add(12), 0.0045),
-            noise_warp_x: Self::create_fbm_noise(seed.wrapping_add(20), 0.0055),
-            noise_warp_z: Self::create_fbm_noise(seed.wrapping_add(21), 0.0040),
-            noise_ridged: Self::create_ridged_noise(seed.wrapping_add(22), 0.0048),
-            noise_weirdness: Self::create_fbm_noise(seed.wrapping_add(26), 0.0026),
-            noise_plateau: Self::create_fbm_noise(seed.wrapping_add(27), 0.0032),
-            noise_valley: Self::create_fbm_noise(seed.wrapping_add(28), 0.0024),
-            noise_river_width: Self::create_fbm_noise(seed.wrapping_add(29), 0.0012),
-            noise_vegetation: Self::create_noise(seed.wrapping_add(32), 0.045),
-            noise_decor: Self::create_noise(seed.wrapping_add(24), 0.13),
-            noise_ore: Self::create_3d_noise(seed.wrapping_add(25), 0.065),
-            noise_cave_warp_x: Self::create_unit_fbm_noise(seed.wrapping_add(30)),
-            noise_cave_warp_z: Self::create_unit_fbm_noise(seed.wrapping_add(31)),
-            noise_aquifer: Self::create_3d_noise(seed.wrapping_add(41), 0.007),
+            warp_x: fbm(s(1), 0.0026, 3),
+            warp_z: fbm(s(2), 0.0026, 3),
+            continents: fbm(s(3), 0.00085, 5),
+            erosion: fbm(s(4), 0.0019, 4),
+            ridges: ridged(s(5), 0.0029, 4),
+            peaks: fbm(s(6), 0.006, 3),
+            hills: fbm(s(7), 0.011, 4),
+            river: fbm(s(8), 0.0016, 2),
+            river_width: simplex(s(9), 0.004),
+            lakes: fbm(s(10), 0.0042, 2),
+            islands: fbm(s(11), 0.011, 3),
+            plateaus: simplex(s(12), 0.0035),
+            temperature: fbm(s(13), 0.00065, 3),
+            humidity: fbm(s(14), 0.0009, 3),
+            forest: fbm(s(15), 0.012, 2),
+            entrances: fbm(s(16), 0.011, 2),
+            caverns: fbm(s(19), 0.011, 3),
+            pockets: fbm(s(20), 0.03, 2),
+            patches: fbm(s(22), 0.045, 2),
+            ravines: fbm(s(23), 0.0032, 2),
+            ravine_mask: simplex(s(24), 0.0018),
+            ravine_floor: simplex(s(25), 0.02),
             seed,
         }
     }
 
-    // ── Noise factory helpers ─────────────────────────────────────────────── //
+    // ── Column fields ──────────────────────────────────────────────────── //
 
-    fn create_noise(seed: u32, frequency: f32) -> FastNoiseLite {
-        let mut noise = FastNoiseLite::with_seed(seed as i32);
-        noise.set_noise_type(Some(NoiseType::OpenSimplex2));
-        noise.set_frequency(Some(frequency));
-        noise
-    }
+    fn sample_column(&self, x: i32, z: i32) -> ColumnSample {
+        let (fx, fz) = (x as f32, z as f32);
+        let sea = SEA_LEVEL as f32;
+        // Domain warping gives coastlines and ranges organic, curling
+        // outlines instead of blobby noise contours.
+        let wx = fx + self.warp_x.get_noise_2d(fx, fz) * 90.0;
+        let wz = fz + self.warp_z.get_noise_2d(fx, fz) * 90.0;
 
-    fn create_fbm_noise(seed: u32, frequency: f32) -> FastNoiseLite {
-        let mut noise = FastNoiseLite::with_seed(seed as i32);
-        noise.set_noise_type(Some(NoiseType::OpenSimplex2));
-        noise.set_fractal_type(Some(FractalType::FBm));
-        noise.set_fractal_octaves(Some(5));
-        noise.set_fractal_lacunarity(Some(2.0));
-        noise.set_fractal_gain(Some(0.5));
-        noise.set_frequency(Some(frequency));
-        noise
-    }
+        let continental = self.continents.get_noise_2d(wx, wz) * 1.55 + 0.12;
+        let erosion = self.erosion.get_noise_2d(wx, wz) * 1.6;
+        let base = curve(&CONTINENT_CURVE, continental);
 
-    fn create_ridged_noise(seed: u32, frequency: f32) -> FastNoiseLite {
-        let mut noise = FastNoiseLite::with_seed(seed as i32);
-        noise.set_noise_type(Some(NoiseType::OpenSimplex2));
-        noise.set_fractal_type(Some(FractalType::Ridged));
-        noise.set_fractal_octaves(Some(5));
-        noise.set_fractal_lacunarity(Some(2.2));
-        noise.set_fractal_gain(Some(0.5));
-        noise.set_frequency(Some(frequency));
-        noise
-    }
+        // Mountains need inland position and low erosion; ridged noise gives
+        // them connected crests with valleys between the ranges.
+        let inland = smoothstep(0.02, 0.5, continental);
+        let rugged = 1.0 - smoothstep(-0.5, 0.25, erosion);
+        let mountain = inland * rugged;
+        let ridge = self.ridges.get_noise_2d(wx, wz).clamp(-1.0, 1.0) * 0.5 + 0.5;
+        let peak_jitter = self.peaks.get_noise_2d(fx, fz) * 0.5 + 0.5;
+        let mountains = mountain * (ridge.powf(1.6) * 0.82 + peak_jitter * 0.18) * 118.0;
 
-    fn create_3d_noise(seed: u32, frequency: f32) -> FastNoiseLite {
-        let mut noise = FastNoiseLite::with_seed(seed as i32);
-        noise.set_noise_type(Some(NoiseType::OpenSimplex2));
-        noise.set_frequency(Some(frequency));
-        noise
-    }
+        // Rolling hills on land, flatter where erosion is high.
+        let land = smoothstep(-0.08, 0.06, continental);
+        let hill_amp = lerp(2.5, 11.0, 1.0 - smoothstep(-0.3, 0.7, erosion));
+        let hills = self.hills.get_noise_2d(fx, fz) * hill_amp * land;
 
-    fn create_unit_3d_noise(seed: u32) -> FastNoiseLite {
-        Self::create_3d_noise(seed, 1.0)
-    }
+        let mut height = base + mountains + hills;
 
-    fn create_unit_fbm_noise(seed: u32) -> FastNoiseLite {
-        Self::create_fbm_noise(seed, 1.0)
-    }
+        // Climate before water shaping: swamps and plateaus depend on it.
+        let temperature_raw = (self.temperature.get_noise_2d(fx, fz) * 1.45).clamp(-1.0, 1.0);
+        let humidity =
+            (self.humidity.get_noise_2d(fx + 4000.0, fz - 2500.0) * 1.7).clamp(-1.0, 1.0);
 
-    // ── Public chunk generation ───────────────────────────────────────────── //
-
-    pub fn generate_chunk(&self, cx: i32, cz: i32) -> Chunk {
-        let mut chunk = Chunk::new(cx, cz);
-        let base_x = cx * CHUNK_SIZE;
-        let base_z = cz * CHUNK_SIZE;
-
-        // ── Pass 1: independent climate and terrain parameters ──────────── //
-        // Terrain parameters are already smooth noise fields.  Deliberately do
-        // not blur final heights: that erased cliffs and made every transition
-        // look like a generic hill.
-        let mut biome_map = [[Biome::Plains; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        let mut height_map = [[0i32; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        let mut bordered_heights = [[0i32; HEIGHT_MAP_SIZE]; HEIGHT_MAP_SIZE];
-        for sample_x in -HEIGHT_MAP_BORDER..=(CHUNK_SIZE - 1 + HEIGHT_MAP_BORDER) {
-            for sample_z in -HEIGHT_MAP_BORDER..=(CHUNK_SIZE - 1 + HEIGHT_MAP_BORDER) {
-                let x = base_x + sample_x;
-                let z = base_z + sample_z;
-                if (0..CHUNK_SIZE).contains(&sample_x) && (0..CHUNK_SIZE).contains(&sample_z) {
-                    // Interior heights come from the density field in pass 2.
-                    // Biome selection does not need the five terrain-only fields.
-                    biome_map[sample_x as usize][sample_z as usize] = self.get_biome(x, z);
-                } else {
-                    bordered_heights[(sample_x + HEIGHT_MAP_BORDER) as usize]
-                        [(sample_z + HEIGHT_MAP_BORDER) as usize] =
-                        (self.sample_column(x, z).height as i32).clamp(1, WORLD_HEIGHT - 20);
-                }
-            }
-        }
-        let mut slope_map = [[0i32; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-
-        // ── Pass 2: coarse 3-D terrain-density lattice ──────────────────── //
-        // Terrain-only parameters are needed at coarse lattice columns and
-        // the border, rather than at every interior voxel column.
-        let density_shapes = std::array::from_fn(|ix| {
-            std::array::from_fn(|iz| {
-                let x = base_x + ix as i32 * DENSITY_CELL_SIZE;
-                let z = base_z + iz as i32 * DENSITY_CELL_SIZE;
-                self.terrain_shape(&self.sample_terrain_noise(x, z))
-            })
-        });
-        let density_lattice = self.build_density_lattice(base_x, base_z, &density_shapes);
-        // Interpolate the horizontal dimensions once per voxel column. The
-        // resulting values are vertical lattice endpoints, so individual
-        // voxels only need one vertical lerp below.
-        let mut density_columns =
-            [[[0.0; DENSITY_Y_SAMPLES]; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        // Surface rules and vegetation need the visible density surface, not
-        // merely the macro-height estimate used to construct the field.
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let density_column = self.density_vertical_column(&density_lattice, lx, lz);
-                height_map[lx as usize][lz as usize] =
-                    Self::density_surface_height(&density_column);
-                density_columns[lx as usize][lz as usize] = density_column;
-            }
-        }
-        // Surface rules must see the final density surface. At chunk edges the
-        // preliminary border is a conservative fallback; interior gradients
-        // are exact and prevent grass from covering density cliffs.
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let center = height_map[lx as usize][lz as usize];
-                let mut max_delta = 0;
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        if dx == 0 && dz == 0 {
-                            continue;
-                        }
-                        let nx = lx + dx;
-                        let nz = lz + dz;
-                        let neighbour =
-                            if (0..CHUNK_SIZE).contains(&nx) && (0..CHUNK_SIZE).contains(&nz) {
-                                height_map[nx as usize][nz as usize]
-                            } else {
-                                bordered_heights[(nx + HEIGHT_MAP_BORDER) as usize]
-                                    [(nz + HEIGHT_MAP_BORDER) as usize]
-                            };
-                        max_delta = max_delta.max((center - neighbour).abs());
-                    }
-                }
-                slope_map[lx as usize][lz as usize] = max_delta;
-            }
+        // Terraced plateaus in hot, dry uplands.
+        let terrace = smoothstep(0.25, 0.55, temperature_raw)
+            * smoothstep(0.05, -0.35, humidity)
+            * smoothstep(0.1, 0.45, self.plateaus.get_noise_2d(fx, fz))
+            * smoothstep(sea + 6.0, sea + 16.0, height);
+        if terrace > 0.0 {
+            let step = 7.0;
+            let level = (height / step).floor();
+            let frac = height / step - level;
+            let stepped = (level + smoothstep(0.55, 0.85, frac)) * step;
+            height = lerp(height, stepped, terrace);
         }
 
-        // ── Pass 3: final density, caves and aquifers ───────────────────── //
-        let mut cave_entrance_map = [[false; CHUNK_SIZE as usize]; CHUNK_SIZE as usize];
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                cave_entrance_map[lx as usize][lz as usize] =
-                    self.is_cave_entrance(world_x, world_z, height_map[lx as usize][lz as usize]);
-            }
-        }
-        // The expensive domain-warped cave field is sampled once per coarse
-        // cell corner. Endpoints lie on chunk boundaries, preventing seams.
-        let cave_lattice = self.build_cave_lattice(base_x, base_z, &density_lattice);
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                let biome = biome_map[lx as usize][lz as usize];
-                let surface_height = height_map[lx as usize][lz as usize];
-                let slope = slope_map[lx as usize][lz as usize];
-
-                let is_entrance = cave_entrance_map[lx as usize][lz as usize];
-                // `surface_height` is the highest positive terrain-density
-                // crossing in this column. Above it only empty space can
-                // exist; retaining sea level covers ocean and lake water.
-                let max_y = surface_height.max(SEA_LEVEL).min(WORLD_HEIGHT - 1);
-                let density_column = &density_columns[lx as usize][lz as usize];
-                let cave_column = self.cave_vertical_column(&cave_lattice, lx, lz, surface_height);
-                let mut fluid_level = None;
-                for y in 0..=max_y {
-                    let terrain_density = Self::sample_density_column(density_column, y);
-                    let is_solid = terrain_density > 0.0
-                        && Self::sample_cave_column(&cave_column, y, surface_height, is_entrance)
-                            > 0.0;
-
-                    if is_solid {
-                        let block = self.get_block_for_biome(
-                            biome,
-                            y,
-                            surface_height,
-                            world_x,
-                            world_z,
-                            slope,
-                        );
-                        let block = self.apply_stone_variants(world_x, y, world_z, block);
-                        if block != BlockType::Air {
-                            chunk.set_block_raw(lx, y, lz, block);
-                        }
-                    } else if self.has_fluid(world_x, y, world_z, surface_height, &mut fluid_level)
-                    {
-                        if biome == Biome::Tundra && y == SEA_LEVEL - 1 {
-                            chunk.set_block_raw(lx, y, lz, BlockType::Ice);
-                        } else {
-                            chunk.set_block_raw(lx, y, lz, BlockType::Water);
-                        }
-                    }
-                }
-            }
+        // Islands in the open ocean.
+        // Islands cluster into archipelagos instead of dotting every ocean.
+        let archipelago = smoothstep(0.05, 0.35, self.plateaus.get_noise_2d(fx * 0.18 + 900.0, fz * 0.18));
+        let island = smoothstep(0.45, 0.78, self.islands.get_noise_2d(fx, fz))
+            * smoothstep(-0.16, -0.36, continental)
+            * archipelago;
+        if island > 0.0 {
+            let target = sea + 3.0 + island * 7.0 + hills.abs() * 0.4;
+            height = lerp(height, target.max(height), smoothstep(0.0, 0.6, island));
         }
 
-        // ── Pass 4: cave decoration (floor/ceiling features) ──────────────── //
-        for lx in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                let height = height_map[lx as usize][lz as usize];
-                let hash_xz = self.position_hash(world_x, world_z);
-
-                for y in 5..height.min(WORLD_HEIGHT - 2) {
-                    let current = chunk.get_block(lx, y, lz);
-                    if current != BlockType::Air {
-                        continue;
-                    }
-
-                    let below = chunk.get_block(lx, y - 1, lz);
-                    let above = chunk.get_block(lx, y + 1, lz);
-
-                    if below != BlockType::Air
-                        && below != BlockType::Water
-                        && above == BlockType::Air
-                    {
-                        let hash3 = self.position_hash_3d(world_x, y, world_z);
-
-                        if matches!(
-                            below,
-                            BlockType::Stone | BlockType::Dirt | BlockType::Gravel
-                        ) {
-                            if hash3 % 100 < 15 {
-                                chunk.set_block_raw(lx, y - 1, lz, BlockType::Gravel);
-                            } else if y >= 35 && y <= 55 && hash3 % 100 < 8 {
-                                chunk.set_block_raw(lx, y - 1, lz, BlockType::Clay);
-                            }
-                        }
-
-                        if below == BlockType::Stone && hash_xz % 100 < 8 && y >= 8 {
-                            let stalagmite_h = 1 + (hash3 % 3) as i32;
-                            for dy in 0..stalagmite_h {
-                                let ny = y + dy;
-                                if ny < WORLD_HEIGHT
-                                    && chunk.get_block(lx, ny, lz) == BlockType::Air
-                                {
-                                    chunk.set_block_raw(lx, ny, lz, BlockType::Stone);
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if above != BlockType::Air
-                        && above != BlockType::Water
-                        && below == BlockType::Air
-                    {
-                        let hash3 = self.position_hash_3d(world_x, y, world_z);
-
-                        if above == BlockType::Stone && hash_xz.wrapping_add(7) % 100 < 6 {
-                            let stalactite_h = 1 + (hash3 % 2) as i32;
-                            for dy in 0..stalactite_h {
-                                let ny = y - dy;
-                                if ny > 4 && chunk.get_block(lx, ny, lz) == BlockType::Air {
-                                    chunk.set_block_raw(lx, ny, lz, BlockType::Stone);
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // Rivers: a warped zero-crossing of a low-frequency field. The broad
+        // valley is pulled towards sea level first, then the channel is cut
+        // below it, so every river drains at sea level and reaches the ocean.
+        let river_n = self
+            .river
+            .get_noise_2d(wx * 0.9 + 1700.0, wz * 0.9 - 900.0)
+            .abs();
+        let width = 0.016 + 0.012 * (self.river_width.get_noise_2d(fx, fz) * 0.5 + 0.5);
+        let on_land = smoothstep(-0.05, 0.08, continental);
+        let valley = (1.0 - smoothstep(width, width * 5.0, river_n)) * on_land;
+        let river = (1.0 - smoothstep(width * 0.45, width, river_n)) * on_land;
+        if valley > 0.0 {
+            let valley_floor = sea + 1.5 + (height - sea).max(0.0) * 0.22;
+            height = lerp(height, valley_floor.min(height), valley * 0.9);
+            height = lerp(height, sea - 2.0 - 2.5 * river, river);
         }
 
-        // ── Pass 5: surface decorations ───────────────────────────────────── //
-        self.generate_decorations(&mut chunk, cx, cz, &biome_map, &height_map);
+        // Lowland lakes.
+        let lowland = 1.0 - smoothstep(sea + 6.0, sea + 20.0, height);
+        let lake = smoothstep(0.38, 0.6, self.lakes.get_noise_2d(fx, fz))
+            * lowland
+            * smoothstep(0.04, 0.16, continental)
+            * (1.0 - mountain);
+        if lake > 0.0 {
+            height = lerp(height, sea - 2.0 - 4.0 * lake, lake);
+        }
 
-        // ── Pass 6: chunk/sub-chunk metadata ──────────────────────────────── //
-        chunk.rebuild_metadata();
+        // Swamps: warm, wet lowlands flattened to around sea level so
+        // shallow pools form between patches of grass.
+        let swamp = smoothstep(0.35, 0.65, humidity)
+            * smoothstep(-0.05, 0.25, temperature_raw)
+            * lowland
+            * on_land
+            * (1.0 - river);
+        if swamp > 0.0 {
+            let target = sea - 0.3 + self.hills.get_noise_2d(fx * 3.0, fz * 3.0) * 2.2;
+            height = lerp(height, target, swamp * 0.85);
+        }
 
-        chunk
+        // Air cools with altitude: high ground turns alpine and snowy.
+        let temperature = (temperature_raw - (height - 82.0).max(0.0) / 95.0).clamp(-1.0, 1.0);
+
+        ColumnSample {
+            height,
+            continental,
+            mountain,
+            river,
+            lake,
+            island,
+            swamp,
+            temperature,
+            humidity,
+        }
     }
 
-    // ── Public forwarding accessors ───────────────────────────────────────── //
+    fn snow_line(&self, temperature: f32, x: i32, z: i32) -> f32 {
+        152.0 + temperature * 30.0 + self.peaks.get_noise_2d(x as f32 * 2.0, z as f32 * 2.0) * 7.0
+    }
 
-    /// Returns the raw (unblended) terrain height at `(x, z)`.
-    ///
-    /// Used by the `ChunkLoader` for spawn-point search and LOD decisions.
-    /// Returns the single-sample height rather than the blended value because
-    /// blending requires a full noise buffer and is only meaningful at chunk
-    /// granularity (done inside `generate_chunk`).
+    fn classify(&self, x: i32, z: i32, s: &ColumnSample, surface: i32, slope: i32) -> Biome {
+        let sea = SEA_LEVEL;
+        if surface < sea {
+            return if s.river > 0.4 {
+                Biome::River
+            } else if s.lake > 0.35 {
+                Biome::Lake
+            } else if s.swamp > 0.4 {
+                Biome::Swamp
+            } else if s.continental < 0.0 {
+                Biome::Ocean
+            } else if s.lake > 0.0 {
+                Biome::Lake
+            } else {
+                Biome::River
+            };
+        }
+        if s.island > 0.3 && surface <= sea + 12 {
+            return if surface <= sea + 1 { Biome::Beach } else { Biome::Island };
+        }
+        if surface <= sea + 2 && s.continental < 0.14 && s.river < 0.3 && s.lake < 0.2 {
+            return if slope >= 3 { Biome::StonyShore } else { Biome::Beach };
+        }
+        if surface as f32 > self.snow_line(s.temperature, x, z) {
+            return Biome::SnowyPeaks;
+        }
+        if s.mountain > 0.35 && surface > 100 {
+            return Biome::Mountains;
+        }
+        let (t, h) = (s.temperature, s.humidity);
+        if s.swamp > 0.45 {
+            Biome::Swamp
+        } else if t < -0.55 {
+            Biome::Tundra
+        } else if t < -0.2 {
+            Biome::Taiga
+        } else if t > 0.42 {
+            if h < -0.3 {
+                Biome::Desert
+            } else if h < 0.28 {
+                Biome::Savanna
+            } else {
+                Biome::Jungle
+            }
+        } else if h > 0.12 {
+            Biome::Forest
+        } else if surface > 84 && h > -0.25 {
+            Biome::Meadow
+        } else {
+            Biome::Plains
+        }
+    }
+
+    /// Samples one column plus its four neighbours to classify it.
+    fn column(&self, x: i32, z: i32) -> Column {
+        let sample = self.sample_column(x, z);
+        let surface = sample.surface();
+        let slope = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .map(|&(dx, dz)| (self.sample_column(x + dx, z + dz).surface() - surface).abs())
+            .max()
+            .unwrap_or(0);
+        Column {
+            sample,
+            surface,
+            slope,
+            biome: self.classify(x, z, &sample, surface, slope),
+        }
+    }
+
+    // ── Public queries ─────────────────────────────────────────────────── //
+
+    pub fn get_biome(&self, x: i32, z: i32) -> Biome {
+        self.column(x, z).biome
+    }
+
+    /// Terrain surface height (highest terrain block, excluding features).
     pub fn get_terrain_height_pub(&self, x: i32, z: i32) -> i32 {
-        (self.sample_column(x, z).height as i32).clamp(1, WORLD_HEIGHT - 20)
+        self.sample_column(x, z).surface()
     }
 
     pub fn is_cave_entrance_pub(&self, x: i32, z: i32, surface_height: i32) -> bool {
@@ -539,1880 +421,1271 @@ impl ChunkGenerator {
     }
 
     pub fn position_hash_pub(&self, x: i32, z: i32) -> u32 {
-        self.position_hash(x, z)
+        self.hash2(x, z, 0)
     }
 
-    // ── Biome classification ──────────────────────────────────────────────── //
-
-    fn sample_column(&self, x: i32, z: i32) -> ColumnSample {
-        let noise = self.sample_terrain_noise(x, z);
-        let shape = self.terrain_shape(&noise);
-        let height = self.preliminary_surface_level(&shape, &noise);
-        ColumnSample { height }
-    }
-
-    fn terrain_warp(&self, x: i32, z: i32) -> (f32, f32) {
-        let fx = x as f32;
-        let fz = z as f32;
-        let macro_x =
-            fx + self.noise_warp_x.get_noise_2d(fx * 0.25, fz * 0.25) * MACRO_WARP_AMPLITUDE;
-        let macro_z = fz
-            + self.noise_warp_z.get_noise_2d(
-                (fx + TERRAIN_WARP_Z_OFFSET) * 0.25,
-                (fz + TERRAIN_WARP_Z_OFFSET) * 0.25,
-            ) * MACRO_WARP_AMPLITUDE;
-
-        let wx =
-            macro_x + self.noise_warp_x.get_noise_2d(macro_x, macro_z) * REGIONAL_WARP_AMPLITUDE;
-        let wz = macro_z
-            + self.noise_warp_z.get_noise_2d(
-                macro_x + TERRAIN_WARP_Z_OFFSET,
-                macro_z + TERRAIN_WARP_Z_OFFSET,
-            ) * REGIONAL_WARP_AMPLITUDE;
-
-        (wx, wz)
-    }
-
-    /// Samples only fields shared by biome selection and terrain shaping.
-    fn sample_biome_noise(&self, wx: f32, wz: f32) -> BiomeNoiseSample {
-        let continental = self.noise_continents.get_noise_2d(wx, wz) as f64;
-        let erosion = self.noise_erosion.get_noise_2d(wx, wz) as f64;
-        let river_noise = self.noise_river.get_noise_2d(wx, wz);
-        let river_width = self.noise_river_width.get_noise_2d(wx + 250.0, wz - 250.0);
-        let river_threshold = lerp(
-            RIVER_THRESHOLD_MIN as f64,
-            RIVER_THRESHOLD_MAX as f64,
-            ((river_width as f64 + 1.0) * 0.5).clamp(0.0, 1.0),
-        ) as f32;
-
-        let weirdness = self.noise_weirdness.get_noise_2d(wx, wz) as f64;
-        BiomeNoiseSample {
-            continental,
-            erosion,
-            weirdness,
-            temperature: self.noise_temperature.get_noise_2d(wx, wz),
-            moisture: self.noise_moisture.get_noise_2d(wx, wz),
-            river_value: 1.0 - river_noise.abs() * 2.0,
-            river_threshold,
-            lake: self.noise_lake.get_noise_2d(wx, wz),
-            island: self.noise_island.get_noise_2d(wx, wz),
-        }
-    }
-
-    fn sample_terrain_noise(&self, x: i32, z: i32) -> TerrainNoiseSample {
-        let (wx, wz) = self.terrain_warp(x, z);
-        let biome = self.sample_biome_noise(wx, wz);
-        TerrainNoiseSample {
-            continental: biome.continental,
-            biome_continental: biome.continental as f32,
-            terrain: self.noise_terrain.get_noise_2d(wx, wz) as f64,
-            river_value: biome.river_value,
-            river_threshold: biome.river_threshold,
-            lake: biome.lake,
-            island: biome.island,
-            erosion: biome.erosion,
-            biome_erosion: biome.erosion as f32,
-            ridged: self.noise_ridged.get_noise_2d(wx, wz) as f64,
-            mountain_chain: self.noise_ridged.get_noise_2d(wx * 0.18, wz * 0.18) as f64,
-            biome_peaks_valleys: peaks_and_valleys(biome.weirdness) as f32,
-            weirdness: biome.weirdness,
-            plateau: self.noise_plateau.get_noise_2d(wx, wz) as f64,
-            valley: self.noise_valley.get_noise_2d(wx, wz) as f64,
-        }
-    }
-
-    fn classify_biome(&self, noise: &BiomeNoiseSample) -> Biome {
-        // Rivers only on land that can actually reach the water table.
-        if noise.river_value > noise.river_threshold
-            && (noise.continental as f32) > -0.22
-            && (noise.continental as f32) < 0.72
-            && (noise.erosion as f32) > -0.55
-        {
-            return Biome::River;
-        }
-
-        if noise.lake < LAKE_THRESHOLD
-            && (noise.continental as f32) > -0.08
-            && (noise.erosion as f32) > -0.25
-        {
-            return Biome::Lake;
-        }
-
-        if (noise.continental as f32) < -0.38 {
-            if noise.island > 0.55 && noise.weirdness > -0.40 {
-                return Biome::Island;
-            }
-            return Biome::Ocean;
-        }
-
-        // Wider beach band for Minecraft-like sandy coasts.
-        if (noise.continental as f32) < -0.14
-            || ((noise.continental as f32) < -0.05 && noise.weirdness < -0.50)
-        {
-            return Biome::Beach;
-        }
-
-        self.select_land_biome(Climate {
-            temperature: noise.temperature as f64,
-            humidity: noise.moisture as f64,
-            continentalness: (noise.continental as f32) as f64,
-            erosion: (noise.erosion as f32) as f64,
-            weirdness: noise.weirdness,
-        })
-    }
-
-    /// Nearest-point selection makes climate extension data-driven: adding a
-    /// biome no longer means growing a fragile chain of terrain conditionals.
-    /// Temperature/humidity dominate so regions stay large and readable;
-    /// erosion/continentalness only tip mountain vs plains contests.
-    fn select_land_biome(&self, climate: Climate) -> Biome {
-        const POINTS: [BiomePoint; 8] = [
-            BiomePoint {
-                biome: Biome::Plains,
-                climate: Climate {
-                    temperature: 0.15,
-                    humidity: -0.05,
-                    continentalness: 0.22,
-                    erosion: 0.55,
-                    weirdness: 0.0,
-                },
-            },
-            BiomePoint {
-                biome: Biome::Forest,
-                climate: Climate {
-                    temperature: 0.20,
-                    humidity: 0.70,
-                    continentalness: 0.25,
-                    erosion: 0.20,
-                    weirdness: 0.05,
-                },
-            },
-            BiomePoint {
-                biome: Biome::Mountains,
-                climate: Climate {
-                    temperature: -0.05,
-                    humidity: 0.05,
-                    continentalness: 0.68,
-                    erosion: -0.78,
-                    weirdness: 0.55,
-                },
-            },
-            BiomePoint {
-                biome: Biome::Desert,
-                climate: Climate {
-                    temperature: 0.82,
-                    humidity: -0.78,
-                    continentalness: 0.18,
-                    erosion: 0.42,
-                    weirdness: 0.0,
-                },
-            },
-            BiomePoint {
-                biome: Biome::Tundra,
-                climate: Climate {
-                    temperature: -0.78,
-                    humidity: 0.0,
-                    continentalness: 0.20,
-                    erosion: 0.35,
-                    weirdness: 0.0,
-                },
-            },
-            BiomePoint {
-                biome: Biome::Swamp,
-                climate: Climate {
-                    temperature: 0.55,
-                    humidity: 0.88,
-                    continentalness: -0.05,
-                    erosion: 0.70,
-                    weirdness: -0.15,
-                },
-            },
-            // Cool highland forest (taiga-like within existing Forest biome).
-            BiomePoint {
-                biome: Biome::Forest,
-                climate: Climate {
-                    temperature: -0.25,
-                    humidity: 0.45,
-                    continentalness: 0.50,
-                    erosion: -0.25,
-                    weirdness: 0.30,
-                },
-            },
-            // Warm elevated plains / meadow-like.
-            BiomePoint {
-                biome: Biome::Plains,
-                climate: Climate {
-                    temperature: 0.40,
-                    humidity: 0.15,
-                    continentalness: 0.55,
-                    erosion: -0.15,
-                    weirdness: 0.35,
-                },
-            },
-        ];
-        let mut best = (Biome::Plains, f64::INFINITY);
-        for point in POINTS {
-            let p = point.climate;
-            let distance = (climate.temperature - p.temperature).powi(2) * 2.0
-                + (climate.humidity - p.humidity).powi(2) * 2.0
-                + (climate.continentalness - p.continentalness).powi(2) * 0.25
-                + (climate.erosion - p.erosion).powi(2) * 0.45
-                + (climate.weirdness - p.weirdness).powi(2) * 0.20;
-            if distance < best.1 {
-                best = (point.biome, distance);
+    /// Finds a pleasant spawn column: dry, gentle land in a temperate-ish
+    /// biome, searched on growing rings around the origin.
+    pub fn find_spawn_column(&self) -> (i32, i32) {
+        let good = |x: i32, z: i32, strict: bool| {
+            let col = self.column(x, z);
+            let biome_ok = if strict {
+                matches!(
+                    col.biome,
+                    Biome::Plains | Biome::Meadow | Biome::Forest | Biome::Savanna | Biome::Taiga
+                )
+            } else {
+                !col.biome.is_water()
+            };
+            col.surface > SEA_LEVEL + 1
+                && col.slope <= 1
+                && biome_ok
+                && !self.is_cave_entrance(x, z, col.surface)
+        };
+        for strict in [true, false] {
+            for ring in 0..200 {
+                let radius = ring * 24;
+                let points = (radius / 12).max(1);
+                for i in 0..points {
+                    let angle = i as f32 / points as f32 * std::f32::consts::TAU;
+                    let x = (angle.cos() * radius as f32).round() as i32;
+                    let z = (angle.sin() * radius as f32).round() as i32;
+                    if good(x, z, strict) {
+                        return (x, z);
+                    }
+                }
             }
         }
-        best.0
+        (0, 0)
     }
 
-    /// Classifies the biome at world position `(x, z)`.
-    ///
-    /// Domain warp offsets match exactly those used by the height sampler
-    /// (scale 0.005, Z offset +200) so biome boundaries and height boundaries
-    /// are always coherent — no more mismatched warp between the two systems.
-    pub fn get_biome(&self, x: i32, z: i32) -> Biome {
-        let (wx, wz) = self.terrain_warp(x, z);
-        self.classify_biome(&self.sample_biome_noise(wx, wz))
+    fn is_cave_entrance(&self, x: i32, z: i32, surface: i32) -> bool {
+        self.entrance_strength(x, z, surface) > 0.5
     }
 
-    // ── Terrain height ────────────────────────────────────────────────────── //
-
-    /// Core height function for a single pre-sampled `(x, z)` column.
-    ///
-    /// Domain warp uses the **same scale (0.005) and Z-offset (+200)** as
-    /// `get_biome`, guaranteeing that the biome boundary and the height
-    /// boundary stay in sync regardless of world position.
-    fn terrain_shape(&self, noise: &TerrainNoiseSample) -> TerrainShape {
-        let continentalness = noise.continental;
-        let erosion = noise.erosion;
-        let pv = peaks_and_valleys(noise.weirdness);
-        let land = smoothstep(((continentalness + 0.22) / 0.38).clamp(0.0, 1.0));
-        let inland = ((continentalness + 0.10) / 0.70).clamp(0.0, 1.0);
-        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        // Mountain chains follow PV peaks on low-erosion inland; ridged noise
-        // only accents the crest instead of spawning a second mountain system.
-        let peak_mask = smoothstep(((pv - 0.18) / 0.55).clamp(0.0, 1.0));
-        let chain = smoothstep(((noise.mountain_chain - 0.22) / 0.48).clamp(0.0, 1.0));
-        let mountain_strength = land * inland * roughness * peak_mask * (0.45 + 0.55 * chain);
-
-        // Nested Minecraft 1.18 response: continentalness = base shelf,
-        // erosion = relief amplitude, PV = valley↔peak profile.
-        let base = (CONTINENTAL_SPLINE.sample(continentalness) - SEA_LEVEL as f64) / 64.0;
-        let pv_profile = self.pv_offset(pv, roughness);
-        // High erosion nearly kills amplitude → flat plains.
-        let amplitude = land * (0.06 + inland * 0.94) * (0.10 + roughness * 0.80);
-        let ridge = noise.ridged.max(0.0).powi(2) * mountain_strength;
-        let mut offset = base + pv_profile * amplitude + ridge * 0.22;
-        // Soften factor toward 1.0 so neighbouring columns don't form pits.
-        let mut factor = lerp(0.88, self.pv_factor(pv, roughness), inland * roughness.max(0.15));
-        let mut jaggedness = self.shape_jaggedness(continentalness, erosion, pv, noise.ridged)
-            * (0.15 + mountain_strength * 0.55);
-
-        let river = self.river_channel_strength(noise) * (1.0 - mountain_strength * 0.85);
-        let lake = self.lake_strength(noise);
-        // Secondary valley/plateau fields stay tiny accents so PV owns shape.
-        let valley = self.valley_strength(noise) * 0.05;
-        let plateau = self.plateau_strength(noise) * 0.45;
-        let ocean_factor = ((-continentalness - 0.38) / 0.55).clamp(0.0, 1.0);
-        let island = self.island_strength(noise) * ocean_factor;
-
-        // Rivers/lakes still cut to the water table, but with a gentler bowl
-        // so lattice interpolation does not produce vertical shafts.
-        offset -= river * (0.14 + land * 0.08) + lake * 0.14 + valley * 0.06;
-        offset += island * 0.50 + plateau * 0.04;
-        factor *= 1.0 - river * 0.12 - lake * 0.08 + plateau * 0.04;
-        jaggedness *= 1.0 - river * 0.80 - lake * 0.75;
-        // Mid-scale relief gives plains gentle rolling ground and makes
-        // eroded uplands visibly uneven. Keep it weaker than the PV profile
-        // so it adds hills without turning every biome into generic noise.
-        let local_relief = 0.018 + roughness * 0.075 + mountain_strength * 0.045;
-        offset += noise.terrain * local_relief;
-        TerrainShape {
-            offset,
-            factor,
-            jaggedness,
-            // Overhangs stay mountain-local; capping avoids sudden hollows.
-            density3d_strength: (0.02 + mountain_strength * 0.42 + peak_mask * 0.06)
-                .clamp(0.02, 0.48),
-        }
-    }
-
-    fn shape_jaggedness(&self, continentalness: f64, erosion: f64, pv: f64, ridged: f64) -> f64 {
-        let inland = ((continentalness + 0.10) / 0.70).clamp(0.0, 1.0);
-        let roughness = (1.0 - (erosion + 1.0) * 0.5).clamp(0.0, 1.0);
-        inland * roughness * pv.max(0.0).powi(2) * (0.08 + (ridged + 1.0) * 0.08)
-    }
-
-    /// Piecewise PV spline: negative bands are valleys and lowlands, while
-    /// positive bands progress through hills into sharp peaks.
-    fn pv_offset(&self, pv: f64, roughness: f64) -> f64 {
-        lerp(
-            PV_OFFSET_ERODED.sample(pv),
-            PV_OFFSET_RUGGED.sample(pv),
-            roughness,
-        )
-    }
-
-    fn pv_factor(&self, pv: f64, roughness: f64) -> f64 {
-        lerp(
-            PV_FACTOR_ERODED.sample(pv),
-            PV_FACTOR_RUGGED.sample(pv),
-            roughness,
-        )
-    }
-
-    /// Terrain geometry is intentionally independent of the selected land
-    /// biome.  A forest, desert or tundra may therefore occur on the same
-    /// plains, valley, plateau or mountain terrain family.
-    fn preliminary_surface_level(&self, shape: &TerrainShape, _noise: &TerrainNoiseSample) -> f64 {
-        // A prediction of the zero crossing of the same terrain shape, not a
-        // second geometry system with its own river/lake/island rules.
-        (SEA_LEVEL as f64 + shape.offset * 64.0).clamp(2.0, (WORLD_HEIGHT - 2) as f64)
-    }
-
-    fn river_channel_strength(&self, noise: &TerrainNoiseSample) -> f64 {
-        let threshold = noise.river_threshold as f64;
-        // Smoothstep the bank so rivers are U-shaped bowls, not V-cut trenches.
-        let raw =
-            ((noise.river_value as f64 - threshold) / (1.0 - threshold).max(0.001)).clamp(0.0, 1.0);
-        let centerline = smoothstep(raw);
-        let land = smoothstep(((noise.continental + 0.20) / 0.32).clamp(0.0, 1.0));
-        let height = CONTINENTAL_SPLINE.sample(noise.continental);
-        let low_terrain =
-            (1.0 - ((height - SEA_LEVEL as f64) / 36.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-        // Prefer PV valley bands so rivers follow Minecraft-like troughs.
-        let valley =
-            smoothstep(((-noise.biome_peaks_valleys as f64 + 0.15) / 0.65).clamp(0.0, 1.0));
-        centerline * land * (0.40 + 0.60 * valley) * (0.40 + 0.60 * low_terrain)
-    }
-
-    fn lake_strength(&self, noise: &TerrainNoiseSample) -> f64 {
-        if noise.biome_continental <= -0.08 || noise.biome_erosion <= -0.25 {
+    /// How strongly tunnels may break through to the surface here (0..1).
+    /// Entrance zones are patches tens of blocks wide; inside them tunnels
+    /// open up as cave mouths instead of stopping under a solid roof.
+    fn entrance_strength(&self, x: i32, z: i32, surface: i32) -> f32 {
+        if surface <= SEA_LEVEL + 3 {
             return 0.0;
         }
-        let basin =
-            smoothstep(((LAKE_THRESHOLD as f64 - noise.lake as f64) / 0.20).clamp(0.0, 1.0));
-        let height = CONTINENTAL_SPLINE.sample(noise.continental);
-        let lowland = (1.0 - ((height - SEA_LEVEL as f64) / 26.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-        let flatness = ((noise.biome_erosion as f64 + 1.0) * 0.5).clamp(0.0, 1.0);
-        basin * lowland * smoothstep((flatness - 0.30) / 0.50)
+        smoothstep(0.32, 0.5, self.entrances.get_noise_2d(x as f32, z as f32))
     }
 
-    fn island_strength(&self, noise: &TerrainNoiseSample) -> f64 {
-        smoothstep(((noise.island as f64 + 1.0) * 0.5 - 0.74) / 0.26)
-    }
-
-    fn valley_strength(&self, noise: &TerrainNoiseSample) -> f64 {
-        let raw_valley = ((noise.valley + 1.0) * 0.5).clamp(0.0, 1.0);
-        let land_factor = ((noise.biome_continental as f64 + 0.08) / 0.48).clamp(0.0, 1.0);
-        let mountain_factor =
-            smoothstep((noise.biome_peaks_valleys as f64 - 0.24) / 0.42).clamp(0.0, 1.0);
-
-        smoothstep((raw_valley - 0.58) / 0.28) * land_factor * (1.0 - mountain_factor * 0.55)
-    }
-
-    fn plateau_strength(&self, noise: &TerrainNoiseSample) -> f64 {
-        let raw_plateau = ((noise.plateau + 1.0) * 0.5).clamp(0.0, 1.0);
-        let land_factor = ((noise.biome_continental as f64 + 0.02) / 0.42).clamp(0.0, 1.0);
-        let eroded_flatness = ((noise.biome_erosion as f64 + 1.0) * 0.5).clamp(0.0, 1.0);
-
-        smoothstep((raw_plateau - 0.62) / 0.30)
-            * smoothstep((eroded_flatness - 0.40) / 0.40)
-            * land_factor
-    }
-
-    // ── Cave system ───────────────────────────────────────────────────────── //
-
-    fn is_cave(&self, x: i32, y: i32, z: i32, surface_height: i32, is_entrance: bool) -> bool {
-        if y <= 4 {
-            return false;
+    /// Ravine carved into column `(x, z)`: returns `(bottom_y, edge)` where
+    /// `edge` is 0 on the centre line and 1 at the rim.
+    fn ravine(&self, x: i32, z: i32, sample: &ColumnSample) -> Option<(i32, f32)> {
+        // Inland, away from rivers and lakes, so no water ever borders one.
+        if sample.surface() <= SEA_LEVEL + 8
+            || sample.continental < 0.1
+            || sample.river > 0.0
+            || sample.lake > 0.0
+            || sample.swamp > 0.05
+        {
+            return None;
         }
-
-        let min_surface_dist = if is_entrance {
-            let t = ((surface_height - y) as f32 / 14.0).clamp(0.0, 1.0);
-            // Entrances thin the surface mask so cheese/spaghetti can daylight
-            // on hillsides without post-process shafts.
-            (1.0 + t * 7.0) as i32
-        } else {
-            // Thinner default roof than before → more natural openings.
-            11
-        };
-        if y >= surface_height - min_surface_dist {
-            return false;
+        let (fx, fz) = (x as f32, z as f32);
+        let mask = smoothstep(0.45, 0.65, self.ravine_mask.get_noise_2d(fx, fz));
+        if mask <= 0.0 {
+            return None;
         }
+        let half_width = 0.022 * mask;
+        let n = self.ravines.get_noise_2d(fx + 500.0, fz - 300.0).abs();
+        if n >= half_width {
+            return None;
+        }
+        let bottom = 18 + (self.ravine_floor.get_noise_2d(fx, fz) * 6.0) as i32;
+        Some((bottom, n / half_width))
+    }
 
-        let fx = x as f32;
-        let fy = y as f32;
-        let fz = z as f32;
+    // ── Chunk generation ───────────────────────────────────────────────── //
 
-        let warp_amp = 14.0_f32;
-        let wx = fx
-            + self
-                .noise_cave_warp_x
-                .get_noise_3d(fx * 0.016, fy * 0.009, fz * 0.016)
-                * warp_amp;
-        let wy = fy
-            + self.noise_cave_warp_z.get_noise_3d(
-                fx * 0.016 + 100.0,
-                fy * 0.009,
-                fz * 0.016 + 100.0,
-            ) * warp_amp
-                * 0.18;
-        let wz = fz
-            + self.noise_cave_warp_x.get_noise_3d(
-                fx * 0.016 + 200.0,
-                fy * 0.009,
-                fz * 0.016 + 200.0,
-            ) * warp_amp;
+    pub fn generate_chunk(&self, cx: i32, cz: i32) -> Chunk {
+        let mut chunk = Chunk::new(cx, cz);
+        let base_x = cx * CHUNK_SIZE;
+        let base_z = cz * CHUNK_SIZE;
 
-        let in_lower = y < 58;
-        let in_middle = y >= 58 && y < 100;
+        // Pass 1: column samples for the chunk and a one-column border.
+        let samples: Vec<ColumnSample> = (0..GRID * GRID)
+            .map(|i| {
+                let gx = (i / GRID) as i32 - BORDER;
+                let gz = (i % GRID) as i32 - BORDER;
+                self.sample_column(base_x + gx, base_z + gz)
+            })
+            .collect();
+        let sample_at =
+            |lx: i32, lz: i32| &samples[((lx + BORDER) as usize) * GRID + (lz + BORDER) as usize];
+        let columns: Vec<Column> = (0..(CHUNK_SIZE * CHUNK_SIZE))
+            .map(|i| {
+                let (lx, lz) = (i / CHUNK_SIZE, i % CHUNK_SIZE);
+                let sample = *sample_at(lx, lz);
+                let surface = sample.surface();
+                let slope = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .map(|&(dx, dz)| (sample_at(lx + dx, lz + dz).surface() - surface).abs())
+                    .max()
+                    .unwrap_or(0);
+                let biome = self.classify(base_x + lx, base_z + lz, &sample, surface, slope);
+                Column {
+                    sample,
+                    surface,
+                    slope,
+                    biome,
+                }
+            })
+            .collect();
+        let max_surface = columns.iter().map(|c| c.surface).max().unwrap_or(SEA_LEVEL);
 
-        // Cheese caves: larger, lower-frequency chambers in the deep/mid band.
-        if in_lower || (in_middle && y < 78) {
-            let c1 = self
-                .noise_cave1
-                .get_noise_3d(wx * 0.026, wy * 0.009, wz * 0.026);
-            if c1 > 0.0 {
-                let c2 = self.noise_cave2.get_noise_3d(
-                    wx * 0.018 + 400.0,
-                    wy * 0.007 + 400.0,
-                    wz * 0.018 + 400.0,
+        // Pass 2: cave lattice up to the highest surface in the chunk.
+        let cave_y_samples = (max_surface / CAVE_CELL_SIZE + 2) as usize;
+        let cave = self.cave_lattice(base_x, base_z, cave_y_samples);
+        let worms = self.carve_worms(base_x, base_z);
+
+        // Pass 3: terrain, caves and water.
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                let col = &columns[(lx * CHUNK_SIZE + lz) as usize];
+                let (wx, wz) = (base_x + lx, base_z + lz);
+                chunk.set_column_tint(
+                    lx,
+                    lz,
+                    climate_tint(col.sample.temperature, col.sample.humidity),
                 );
-                // Lower product threshold → bigger cheese rooms.
-                if c1 * c2.max(0.0) > 0.22 {
+                let entrance = if matches!(col.biome, Biome::River | Biome::Beach) {
+                    0.0
+                } else {
+                    self.entrance_strength(wx, wz, col.surface)
+                };
+                let ravine = self.ravine(wx, wz, &col.sample);
+                // Never carve beside water in a neighbouring column: open
+                // cave space next to static water would show a water wall.
+                let carve_ceiling = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .map(|&(dx, dz)| sample_at(lx + dx, lz + dz).surface())
+                    .filter(|&s| s < SEA_LEVEL)
+                    .map(|s| s - 9)
+                    .min()
+                    .unwrap_or(WORLD_HEIGHT);
+                let column_hash = self.hash2(wx, wz, 1);
+                let bedrock_top = (column_hash % 3) as i32;
+                // Patch noise: neighbouring columns share materials, so the
+                // ground shows coherent patches instead of random speckles.
+                let patch = self.patches.get_noise_2d(wx as f32, wz as f32);
+                let filler_depth = 3 + i32::from(patch > 0.0);
+                let snow_line = self.snow_line(col.sample.temperature, wx, wz);
+                let ctx = CaveColumn {
+                    surface: col.surface,
+                    slope: col.slope,
+                    entrance,
+                    ravine,
+                    carve_ceiling,
+                };
+
+                for y in 0..=col.surface {
+                    if y <= bedrock_top {
+                        chunk.set_block_raw(lx, y, lz, BlockType::Bedrock);
+                        continue;
+                    }
+                    if self.carve_cave(&cave, &worms, lx, y, lz, &ctx) {
+                        // The deepest caves are flooded: underground lakes.
+                        if y <= CAVE_WATER_LEVEL {
+                            chunk.set_block_raw(lx, y, lz, BlockType::Water);
+                        }
+                        continue;
+                    }
+                    let mut block = self.surface_block(col, y, filler_depth, snow_line, patch);
+                    // Soft pockets (whole blobs of one material) break up the
+                    // stone underground.
+                    if block == BlockType::Stone {
+                        let pocket = sample_lattice(&cave, 1, lx, y, lz);
+                        if pocket > 0.56 {
+                            block = BlockType::Gravel;
+                        } else if pocket < -0.6 && y > 30 {
+                            block = BlockType::Dirt;
+                        }
+                    }
+                    chunk.set_block_raw(lx, y, lz, block);
+                }
+
+                if col.surface < SEA_LEVEL {
+                    // Ragged pack-ice edge rather than a clean contour line.
+                    let frozen = col.sample.temperature
+                        + self.hills.get_noise_2d(wx as f32 * 2.0, wz as f32 * 2.0) * 0.12
+                        < -0.68;
+                    for y in (col.surface + 1)..SEA_LEVEL {
+                        let block = if frozen && y == SEA_LEVEL - 1 {
+                            BlockType::Ice
+                        } else {
+                            BlockType::Water
+                        };
+                        chunk.set_block_raw(lx, y, lz, block);
+                    }
+                }
+            }
+        }
+
+        // Pass 4: features from every anchor whose reach overlaps the chunk.
+        self.place_features(&mut chunk, base_x, base_z, &columns);
+
+        chunk.rebuild_metadata();
+        chunk
+    }
+
+    // ── Surface rules ──────────────────────────────────────────────────── //
+
+    fn surface_block(
+        &self,
+        col: &Column,
+        y: i32,
+        filler_depth: i32,
+        snow_line: f32,
+        patch: f32,
+    ) -> BlockType {
+        let depth = col.surface - y;
+        let underwater = col.surface < SEA_LEVEL;
+        let steep = col.slope >= 4;
+
+        match col.biome {
+            Biome::Ocean | Biome::River | Biome::Lake => {
+                if depth > 3 {
+                    return BlockType::Stone;
+                }
+                // Sediment in broad, smooth patches; the whole top layer of
+                // a column is one material.
+                let deep = col.surface < SEA_LEVEL - 12;
+                match col.biome {
+                    Biome::River if patch < -0.12 => BlockType::Gravel,
+                    Biome::River if patch > 0.3 => BlockType::Clay,
+                    Biome::Lake if patch < -0.15 => BlockType::Clay,
+                    Biome::Lake if patch > 0.3 => BlockType::Gravel,
+                    Biome::Ocean if deep && patch < -0.05 => BlockType::Gravel,
+                    Biome::Ocean if deep && patch > 0.32 => BlockType::Clay,
+                    Biome::Ocean if !deep && patch < -0.38 => BlockType::Gravel,
+                    _ => BlockType::Sand,
+                }
+            }
+            Biome::Beach => {
+                if depth <= 4 {
+                    BlockType::Sand
+                } else {
+                    BlockType::Stone
+                }
+            }
+            Biome::StonyShore => {
+                if depth == 0 && patch < 0.05 {
+                    BlockType::Gravel
+                } else {
+                    BlockType::Stone
+                }
+            }
+            Biome::Desert => {
+                if col.slope >= 7 && depth < 3 {
+                    BlockType::Stone
+                } else if depth <= filler_depth + 2 {
+                    BlockType::Sand
+                } else {
+                    BlockType::Stone
+                }
+            }
+            Biome::SnowyPeaks => {
+                if depth <= 1 && col.slope < 7 {
+                    BlockType::Snow
+                } else if depth == 0 && patch > 0.35 {
+                    BlockType::Ice
+                } else {
+                    BlockType::Stone
+                }
+            }
+            Biome::Mountains => {
+                if steep || depth > filler_depth {
+                    BlockType::Stone
+                } else if (col.surface as f32) > snow_line - 12.0 && depth == 0 {
+                    BlockType::Snow
+                } else if depth == 0 && patch < -0.3 {
+                    BlockType::Gravel
+                } else if depth == 0 {
+                    BlockType::Grass
+                } else {
+                    BlockType::Dirt
+                }
+            }
+            _ => {
+                if steep {
+                    return if depth == 0 && col.biome == Biome::Tundra {
+                        BlockType::Snow
+                    } else {
+                        BlockType::Stone
+                    };
+                }
+                if depth > filler_depth {
+                    return BlockType::Stone;
+                }
+                if depth > 0 {
+                    return BlockType::Dirt;
+                }
+                if underwater {
+                    // Swamp pools and other shallow lowland water.
+                    return if patch < 0.0 {
+                        BlockType::Clay
+                    } else {
+                        BlockType::Dirt
+                    };
+                }
+                if col.surface <= SEA_LEVEL && col.sample.river > 0.05 {
+                    return BlockType::Sand; // river bank
+                }
+                match col.biome {
+                    Biome::Tundra => BlockType::Snow,
+                    Biome::Taiga if (col.surface as f32) > snow_line - 30.0 => BlockType::Snow,
+                    Biome::Taiga if patch > 0.3 => BlockType::Dirt,
+                    Biome::Savanna if patch > 0.36 => BlockType::Dirt,
+                    Biome::Island if col.surface <= SEA_LEVEL + 2 => BlockType::Sand,
+                    _ => BlockType::Grass,
+                }
+            }
+        }
+    }
+
+    // ── Caves ──────────────────────────────────────────────────────────── //
+
+    /// Samples the cave fields on a coarse lattice. Lattice points sit
+    /// on chunk boundaries, so neighbouring chunks agree exactly.
+    fn cave_lattice(&self, base_x: i32, base_z: i32, y_samples: usize) -> CaveLattice {
+        let mut values = vec![[0.0f32; 2]; CAVE_XZ * CAVE_XZ * y_samples];
+        for ix in 0..CAVE_XZ {
+            for iz in 0..CAVE_XZ {
+                let x = (base_x + ix as i32 * CAVE_CELL_SIZE) as f32;
+                let z = (base_z + iz as i32 * CAVE_CELL_SIZE) as f32;
+                for iy in 0..y_samples {
+                    let y = (iy as i32 * CAVE_CELL_SIZE) as f32;
+                    // Caverns are squashed vertically into wide, low halls.
+                    values[(ix * CAVE_XZ + iz) * y_samples + iy] = [
+                        self.caverns.get_noise_3d(x, y * 1.6, z),
+                        self.pockets.get_noise_3d(x, y * 1.3, z),
+                    ];
+                }
+            }
+        }
+        CaveLattice { values, y_samples }
+    }
+
+    fn carve_cave(
+        &self,
+        cave: &CaveLattice,
+        worms: &WormMask,
+        lx: i32,
+        y: i32,
+        lz: i32,
+        col: &CaveColumn,
+    ) -> bool {
+        if y <= 4 || y > col.carve_ceiling {
+            return false;
+        }
+        let depth = col.surface - y;
+
+        // Ravines: long, narrow cracks open to the sky, with walls that
+        // narrow towards the floor.
+        if let Some((bottom, edge)) = col.ravine {
+            if y >= bottom {
+                let span = (col.surface - bottom).max(1) as f32;
+                let rise = (y - bottom) as f32 / span; // 0 floor → 1 rim
+                if edge * edge <= 0.15 + 0.85 * rise {
                     return true;
                 }
             }
         }
 
-        let s1 = self
-            .noise_cave1
-            .get_noise_3d(wx * 0.052 + 500.0, wy * 0.022, wz * 0.052);
-        let s2 = self
-            .noise_cave3
-            .get_noise_3d(wx * 0.052 + 900.0, wy * 0.022, wz * 0.052);
-        let spag_dist = (s1 * s1 + s2 * s2).sqrt();
-        let spag_radius = if in_lower {
-            0.115
-        } else if in_middle {
-            0.090
+        // Worm tunnels keep a solid roof on flat ground, but may break out
+        // of hillsides (natural cave mouths) and inside entrance zones.
+        // Under water the roof is thick so the sea never drains into them.
+        let roof = if col.surface < SEA_LEVEL {
+            9.0
+        } else if col.slope >= 2 {
+            0.0
         } else {
-            0.060
+            lerp(4.0, 0.0, col.entrance)
         };
-        if spag_dist < spag_radius {
+        if (depth as f32) >= roof && worms.get(lx, y, lz) {
+            return true;
+        }
+        if worms.get_open(lx, y, lz) && (col.surface >= SEA_LEVEL || depth >= 9) {
             return true;
         }
 
-        if y > 16 {
-            let n1 = self
-                .noise_cave2
-                .get_noise_3d(wx * 0.080 + 800.0, wy * 0.035, wz * 0.080);
-            let n2 = self
-                .noise_cave3
-                .get_noise_3d(wx * 0.080 + 1200.0, wy * 0.035, wz * 0.080);
-            let noodle_dist = (n1 * n1 + n2 * n2).sqrt();
-            let noodle_radius = if in_lower { 0.065 } else { 0.045 };
-            if noodle_dist < noodle_radius {
-                return true;
-            }
-        }
-
-        if y < 36 {
-            let w1 = self
-                .noise_cave2
-                .get_noise_3d(wx * 0.038 + 800.0, wy * 0.013, wz * 0.038);
-            let w2 = self
-                .noise_cave3
-                .get_noise_3d(wx * 0.038 + 1200.0, wy * 0.013, wz * 0.038);
-            let worm_dist = (w1 * w1 + w2 * w2).sqrt();
-            if worm_dist < 0.100 {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Cave families are composed with terrain before blocks are emitted.
-    /// Positive values preserve material; negative values represent cavity.
-    fn cave_density(
-        &self,
-        x: i32,
-        y: i32,
-        z: i32,
-        preliminary_surface: i32,
-        is_entrance: bool,
-    ) -> f64 {
-        if y <= 4 || y >= preliminary_surface {
-            return 1.0;
-        }
-
-        // Carved cave families override the continuous cheese field entirely.
-        if self.is_cave(x, y, z, preliminary_surface, is_entrance) {
-            return -1.0;
-        }
-
-        // Continuous cheese field around the binary carve threshold softens
-        // chamber edges; spaghetti/noodle/worm still use exact openings above.
-        let fx = x as f32;
-        let fy = y as f32;
-        let fz = z as f32;
-        let c1 = self
-            .noise_cave1
-            .get_noise_3d(fx * 0.026, fy * 0.009, fz * 0.026);
-        if c1 <= 0.0 {
-            return 1.0;
-        }
-        let c2 = self.noise_cave2.get_noise_3d(
-            fx * 0.018 + 400.0,
-            fy * 0.007 + 400.0,
-            fz * 0.018 + 400.0,
-        );
-        let cheese_signed = (0.22 - c1.max(0.0) * c2.max(0.0)) * 5.0;
-        cheese_signed.clamp(0.06, 1.0) as f64
-    }
-
-    fn has_fluid(
-        &self,
-        x: i32,
-        y: i32,
-        z: i32,
-        preliminary_surface: i32,
-        fluid_level: &mut Option<i32>,
-    ) -> bool {
-        if preliminary_surface < SEA_LEVEL && y < SEA_LEVEL {
-            return true;
-        }
-        // Aquifer water table varies by column; sample once, then skip above.
-        let level = *fluid_level.get_or_insert_with(|| {
-            let cell =
-                self.noise_aquifer
-                    .get_noise_3d(x as f32 + 4000.0, 0.0, z as f32 - 4000.0) as f64;
-            // Slightly higher water table so flooded caves feel Minecraft-like.
-            28 + ((cell + 1.0) * 0.5 * 36.0) as i32
-        });
-        y <= level
-            && self
-                .noise_aquifer
-                .get_noise_3d(x as f32, y as f32, z as f32) as f64
-                > 0.06
-    }
-
-    fn is_cave_entrance(&self, x: i32, z: i32, surface_height: i32) -> bool {
-        if surface_height <= SEA_LEVEL + 4 {
+        // Caverns: big low halls, only deep underground.
+        if depth < 16 || y > 48 {
             return false;
         }
-
-        let fx = x as f32;
-        let fz = z as f32;
-
-        let entrance_noise = self
-            .noise_cave1
-            .get_noise_2d(fx * 0.012 + 1000.0, fz * 0.012 + 1000.0);
-
-        let terrain_slope = self
-            .noise_terrain
-            .get_noise_2d(fx * 0.016, fz * 0.016)
-            .abs();
-        let is_hillside = terrain_slope > 0.12;
-
-        let threshold = if is_hillside { 0.68 } else { 0.84 };
-        if entrance_noise < threshold {
-            return false;
-        }
-
-        let hash = self.position_hash(x, z);
-        let entrance_chance = if is_hillside { 7 } else { 16 };
-        if hash % entrance_chance != 0 {
-            return false;
-        }
-
-        for check_y in (surface_height - 48).max(6)..=(surface_height - 4) {
-            let fy = check_y as f32;
-            let c1 = self
-                .noise_cave1
-                .get_noise_3d(fx * 0.040, fy * 0.020, fz * 0.040);
-            let c2 = self
-                .noise_cave2
-                .get_noise_3d(fx * 0.028, fy * 0.016, fz * 0.028);
-            if c1 > 0.58 && c2 > 0.58 {
-                return true;
-            }
-        }
-
-        false
+        let cavern = sample_lattice(cave, 0, lx, y, lz);
+        let threshold = 0.4 + 0.3 * smoothstep(20.0, 48.0, y as f32);
+        cavern > threshold
     }
 
-    // ── 3-D density (overhangs) ───────────────────────────────────────────── //
-
-    fn density_index(ix: usize, iy: usize, iz: usize) -> usize {
-        (ix * DENSITY_Y_SAMPLES + iy) * DENSITY_XZ_SAMPLES + iz
-    }
-
-    fn cave_index(ix: usize, iy: usize, iz: usize) -> usize {
-        (ix * CAVE_Y_SAMPLES + iy) * CAVE_XZ_SAMPLES + iz
-    }
-
-    fn build_cave_lattice(
-        &self,
-        base_x: i32,
-        base_z: i32,
-        density_lattice: &[f64; DENSITY_LATTICE_LEN],
-    ) -> [f64; CAVE_LATTICE_LEN] {
-        let mut lattice = [1.0; CAVE_LATTICE_LEN];
-
-        for ix in 0..CAVE_XZ_SAMPLES {
-            for iz in 0..CAVE_XZ_SAMPLES {
-                let lx = ix as i32 * CAVE_CELL_SIZE;
-                let lz = iz as i32 * CAVE_CELL_SIZE;
-                let x = base_x + lx;
-                let z = base_z + lz;
-                // The final lattice row/column is outside this chunk, but is
-                // required as its shared interpolation endpoint.
-                let density_column = self.density_vertical_column(density_lattice, lx, lz);
-                let surface_height = Self::density_surface_height(&density_column);
-                let is_entrance = self.is_cave_entrance(x, z, surface_height);
-
-                for iy in 0..CAVE_Y_SAMPLES {
-                    let y = iy as i32 * CAVE_CELL_SIZE;
-                    lattice[Self::cave_index(ix, iy, iz)] =
-                        self.cave_density(x, y, z, surface_height, is_entrance);
-                }
-            }
-        }
-
-        lattice
-    }
-
-    fn build_density_lattice(
-        &self,
-        base_x: i32,
-        base_z: i32,
-        shapes: &[[TerrainShape; DENSITY_XZ_SAMPLES]; DENSITY_XZ_SAMPLES],
-    ) -> [f64; DENSITY_LATTICE_LEN] {
-        // FastNoiseLite's fields are bounded by [-1, 1]. Use twice that
-        // amplitude as a conservative margin. Above the first plane whose
-        // upper bound is negative for every shape, all horizontal/vertical
-        // interpolants remain negative. Keep that first plane's exact values
-        // because they can still interpolate with a positive plane below.
-        let first_air_plane = (0..DENSITY_Y_SAMPLES).find(|&iy| {
-            let y = iy as i32 * DENSITY_CELL_SIZE;
-            shapes.iter().flatten().all(|shape| {
-                let depth = self.y_gradient(y) + shape.offset;
-                let shaped = (depth + shape.jaggedness.abs() * 2.0) * shape.factor;
-                debug_assert!(shape.factor > 0.0);
-                4.0 * quarter_negative(shaped) + shape.density3d_strength.abs() * 2.0 < -0.001
-            })
-        });
-        // The symmetric lower bound skips guaranteed solid deep terrain.
-        // Retain the last all-solid plane exactly for the transition above it.
-        let last_solid_plane = (0..DENSITY_Y_SAMPLES).rev().find(|&iy| {
-            let y = iy as i32 * DENSITY_CELL_SIZE;
-            shapes.iter().flatten().all(|shape| {
-                let depth = self.y_gradient(y) + shape.offset;
-                let shaped = (depth - shape.jaggedness.abs() * 2.0) * shape.factor;
-                4.0 * quarter_negative(shaped) - shape.density3d_strength.abs() * 2.0 > 0.001
-            })
-        });
-        let sample_start = last_solid_plane.unwrap_or(0);
-        let sample_end = first_air_plane.map_or(DENSITY_Y_SAMPLES, |iy| iy + 1);
-        let mut lattice = [-1.0; DENSITY_LATTICE_LEN];
-        for ix in 0..DENSITY_XZ_SAMPLES {
-            for iz in 0..DENSITY_XZ_SAMPLES {
-                let x = base_x + ix as i32 * DENSITY_CELL_SIZE;
-                let z = base_z + iz as i32 * DENSITY_CELL_SIZE;
-                let shape = shapes[ix][iz];
-                for iy in 0..sample_start {
-                    lattice[Self::density_index(ix, iy, iz)] = 1.0;
-                }
-                for iy in sample_start..sample_end {
-                    let y = iy as i32 * DENSITY_CELL_SIZE;
-                    lattice[Self::density_index(ix, iy, iz)] =
-                        self.terrain_density(x, y, z, &shape);
-                }
-            }
-        }
-        lattice
-    }
-
-    fn terrain_density(&self, x: i32, y: i32, z: i32, shape: &TerrainShape) -> f64 {
-        let depth = self.y_gradient(y) + shape.offset;
-        let jagged = shape.jaggedness
-            * half_negative(self.noise_detail.get_noise_3d(x as f32, y as f32, z as f32) as f64);
-        let shaped = (depth + jagged) * shape.factor;
-        let base_3d =
-            self.noise_terrain
-                .get_noise_3d(x as f32 + 1900.0, y as f32 + 700.0, z as f32 - 1900.0)
-                as f64;
-        4.0 * quarter_negative(shaped) + base_3d * shape.density3d_strength
-    }
-
-    fn y_gradient(&self, y: i32) -> f64 {
-        (SEA_LEVEL as f64 - y as f64) / 64.0
-    }
-
-    /// Horizontally interpolate all vertical endpoints for one `(lx, lz)`
-    /// column. This turns voxel density sampling into a single vertical lerp.
-    fn density_vertical_column(
-        &self,
-        lattice: &[f64; DENSITY_LATTICE_LEN],
-        lx: i32,
-        lz: i32,
-    ) -> [f64; DENSITY_Y_SAMPLES] {
-        let ix = (lx / DENSITY_CELL_SIZE) as usize;
-        let iz = (lz / DENSITY_CELL_SIZE) as usize;
-        let tx = (lx.rem_euclid(DENSITY_CELL_SIZE) as f64) / DENSITY_CELL_SIZE as f64;
-        let tz = (lz.rem_euclid(DENSITY_CELL_SIZE) as f64) / DENSITY_CELL_SIZE as f64;
-        let x1 = (ix + 1).min(DENSITY_XZ_SAMPLES - 1);
-        let z1 = (iz + 1).min(DENSITY_XZ_SAMPLES - 1);
-        let mut column = [0.0; DENSITY_Y_SAMPLES];
-
-        for iy in 0..DENSITY_Y_SAMPLES {
-            let at = |x, z| lattice[Self::density_index(x, iy, z)];
-            column[iy] = lerp(
-                lerp(at(ix, iz), at(x1, iz), tx),
-                lerp(at(ix, z1), at(x1, z1), tx),
-                tz,
-            );
-        }
-
-        column
-    }
-
-    fn sample_density_column(column: &[f64; DENSITY_Y_SAMPLES], y: i32) -> f64 {
-        let iy = (y / DENSITY_CELL_SIZE) as usize;
-        let ty = (y.rem_euclid(DENSITY_CELL_SIZE) as f64) / DENSITY_CELL_SIZE as f64;
-        let y1 = (iy + 1).min(DENSITY_Y_SAMPLES - 1);
-        lerp(column[iy], column[y1], ty)
-    }
-
-    /// Keep the original X-then-Z-then-Y lerp order so thresholds are identical.
-    fn cave_vertical_column(
-        &self,
-        lattice: &[f64; CAVE_LATTICE_LEN],
-        lx: i32,
-        lz: i32,
-        surface_height: i32,
-    ) -> [f64; CAVE_Y_SAMPLES] {
-        let ix = (lx / CAVE_CELL_SIZE) as usize;
-        let iz = (lz / CAVE_CELL_SIZE) as usize;
-        let tx = lx.rem_euclid(CAVE_CELL_SIZE) as f64 / CAVE_CELL_SIZE as f64;
-        let tz = lz.rem_euclid(CAVE_CELL_SIZE) as f64 / CAVE_CELL_SIZE as f64;
-        let x1 = (ix + 1).min(CAVE_XZ_SAMPLES - 1);
-        let z1 = (iz + 1).min(CAVE_XZ_SAMPLES - 1);
-        let mut column = [1.0; CAVE_Y_SAMPLES];
-        let last = (surface_height as usize / CAVE_CELL_SIZE as usize).min(CAVE_Y_SAMPLES - 1);
-        for (iy, value) in column.iter_mut().enumerate().take(last + 1) {
-            let at = |x, z| lattice[Self::cave_index(x, iy, z)];
-            *value = lerp(
-                lerp(at(ix, iz), at(x1, iz), tx),
-                lerp(at(ix, z1), at(x1, z1), tx),
-                tz,
-            );
-        }
-        column
-    }
-
-    fn sample_cave_column(
-        column: &[f64; CAVE_Y_SAMPLES],
-        y: i32,
-        surface_height: i32,
-        is_entrance: bool,
-    ) -> f64 {
-        if y <= 4 || y >= surface_height {
-            return 1.0;
-        }
-        let min_surface_dist = if is_entrance {
-            let t = ((surface_height - y) as f32 / 14.0).clamp(0.0, 1.0);
-            (1.0 + t * 7.0) as i32
-        } else {
-            11
-        };
-        if y >= surface_height - min_surface_dist {
-            return 1.0;
-        }
-        let iy = (y / CAVE_CELL_SIZE) as usize;
-        let ty = y.rem_euclid(CAVE_CELL_SIZE) as f64 / CAVE_CELL_SIZE as f64;
-        let y1 = (iy + 1).min(CAVE_Y_SAMPLES - 1);
-        lerp(column[iy], column[y1], ty)
-    }
-
-    #[cfg(test)]
-    fn sample_cave_lattice(
-        &self,
-        lattice: &[f64; CAVE_LATTICE_LEN],
-        lx: i32,
-        y: i32,
-        lz: i32,
-        surface_height: i32,
-        is_entrance: bool,
-    ) -> f64 {
-        // A local guard prevents interpolation from a lower cell opening the
-        // surface, and avoids all interpolation for sky voxels.
-        if y <= 4 || y >= surface_height {
-            return 1.0;
-        }
-
-        let ix = (lx / CAVE_CELL_SIZE) as usize;
-        let iy = (y / CAVE_CELL_SIZE) as usize;
-        let iz = (lz / CAVE_CELL_SIZE) as usize;
-        let tx = (lx.rem_euclid(CAVE_CELL_SIZE) as f64) / CAVE_CELL_SIZE as f64;
-        let ty = (y.rem_euclid(CAVE_CELL_SIZE) as f64) / CAVE_CELL_SIZE as f64;
-        let tz = (lz.rem_euclid(CAVE_CELL_SIZE) as f64) / CAVE_CELL_SIZE as f64;
-        let x1 = (ix + 1).min(CAVE_XZ_SAMPLES - 1);
-        let y1 = (iy + 1).min(CAVE_Y_SAMPLES - 1);
-        let z1 = (iz + 1).min(CAVE_XZ_SAMPLES - 1);
-        let at = |x, yy, z| lattice[Self::cave_index(x, yy, z)];
-        let a = lerp(
-            lerp(at(ix, iy, iz), at(x1, iy, iz), tx),
-            lerp(at(ix, iy, z1), at(x1, iy, z1), tx),
-            tz,
-        );
-        let b = lerp(
-            lerp(at(ix, y1, iz), at(x1, y1, iz), tx),
-            lerp(at(ix, y1, z1), at(x1, y1, z1), tx),
-            tz,
-        );
-        let interpolated = lerp(a, b, ty);
-
-        let min_surface_dist = if is_entrance {
-            let t = ((surface_height - y) as f32 / 14.0).clamp(0.0, 1.0);
-            (1.0 + t * 7.0) as i32
-        } else {
-            11
-        };
-        if y >= surface_height - min_surface_dist {
-            1.0
-        } else {
-            interpolated
-        }
-    }
-
-    fn density_surface_height(column: &[f64; DENSITY_Y_SAMPLES]) -> i32 {
-        // First search exact lattice endpoints. Once the highest positive
-        // endpoint is found, only its following four-voxel cell can contain
-        // the final positive density, because vertical interpolation is
-        // linear. This preserves the old result without scanning every voxel.
-        for iy in (0..DENSITY_Y_SAMPLES).rev() {
-            if column[iy] <= 0.0 {
-                continue;
-            }
-
-            let cell_bottom = iy as i32 * DENSITY_CELL_SIZE;
-            if cell_bottom >= WORLD_HEIGHT {
-                continue;
-            }
-            let cell_top = (cell_bottom + DENSITY_CELL_SIZE - 1).min(WORLD_HEIGHT - 1);
-            for y in (cell_bottom.max(1)..=cell_top).rev() {
-                if Self::sample_density_column(column, y) > 0.0 {
-                    return y + 1;
-                }
-            }
-        }
-        1
-    }
-
-    // ── Block type assignment ─────────────────────────────────────────────── //
-
-    fn snow_line(&self, world_x: i32, world_z: i32, biome: Biome) -> i32 {
-        let local_variation = self
-            .noise_detail
-            .get_noise_2d(world_x as f32 + 7000.0, world_z as f32 - 7000.0);
-        let offset = (local_variation * 8.0) as i32;
-
-        match biome {
-            Biome::Tundra => SEA_LEVEL + 8 + offset,
-            Biome::Mountains => 118 + offset,
-            Biome::Forest => 148 + offset,
-            _ => 160 + offset,
-        }
-    }
-
-    fn get_block_for_biome(
-        &self,
-        biome: Biome,
-        y: i32,
-        surface_height: i32,
-        world_x: i32,
-        world_z: i32,
-        slope: i32,
-    ) -> BlockType {
-        if y == 0 {
-            return BlockType::Bedrock;
-        }
-        if y <= 4 {
-            let bedrock_chance = (5 - y) as u32 * 20;
-            let hash = self.position_hash_3d(world_x, y, world_z);
-            if (hash % 100) < bedrock_chance {
-                return BlockType::Bedrock;
-            }
-        }
-
-        if y < 8 {
-            let deep_hash = self.position_hash_3d(world_x, y, world_z);
-            if deep_hash % 10 < 3 {
-                return BlockType::Stone;
-            }
-        }
-
-        // Density terrain can intentionally extend beyond the column's macro
-        // surface (overhangs, shelves and cliff lips). Those voxels are bare
-        // rock; normal surface rules remain attached to the macro surface.
-        if y >= surface_height {
-            return BlockType::Stone;
-        }
-
-        let depth_from_surface = surface_height - y;
-        // The deepest surface layer is desert sand (12 blocks). Below all
-        // biome layers the base material is always stone; bedrock was handled
-        // above. Ore variants are still applied by the caller.
-        if depth_from_surface > 12 {
-            return BlockType::Stone;
-        }
-        let dirt_depth = 3 + (self.position_hash(world_x, world_z) % 3) as i32;
-        let underwater_surface = y == surface_height - 1 && y < SEA_LEVEL;
-        let is_surface = y == surface_height - 1;
-        let high_snow =
-            is_surface && !underwater_surface && y >= self.snow_line(world_x, world_z, biome);
-        // Steeper cliff threshold keeps grass on rolling hills, stone on cliffs.
-        let steep_surface = is_surface && slope >= 6 && !underwater_surface;
-        let surface_hash = self.position_hash(world_x, world_z);
-
-        match biome {
-            Biome::Ocean | Biome::River | Biome::Lake => {
-                if depth_from_surface > 6 {
-                    BlockType::Stone
-                } else if depth_from_surface > 3 {
-                    BlockType::Gravel
-                } else if biome == Biome::River && depth_from_surface <= 2 {
-                    // Riverbeds mix sand and gravel like Minecraft.
-                    if surface_hash % 3 == 0 {
-                        BlockType::Gravel
-                    } else {
-                        BlockType::Sand
-                    }
-                } else {
-                    BlockType::Sand
-                }
-            }
-            Biome::Beach | Biome::Island => {
-                if depth_from_surface > 8 {
-                    BlockType::Stone
-                } else if depth_from_surface > 0 {
-                    BlockType::Sand
-                } else if y == surface_height - 1 {
-                    if underwater_surface {
-                        BlockType::Sand
-                    } else if biome == Biome::Island && y > SEA_LEVEL + 3 {
-                        BlockType::Grass
-                    } else if biome == Biome::Beach && y > SEA_LEVEL + 3 && surface_hash % 5 == 0 {
-                        // Sparse grass just inland of the wet beach.
-                        BlockType::Grass
-                    } else {
-                        BlockType::Sand
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Desert => {
-                if depth_from_surface > 12 {
-                    BlockType::Stone
-                } else {
-                    BlockType::Sand
-                }
-            }
-            Biome::Tundra => {
-                if depth_from_surface > dirt_depth + 2 {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    if underwater_surface {
-                        BlockType::Gravel
-                    } else if steep_surface && surface_hash % 3 == 0 {
-                        BlockType::Stone
-                    } else {
-                        BlockType::Snow
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Mountains => {
-                if high_snow || y > 140 {
-                    if y == surface_height - 1 {
-                        BlockType::Snow
-                    } else {
-                        BlockType::Stone
-                    }
-                } else if y > 105 {
-                    let hash = self.position_hash_3d(world_x, y, world_z);
-                    if depth_from_surface <= 1 {
-                        if slope >= 7 || hash % 3 == 0 {
-                            BlockType::Gravel
-                        } else {
-                            BlockType::Stone
-                        }
-                    } else {
-                        BlockType::Stone
-                    }
-                } else if depth_from_surface > dirt_depth {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    if underwater_surface {
-                        BlockType::Gravel
-                    } else if steep_surface {
-                        if surface_hash % 3 == 0 {
-                            BlockType::Gravel
-                        } else {
-                            BlockType::Stone
-                        }
-                    } else {
-                        BlockType::Grass
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Swamp => {
-                if depth_from_surface > dirt_depth {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    if underwater_surface || y <= SEA_LEVEL + 1 {
-                        BlockType::Clay
-                    } else if y <= SEA_LEVEL + 2 && surface_hash % 3 != 0 {
-                        BlockType::Clay
-                    } else if steep_surface && surface_hash % 4 == 0 {
-                        BlockType::Dirt
-                    } else {
-                        BlockType::Grass
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-            Biome::Plains | Biome::Forest => {
-                if depth_from_surface > dirt_depth {
-                    BlockType::Stone
-                } else if depth_from_surface > 1 {
-                    BlockType::Dirt
-                } else if y == surface_height - 1 {
-                    if underwater_surface {
-                        BlockType::Sand
-                    } else if high_snow {
-                        BlockType::Snow
-                    } else if steep_surface && slope >= 8 {
-                        if surface_hash % 4 == 0 {
-                            BlockType::Gravel
-                        } else {
-                            BlockType::Stone
-                        }
-                    } else {
-                        BlockType::Grass
-                    }
-                } else {
-                    BlockType::Air
-                }
-            }
-        }
-    }
-
-    fn apply_stone_variants(
-        &self,
-        world_x: i32,
-        y: i32,
-        world_z: i32,
-        block: BlockType,
-    ) -> BlockType {
-        if block != BlockType::Stone {
-            return block;
-        }
-        if !(18..=78).contains(&y) {
-            return block;
-        }
-
-        // Simple “veins” using existing block set:
-        // - Gravel pockets: common-ish mid-depth (adds variety to mining)
-        // - Clay pockets: rarer, a bit higher (keeps it special vs gravel)
-        let n = self
-            .noise_ore
-            .get_noise_3d(world_x as f32, y as f32, world_z as f32);
-        if n > 0.62 {
-            return BlockType::Gravel;
-        }
-
-        if (38..=66).contains(&y) {
-            let n2 = self.noise_ore.get_noise_3d(
-                world_x as f32 + 200.0,
-                y as f32 + 200.0,
-                world_z as f32 + 200.0,
-            );
-            if n2 > 0.70 {
-                return BlockType::Clay;
-            }
-        }
-
-        block
-    }
-
-    // ── Surface decorations ───────────────────────────────────────────────── //
-
-    fn generate_decorations(
-        &self,
-        chunk: &mut Chunk,
-        cx: i32,
-        cz: i32,
-        biome_map: &[[Biome; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
-        height_map: &[[i32; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
-    ) {
-        let base_x = cx * CHUNK_SIZE;
-        let base_z = cz * CHUNK_SIZE;
-        // Small trees have a two-block crown.  Reserving only that much space
-        // removes the conspicuous six-block-wide vegetation-free bands where
-        // adjacent chunks meet, while large trees are handled separately
-        // below because their crowns need the original three-block margin.
-        let margin = 2;
-
-        for lx in margin..(CHUNK_SIZE - margin) {
-            for lz in margin..(CHUNK_SIZE - margin) {
-                let world_x = base_x + lx;
-                let world_z = base_z + lz;
-                let biome = biome_map[lx as usize][lz as usize];
-                let height = height_map[lx as usize][lz as usize];
-                let hash = self.position_hash(world_x, world_z);
-                let vegetation = self
-                    .noise_vegetation
-                    .get_noise_2d(world_x as f32 + 1000.0, world_z as f32 - 1000.0);
-                let clearing = self
-                    .noise_decor
-                    .get_noise_2d(world_x as f32 * 0.025 + 2000.0, world_z as f32 * 0.025);
-
-                if height <= SEA_LEVEL || height >= WORLD_HEIGHT - 12 {
+    /// Carves every worm tunnel that can reach this chunk into a bit mask.
+    ///
+    /// Tunnel systems start in chunks up to [`WORM_SOURCE_RADIUS`] away and
+    /// are simulated identically from every chunk they pass through, so
+    /// passages continue seamlessly across chunk borders.
+    fn carve_worms(&self, base_x: i32, base_z: i32) -> WormMask {
+        let mut mask = WormMask::default();
+        let (cx, cz) = (base_x.div_euclid(CHUNK_SIZE), base_z.div_euclid(CHUNK_SIZE));
+        for sx in cx - WORM_SOURCE_RADIUS..=cx + WORM_SOURCE_RADIUS {
+            for sz in cz - WORM_SOURCE_RADIUS..=cz + WORM_SOURCE_RADIUS {
+                let mut rng = Rng(self.hash2(sx, sz, 0xca7e) as u64 | 1);
+                // Roughly one tunnel system per six chunks, a few of them
+                // larger networks.
+                if rng.below(6) != 0 {
                     continue;
                 }
-
-                if matches!(biome, Biome::Mountains | Biome::Tundra)
-                    && height > SEA_LEVEL + 12
-                    && hash % 100 < 5
-                {
-                    let ground = chunk.get_block(lx, height - 1, lz);
-                    if matches!(
-                        ground,
-                        BlockType::Grass | BlockType::Stone | BlockType::Snow
-                    ) {
-                        self.place_boulder(chunk, lx, height, lz, world_x, world_z);
+                let systems = 1 + u32::from(rng.below(4) == 0);
+                for _ in 0..systems {
+                    let x = (sx * CHUNK_SIZE) as f32 + rng.unit() * CHUNK_SIZE as f32;
+                    let z = (sz * CHUNK_SIZE) as f32 + rng.unit() * CHUNK_SIZE as f32;
+                    // Biased low: most tunnels run deep, some near the surface.
+                    let y = 10.0 + rng.unit() * rng.unit() * 62.0 + rng.unit() * 8.0;
+                    if rng.below(4) == 0 {
+                        // A chamber where several passages meet.
+                        let r = 3.0 + rng.unit() * 4.0;
+                        mask.carve_ellipsoid(base_x, base_z, [x, y, z], r * 1.4, r * 0.8, false);
                     }
-                }
-
-                if matches!(biome, Biome::Forest | Biome::Swamp)
-                    && vegetation > 0.30
-                    && hash % 100 < 3
-                {
-                    let ground = chunk.get_block(lx, height - 1, lz);
-                    if matches!(ground, BlockType::Grass | BlockType::Dirt | BlockType::Clay) {
-                        self.place_fallen_log(chunk, lx, height, lz, world_x, world_z);
-                    }
-                }
-
-                if biome.has_trees() {
-                    let tree_noise = self
-                        .noise_trees
-                        .get_noise_2d(world_x as f32, world_z as f32);
-                    let clearing_penalty = clearing.abs() * 0.16;
-                    let density_threshold = (biome.tree_density() as f32 - vegetation * 0.12
-                        + clearing_penalty)
-                        .clamp(0.35, 0.95);
-                    let tree_roll = tree_noise + vegetation * 0.18 - clearing_penalty;
-
-                    if tree_roll > density_threshold {
-                        let tree_spawn_chance = if biome == Biome::Forest { 28 } else { 18 };
-                        if hash % 100 < tree_spawn_chance {
-                            let ground = chunk.get_block(lx, height - 1, lz);
-                            if matches!(ground, BlockType::Grass | BlockType::Dirt) {
-                                let is_large = hash % 7 == 0
-                                    && matches!(biome, Biome::Forest | Biome::Swamp)
-                                    && lx >= 3
-                                    && lx < CHUNK_SIZE - 3
-                                    && lz >= 3
-                                    && lz < CHUNK_SIZE - 3;
-                                if self.can_place_tree(chunk, lx, height, lz, is_large) {
-                                    self.place_tree(
-                                        chunk, lx, height, lz, world_x, world_z, biome, is_large,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if biome == Biome::Beach && hash % 100 < 4 {
-                    let ground = chunk.get_block(lx, height - 1, lz);
-                    if ground == BlockType::Sand {
-                        if hash % 3 == 0 {
-                            self.place_fallen_log(chunk, lx, height, lz, world_x, world_z);
-                        }
-                    }
-                }
-
-                if biome == Biome::Desert {
-                    if hash % 100 < 3 {
-                        let ground = chunk.get_block(lx, height - 1, lz);
-                        if ground == BlockType::Sand {
-                            self.place_cactus(chunk, lx, height, lz, world_x, world_z);
-                        }
-                    }
-                }
-
-                if biome == Biome::Mountains && height > 100 {
-                    if hash % 100 < 10 {
-                        let top = chunk.get_block(lx, height - 1, lz);
-                        if matches!(top, BlockType::Stone | BlockType::Grass) {
-                            chunk.set_block_raw(lx, height - 1, lz, BlockType::Gravel);
-                        }
-                    }
-                }
-
-                if biome == Biome::Mountains && height > 130 {
-                    if chunk.get_block(lx, height - 1, lz) == BlockType::Stone {
-                        chunk.set_block_raw(lx, height - 1, lz, BlockType::Snow);
+                    let branches = 1 + rng.below(2);
+                    for _ in 0..branches {
+                        let yaw = rng.unit() * std::f32::consts::TAU;
+                        let pitch = (rng.unit() - 0.5) * 0.5;
+                        let radius = 1.6 + rng.unit() * 2.6;
+                        let length = 60 + rng.below((WORM_MAX_LENGTH - 59) as u32) as i32;
+                        let seed = rng.next();
+                        let walk = Walk { yaw, pitch, radius, length, seed, branch: true, open: false };
+                        self.worm(&mut mask, base_x, base_z, [x, y, z], walk);
                     }
                 }
             }
         }
-    }
-
-    // ── Tree placement ────────────────────────────────────────────────────── //
-
-    fn can_place_tree(&self, chunk: &Chunk, lx: i32, y: i32, lz: i32, is_large: bool) -> bool {
-        let ground_block = chunk.get_block(lx, y - 1, lz);
-        if !matches!(ground_block, BlockType::Grass | BlockType::Dirt) {
-            return false;
-        }
-
-        let required_height = if is_large { 9 } else { 7 };
-        for dy in 0..=required_height {
-            let check_y = y + dy;
-            if check_y >= WORLD_HEIGHT {
-                return false;
-            }
-            let block = chunk.get_block(lx, check_y, lz);
-            if !matches!(block, BlockType::Air | BlockType::Leaves) {
-                return false;
-            }
-        }
-
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let nx = lx + dx;
-                let nz = lz + dz;
-                if nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE {
-                    let neighbor = chunk.get_block(nx, y - 1, nz);
-                    if matches!(
-                        neighbor,
-                        BlockType::Stone
-                            | BlockType::Gravel
-                            | BlockType::Sand
-                            | BlockType::Water
-                            | BlockType::Ice
-                    ) {
-                        return false;
-                    }
-                }
-            }
-        }
-
-        let min_distance = if is_large { 5 } else { 3 };
-        for dx in -min_distance..=min_distance {
-            for dz in -min_distance..=min_distance {
-                let check_x = lx + dx;
-                let check_z = lz + dz;
-
-                if check_x < 0 || check_x >= CHUNK_SIZE || check_z < 0 || check_z >= CHUNK_SIZE {
+        // Entrance tunnels: start on the surface and slope down into the
+        // network, giving roughly one cave mouth per 6×6 chunks.
+        for sx in cx - WORM_SOURCE_RADIUS..=cx + WORM_SOURCE_RADIUS {
+            for sz in cz - WORM_SOURCE_RADIUS..=cz + WORM_SOURCE_RADIUS {
+                let mut rng = Rng(self.hash2(sx, sz, 0xe17e) as u64 | 1);
+                if rng.below(20) != 0 {
                     continue;
                 }
-
-                for dy in -1..=8 {
-                    let check_y = y + dy;
-                    if check_y < 0 || check_y >= WORLD_HEIGHT {
-                        continue;
-                    }
-                    if matches!(
-                        chunk.get_block(check_x, check_y, check_z),
-                        BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ
-                    ) {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
-    }
-
-    fn place_tree(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        y: i32,
-        lz: i32,
-        world_x: i32,
-        world_z: i32,
-        biome: Biome,
-        is_large: bool,
-    ) {
-        let trunk_height = if is_large {
-            8
-        } else {
-            5 + (self.position_hash(world_x, world_z) % 2) as i32
-        };
-
-        if chunk.get_block(lx, y - 1, lz) == BlockType::Grass {
-            chunk.set_block_raw(lx, y - 1, lz, BlockType::Dirt);
-        }
-
-        for dy in 0..trunk_height {
-            chunk.set_block_raw(lx, y + dy, lz, BlockType::Wood);
-        }
-
-        let leaf_start = if is_large { 3 } else { 2 };
-        let leaf_radius = if is_large { 3 } else { 2 };
-
-        // A rounded, seed-varied crown reads much more like a living tree
-        // than the former stack of identical square leaf layers.  The trunk
-        // remains deterministic, so a column always generates identically
-        // regardless of chunk-loading order.
-        for dy in leaf_start..=trunk_height {
-            let from_base = dy - leaf_start;
-            let from_top = trunk_height - dy;
-            let radius = if from_base == 0 || from_top == 0 {
-                leaf_radius - 1
-            } else {
-                leaf_radius
-            };
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    let nx = lx + dx;
-                    let nz = lz + dz;
-                    if nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE {
-                        let ny = y + dy;
-                        if ny < WORLD_HEIGHT {
-                            let existing = chunk.get_block(nx, ny, nz);
-                            if existing == BlockType::Air || existing == BlockType::Leaves {
-                                let distance = dx.abs() + dz.abs();
-                                let edge_hash =
-                                    self.position_hash_3d(world_x + dx, ny, world_z + dz);
-                                // Preserve a full inner crown; only its edge
-                                // is broken up. Swamp trees retain a slightly
-                                // wider, more ragged canopy.
-                                let edge_limit = radius + if biome == Biome::Swamp { 1 } else { 0 };
-                                let keep_leaf = distance <= edge_limit
-                                    && (distance < edge_limit
-                                        || edge_hash % if biome == Biome::Swamp { 4 } else { 3 }
-                                            != 0);
-                                if keep_leaf {
-                                    chunk.set_block_raw(nx, ny, nz, BlockType::Leaves);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let top_y = y + trunk_height;
-        if top_y < WORLD_HEIGHT {
-            let existing = chunk.get_block(lx, top_y, lz);
-            if existing == BlockType::Air || existing == BlockType::Leaves {
-                chunk.set_block_raw(lx, top_y, lz, BlockType::Leaves);
-            }
-        }
-    }
-
-    fn place_cactus(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        y: i32,
-        lz: i32,
-        world_x: i32,
-        world_z: i32,
-    ) {
-        let height = 2 + (self.position_hash(world_x, world_z) % 3) as i32;
-        for dy in 0..height {
-            if y + dy < WORLD_HEIGHT {
-                chunk.set_block_raw(lx, y + dy, lz, BlockType::Cactus);
-            }
-        }
-    }
-
-    fn place_boulder(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        y: i32,
-        lz: i32,
-        world_x: i32,
-        world_z: i32,
-    ) {
-        let hash = self.position_hash(world_x, world_z);
-        let radius = if hash % 5 == 0 { 2 } else { 1 };
-        let radius_sq = (radius * radius) as f32 + 0.35;
-
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                for dy in 0..=radius {
-                    let nx = lx + dx;
-                    let ny = y + dy;
-                    let nz = lz + dz;
-                    if nx < 0 || nx >= CHUNK_SIZE || nz < 0 || nz >= CHUNK_SIZE {
-                        continue;
-                    }
-                    if ny <= 0 || ny >= WORLD_HEIGHT {
-                        continue;
-                    }
-
-                    let dist = (dx * dx + dz * dz) as f32 + (dy as f32 * 1.35).powi(2);
-                    if dist > radius_sq {
-                        continue;
-                    }
-
-                    let existing = chunk.get_block(nx, ny, nz);
-                    if matches!(existing, BlockType::Air | BlockType::Leaves) {
-                        let hash3 = self.position_hash_3d(world_x + dx, ny, world_z + dz);
-                        let block = if hash3 % 7 == 0 {
-                            BlockType::Gravel
-                        } else {
-                            BlockType::Stone
-                        };
-                        chunk.set_block_raw(nx, ny, nz, block);
-                    }
-                }
-            }
-        }
-    }
-
-    fn place_fallen_log(
-        &self,
-        chunk: &mut Chunk,
-        lx: i32,
-        y: i32,
-        lz: i32,
-        world_x: i32,
-        world_z: i32,
-    ) {
-        let hash = self.position_hash(world_x, world_z);
-        let length = 4 + (hash % 4) as i32;
-        let (step_x, step_z) = if hash & 1 == 0 { (1, 0) } else { (0, 1) };
-        let side_x = if step_x == 0 { 1 } else { 0 };
-        let side_z = if step_z == 0 { 1 } else { 0 };
-        let start = -(length / 2);
-
-        if self.fallen_log_collides_with_tree(chunk, lx, y, lz, length, step_x, step_z) {
-            return;
-        }
-
-        for i in 0..length {
-            let offset = start + i;
-            let nx = lx + step_x * offset;
-            let nz = lz + step_z * offset;
-            if nx <= 0 || nx >= CHUNK_SIZE - 1 || nz <= 0 || nz >= CHUNK_SIZE - 1 {
-                return;
-            }
-
-            let ground = chunk.get_block(nx, y - 1, nz);
-            let target = chunk.get_block(nx, y, nz);
-            if !matches!(
-                ground,
-                BlockType::Grass | BlockType::Dirt | BlockType::Clay | BlockType::Sand
-            ) || target != BlockType::Air
-            {
-                return;
-            }
-        }
-
-        let stump_side = if hash & 2 == 0 { -1 } else { 1 };
-        let stump_x = lx + side_x * stump_side;
-        let stump_z = lz + side_z * stump_side;
-        let placed_stump =
-            self.try_place_fallen_log_detail(chunk, stump_x, y, stump_z, BlockType::Wood);
-        if placed_stump
-            && y + 1 < WORLD_HEIGHT
-            && hash % 3 == 0
-            && chunk.get_block(stump_x, y + 1, stump_z) == BlockType::Air
-        {
-            chunk.set_block_raw(stump_x, y + 1, stump_z, BlockType::Wood);
-        }
-
-        for i in 0..length {
-            let offset = start + i;
-            let nx = lx + step_x * offset;
-            let nz = lz + step_z * offset;
-            let log_block = if step_x != 0 {
-                BlockType::WoodLogX
-            } else {
-                BlockType::WoodLogZ
-            };
-            chunk.set_block_raw(nx, y, nz, log_block);
-
-            let ground = chunk.get_block(nx, y - 1, nz);
-            if matches!(ground, BlockType::Grass | BlockType::Dirt | BlockType::Clay)
-                && self.position_hash_3d(world_x + step_x * offset, y, world_z + step_z * offset)
-                    % 3
-                    == 0
-            {
-                for side in [-1, 1] {
-                    let sx = nx + side_x * side;
-                    let sz = nz + side_z * side;
-                    if sx >= 0
-                        && sx < CHUNK_SIZE
-                        && sz >= 0
-                        && sz < CHUNK_SIZE
-                        && chunk.get_block(sx, y, sz) == BlockType::Air
-                    {
-                        chunk.set_block_raw(sx, y, sz, BlockType::Leaves);
-                    }
-                }
-            }
-
-            let segment_hash =
-                self.position_hash_3d(world_x + step_x * offset, y + i, world_z + step_z * offset);
-            if i > 0 && i < length - 1 && segment_hash % 5 == 0 {
-                let branch_side = if segment_hash & 1 == 0 { -1 } else { 1 };
-                let branch_x = nx + side_x * branch_side;
-                let branch_z = nz + side_z * branch_side;
-                let branch_block = if step_x != 0 {
-                    BlockType::WoodLogZ
-                } else {
-                    BlockType::WoodLogX
+                let x = (sx * CHUNK_SIZE) as f32 + rng.unit() * CHUNK_SIZE as f32;
+                let z = (sz * CHUNK_SIZE) as f32 + rng.unit() * CHUNK_SIZE as f32;
+                let walk = Walk {
+                    yaw: rng.unit() * std::f32::consts::TAU,
+                    pitch: -0.45 - rng.unit() * 0.25,
+                    radius: 1.8 + rng.unit() * 1.4,
+                    length: 50 + rng.below(50) as i32,
+                    seed: rng.next(),
+                    branch: false,
+                    open: true,
                 };
-                self.try_place_fallen_log_detail(chunk, branch_x, y, branch_z, branch_block);
+                let sample = self.sample_column(x as i32, z as i32);
+                if sample.surface() <= SEA_LEVEL + 3 || sample.river > 0.0 || sample.lake > 0.0 {
+                    continue;
+                }
+                let start = [x, sample.surface() as f32 + 1.0, z];
+                self.worm(&mut mask, base_x, base_z, start, walk);
             }
         }
+        mask
+    }
 
-        for end_offset in [start - 1, start + length] {
-            let end_x = lx + step_x * end_offset;
-            let end_z = lz + step_z * end_offset;
-            self.try_place_fallen_log_detail(chunk, end_x, y, end_z, BlockType::Leaves);
+    /// One winding tunnel: a random walk with smoothly drifting direction
+    /// whose width swells and narrows along its length.
+    fn worm(&self, mask: &mut WormMask, base_x: i32, base_z: i32, start: [f32; 3], walk: Walk) {
+        let Walk { mut yaw, mut pitch, radius, length, seed, branch: can_branch, open } = walk;
+        let mut rng = Rng(seed | 1);
+        let [mut x, mut y, mut z] = start;
+        let (mut yaw_speed, mut pitch_speed) = (0.0f32, 0.0f32);
+        let branch_at = if can_branch && radius > 2.0 {
+            length / 4 + rng.below((length / 2) as u32) as i32
+        } else {
+            -1
+        };
+        let reach = (CHUNK_SIZE as f32) * 0.5 + radius * 2.0 + 2.0;
+        let (center_x, center_z) = (
+            base_x as f32 + CHUNK_SIZE as f32 * 0.5,
+            base_z as f32 + CHUNK_SIZE as f32 * 0.5,
+        );
+        for step in 0..length {
+            let progress = step as f32 / length as f32;
+            // Entrance tunnels start at full width so the mouth is open.
+            let shape = if open {
+                (progress * std::f32::consts::PI * 0.5 + std::f32::consts::FRAC_PI_2).sin()
+            } else {
+                (progress * std::f32::consts::PI).sin()
+            };
+            let width = 1.0 + radius * shape;
+            x += yaw.cos() * pitch.cos();
+            z += yaw.sin() * pitch.cos();
+            y += pitch.sin();
+            // Steer gently; keep tunnels mostly horizontal. Entrance tunnels
+            // keep descending until they are well underground.
+            if open && y > 34.0 {
+                pitch = pitch.clamp(-0.7, -0.3);
+            } else {
+                pitch *= 0.7;
+            }
+            pitch += pitch_speed * 0.1;
+            yaw += yaw_speed * 0.1;
+            pitch_speed = pitch_speed * 0.9 + (rng.unit() - rng.unit()) * rng.unit() * 1.0;
+            yaw_speed = yaw_speed * 0.75 + (rng.unit() - rng.unit()) * rng.unit() * 2.4;
+            if y < 8.0 {
+                pitch = pitch.abs() * 0.5 + 0.05;
+            }
 
-            for side in [-1, 1] {
-                let leaf_hash = self.position_hash_3d(
-                    world_x + step_x * end_offset + side_x * side,
-                    y,
-                    world_z + step_z * end_offset + side_z * side,
-                );
-                if leaf_hash % 2 == 0 {
-                    self.try_place_fallen_log_detail(
-                        chunk,
-                        end_x + side_x * side,
-                        y,
-                        end_z + side_z * side,
-                        BlockType::Leaves,
+            if step == branch_at {
+                for side in [-1.0f32, 1.0] {
+                    let walk = Walk {
+                        yaw: yaw + side * std::f32::consts::FRAC_PI_2,
+                        pitch: pitch / 3.0,
+                        radius: radius * 0.7,
+                        length: length - step,
+                        seed: rng.next(),
+                        branch: false,
+                        open,
+                    };
+                    self.worm(mask, base_x, base_z, [x, y, z], walk);
+                }
+                return;
+            }
+            // Every random draw happens before the proximity test, so the
+            // walk is identical no matter which chunk is simulating it.
+            let rough_skip = rng.below(4) == 0 && width < 2.0;
+            // Skip the expensive carve while the worm is far from this chunk.
+            if (x - center_x).abs() > reach || (z - center_z).abs() > reach {
+                continue;
+            }
+            // Occasional skipped segment leaves rough, uneven walls.
+            if rough_skip {
+                continue;
+            }
+            mask.carve_ellipsoid(base_x, base_z, [x, y, z], width, width * 0.75, open);
+        }
+    }
+
+    // ── Features ───────────────────────────────────────────────────────── //
+
+    fn place_features(&self, chunk: &mut Chunk, base_x: i32, base_z: i32, columns: &[Column]) {
+        let min_cell_x = (base_x - FEATURE_REACH).div_euclid(FEATURE_CELL);
+        let max_cell_x = (base_x + CHUNK_SIZE - 1 + FEATURE_REACH).div_euclid(FEATURE_CELL);
+        let min_cell_z = (base_z - FEATURE_REACH).div_euclid(FEATURE_CELL);
+        let max_cell_z = (base_z + CHUNK_SIZE - 1 + FEATURE_REACH).div_euclid(FEATURE_CELL);
+
+        let mut writer = FeatureWriter {
+            chunk,
+            base_x,
+            base_z,
+        };
+        // A fixed global iteration order keeps overlapping features resolved
+        // identically in every chunk they touch.
+        for cell_x in min_cell_x..=max_cell_x {
+            for cell_z in min_cell_z..=max_cell_z {
+                let anchor_hash = self.hash2(cell_x, cell_z, 7);
+                let x = cell_x * FEATURE_CELL + (anchor_hash % FEATURE_CELL as u32) as i32;
+                let z = cell_z * FEATURE_CELL + ((anchor_hash >> 8) % FEATURE_CELL as u32) as i32;
+                let (lx, lz) = (x - base_x, z - base_z);
+                if lx < -FEATURE_REACH
+                    || lx >= CHUNK_SIZE + FEATURE_REACH
+                    || lz < -FEATURE_REACH
+                    || lz >= CHUNK_SIZE + FEATURE_REACH
+                {
+                    continue;
+                }
+                let col = if (0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&lz) {
+                    columns[(lx * CHUNK_SIZE + lz) as usize]
+                } else {
+                    self.column(x, z)
+                };
+                if let Some(feature) = self.choose_feature(x, z, &col) {
+                    self.place_feature(&mut writer, feature, x, col.surface + 1, z, &col);
+                }
+            }
+        }
+    }
+
+    fn choose_feature(&self, x: i32, z: i32, col: &Column) -> Option<Feature> {
+        if col.surface < SEA_LEVEL || col.slope > 2 || col.sample.river > 0.2 {
+            return None;
+        }
+        if self.is_cave_entrance(x, z, col.surface)
+            || self.ravine(x, z, &col.sample).is_some()
+        {
+            return None;
+        }
+        let roll = unit(self.hash2(x, z, 11));
+        let pick = unit(self.hash2(x, z, 12));
+        let biome = col.biome;
+
+        // Forest density noise: groves and clearings instead of an even
+        // scatter of trees.
+        let grove = self.forest.get_noise_2d(x as f32, z as f32) * 0.5 + 0.5;
+        let density = 0.25 + 1.5 * grove * grove;
+        let tree_chance = biome.tree_chance() * (FEATURE_CELL * FEATURE_CELL) as f32 * density;
+
+        if roll < tree_chance.min(0.92) {
+            let kind = match biome {
+                Biome::Plains if pick < 0.8 => TreeKind::Oak,
+                Biome::Plains => TreeKind::BigOak,
+                Biome::Meadow if pick < 0.6 => TreeKind::Oak,
+                Biome::Meadow => TreeKind::Birch,
+                Biome::Forest if pick < 0.42 => TreeKind::Oak,
+                Biome::Forest if pick < 0.78 => TreeKind::Birch,
+                Biome::Forest => TreeKind::BigOak,
+                Biome::Taiga | Biome::Mountains if pick < 0.25 => TreeKind::SmallSpruce,
+                Biome::Taiga | Biome::Mountains => TreeKind::Spruce,
+                Biome::Tundra => TreeKind::SmallSpruce,
+                Biome::Savanna if pick < 0.85 => TreeKind::Acacia,
+                Biome::Savanna => TreeKind::Oak,
+                Biome::Jungle if pick < 0.28 => TreeKind::JungleGiant,
+                Biome::Jungle => TreeKind::Jungle,
+                Biome::Swamp => TreeKind::SwampOak,
+                Biome::Island if pick < 0.65 => TreeKind::Palm,
+                Biome::Island => TreeKind::Oak,
+                _ => return None,
+            };
+            return Some(Feature::Tree(kind));
+        }
+
+        let roll = unit(self.hash2(x, z, 13));
+        match biome {
+            Biome::Desert if roll < 0.10 => Some(Feature::Cactus),
+            Biome::Desert if roll < 0.22 => Some(Feature::DeadBush),
+            Biome::Beach if roll < 0.04 && col.sample.temperature > 0.3 => {
+                Some(Feature::Tree(TreeKind::Palm))
+            }
+            Biome::Savanna if roll < 0.03 => Some(Feature::DeadBush),
+            Biome::Savanna | Biome::Mountains | Biome::StonyShore if roll > 0.985 => {
+                Some(Feature::Boulder)
+            }
+            Biome::Taiga if roll > 0.975 => Some(Feature::Boulder),
+            Biome::Forest | Biome::Taiga | Biome::Jungle if roll < 0.025 => {
+                Some(Feature::FallenLog)
+            }
+            Biome::Tundra if roll < 0.012 => Some(Feature::IceSpike),
+            Biome::Tundra if roll > 0.99 => Some(Feature::Boulder),
+            _ => None,
+        }
+    }
+
+    fn place_feature(
+        &self,
+        w: &mut FeatureWriter,
+        feature: Feature,
+        x: i32,
+        y: i32,
+        z: i32,
+        col: &Column,
+    ) {
+        let h = self.hash2(x, z, 21);
+        match feature {
+            Feature::Tree(kind) => {
+                w.soil(x, y - 1, z);
+                self.place_tree(w, kind, x, y, z, h);
+            }
+            Feature::Cactus => {
+                for dy in 0..1 + (h % 3) as i32 {
+                    w.put(x, y + dy, z, BlockType::Cactus, Place::Soft);
+                }
+            }
+            Feature::DeadBush => w.put(x, y, z, BlockType::DeadBush, Place::Soft),
+            Feature::Boulder => {
+                let r = 1.2 + (h % 100) as f32 / 100.0 * 1.3;
+                let ri = r.ceil() as i32;
+                for dx in -ri..=ri {
+                    for dy in -ri..=ri {
+                        for dz in -ri..=ri {
+                            let d = ((dx * dx) as f32 + (dy * dy) as f32 * 1.4 + (dz * dz) as f32)
+                                .sqrt();
+                            if d <= r {
+                                let block = if self.hash3(x + dx, y + dy, z + dz, 3) % 5 == 0 {
+                                    BlockType::Gravel
+                                } else {
+                                    BlockType::Stone
+                                };
+                                w.put(x + dx, y - 1 + dy, z + dz, block, Place::Rock);
+                            }
+                        }
+                    }
+                }
+            }
+            Feature::FallenLog => {
+                let along_x = h % 2 == 0;
+                let length = 3 + (h >> 3) as i32 % 3;
+                let block = if along_x {
+                    BlockType::WoodLogX
+                } else {
+                    BlockType::WoodLogZ
+                };
+                for i in 0..length {
+                    let (px, pz) = if along_x { (x + i, z) } else { (x, z + i) };
+                    // Logs lie on the ground; skip pieces that would float or
+                    // sink where the terrain changes height.
+                    if self.sample_column(px, pz).surface() == col.surface {
+                        w.put(px, y, pz, block, Place::Wood);
+                    }
+                }
+            }
+            Feature::IceSpike => {
+                let height = 6 + (h % 10) as i32;
+                for dy in -1..height {
+                    let radius = if dy < height / 3 { 1 } else { 0 };
+                    for dx in -radius..=radius {
+                        for dz in -radius..=radius {
+                            if dx == 0 || dz == 0 {
+                                w.put(x + dx, y + dy, z + dz, BlockType::Ice, Place::Rock);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_tree(&self, w: &mut FeatureWriter, kind: TreeKind, x: i32, y: i32, z: i32, h: u32) {
+        let r = |shift: u32, n: u32| ((h >> shift) % n) as i32;
+        let tau = std::f32::consts::TAU;
+        match kind {
+            TreeKind::Oak => {
+                let trunk = 4 + r(0, 3);
+                self.trunk(w, x, y, z, trunk);
+                self.leaf_blob(w, x as f32, (y + trunk) as f32 - 0.5, z as f32, 2.7, 2.2, 2.7);
+            }
+            TreeKind::BigOak => {
+                let trunk = 7 + r(0, 4);
+                self.trunk(w, x, y, z, trunk);
+                self.leaf_blob(w, x as f32, (y + trunk) as f32 - 0.5, z as f32, 3.7, 2.8, 3.7);
+                // Two side branches, each with its own crown.
+                for branch in 0..2u32 {
+                    let angle = unit(h.rotate_left(branch * 11 + 5)) * tau;
+                    let (dx, dz) = (angle.cos() * 3.2, angle.sin() * 3.2);
+                    let start = y + trunk / 2 + 1 + branch as i32;
+                    self.branch(w, x, start, z, dx, 2.0, dz);
+                    self.leaf_blob(
+                        w,
+                        x as f32 + dx,
+                        start as f32 + 2.5,
+                        z as f32 + dz,
+                        2.4,
+                        1.8,
+                        2.4,
                     );
                 }
             }
+            TreeKind::Birch => {
+                let trunk = 6 + r(0, 3);
+                self.trunk(w, x, y, z, trunk);
+                self.leaf_blob(w, x as f32, (y + trunk) as f32 - 1.5, z as f32, 2.1, 3.2, 2.1);
+            }
+            TreeKind::Spruce | TreeKind::SmallSpruce => {
+                let tall = kind == TreeKind::Spruce;
+                let trunk = if tall { 9 + r(0, 6) } else { 5 + r(0, 3) };
+                let max_radius = if tall { 3 } else { 2 };
+                self.trunk(w, x, y, z, trunk);
+                let top = y + trunk;
+                w.put(x, top, z, BlockType::Leaves, Place::Soft);
+                w.put(x, top + 1, z, BlockType::Leaves, Place::Soft);
+                // Layered cone: the radius grows downwards, with every other
+                // layer pulled in for the classic tiered silhouette.
+                let lowest = y + 2 + r(4, 2);
+                for (i, ly) in (lowest..top).rev().enumerate() {
+                    let mut radius = ((i as i32 + 1) / 2).min(max_radius);
+                    if i % 2 == 1 {
+                        radius = (radius - 1).max(1);
+                    }
+                    self.leaf_disc(w, x, ly, z, radius as f32 + 0.4, true);
+                }
+            }
+            TreeKind::Jungle => {
+                let trunk = 7 + r(0, 5);
+                self.trunk(w, x, y, z, trunk);
+                self.leaf_blob(w, x as f32, (y + trunk) as f32, z as f32, 3.2, 2.4, 3.2);
+                self.hanging_leaves(w, x, y + trunk - 1, z, 3, h);
+            }
+            TreeKind::JungleGiant => {
+                let trunk = 15 + r(0, 9);
+                for (ox, oz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    w.soil(x + ox, y - 1, z + oz);
+                    self.trunk(w, x + ox, y, z + oz, trunk);
+                }
+                let (cx, cz) = (x as f32 + 0.5, z as f32 + 0.5);
+                self.leaf_blob(w, cx, (y + trunk) as f32, cz, 5.2, 3.0, 5.2);
+                self.hanging_leaves(w, x, y + trunk - 2, z, 5, h);
+                for branch in 0..3u32 {
+                    let angle = unit(h.rotate_left(branch * 7 + 3)) * tau;
+                    let (dx, dz) = (angle.cos() * 3.5, angle.sin() * 3.5);
+                    let start = y + trunk / 2 + branch as i32 * 3;
+                    self.branch(w, x, start, z, dx, 1.5, dz);
+                    self.leaf_blob(
+                        w,
+                        x as f32 + dx,
+                        start as f32 + 2.0,
+                        z as f32 + dz,
+                        2.6,
+                        1.6,
+                        2.6,
+                    );
+                }
+            }
+            TreeKind::Acacia => {
+                let straight = 3 + r(0, 2);
+                self.trunk(w, x, y, z, straight);
+                let dir = [(1, 0), (-1, 0), (0, 1), (0, -1)][r(2, 4) as usize];
+                let bend = 2 + r(4, 2);
+                let (mut tx, mut ty, mut tz) = (x, y + straight, z);
+                for _ in 0..bend {
+                    tx += dir.0;
+                    tz += dir.1;
+                    w.put(tx, ty, tz, BlockType::Wood, Place::Wood);
+                    ty += 1;
+                    w.put(tx, ty, tz, BlockType::Wood, Place::Wood);
+                }
+                self.leaf_disc(w, tx, ty + 1, tz, 3.6, false);
+                self.leaf_disc(w, tx, ty + 2, tz, 2.2, false);
+                // Usually a smaller second crown on the opposite side.
+                if r(6, 3) > 0 {
+                    let (sx, sz) = (x - dir.0 * 2, z - dir.1 * 2);
+                    let sy = y + straight + 1;
+                    self.branch(
+                        w,
+                        x,
+                        y + straight - 1,
+                        z,
+                        -dir.0 as f32 * 2.0,
+                        2.0,
+                        -dir.1 as f32 * 2.0,
+                    );
+                    self.leaf_disc(w, sx, sy + 1, sz, 2.4, false);
+                }
+            }
+            TreeKind::SwampOak => {
+                let trunk = 4 + r(0, 3);
+                self.trunk(w, x, y, z, trunk);
+                self.leaf_blob(w, x as f32, (y + trunk) as f32 - 0.5, z as f32, 3.8, 1.7, 3.8);
+                self.hanging_leaves(w, x, y + trunk - 2, z, 4, h);
+            }
+            TreeKind::Palm => {
+                let trunk = 6 + r(0, 4);
+                let dir = [(1, 0), (-1, 0), (0, 1), (0, -1)][r(3, 4) as usize];
+                let (mut tx, mut tz) = (x, z);
+                for i in 0..trunk {
+                    if i > 1 && i % 3 == 0 {
+                        tx += dir.0;
+                        tz += dir.1;
+                    }
+                    w.put(tx, y + i, tz, BlockType::Wood, Place::Wood);
+                }
+                let top = y + trunk;
+                self.leaf_disc(w, tx, top, tz, 1.5, false);
+                for (dx, dz) in [
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (-1, -1),
+                    (1, -1),
+                    (-1, 1),
+                ] {
+                    let len = if dx != 0 && dz != 0 { 2 } else { 4 };
+                    for step in 1..=len {
+                        let droop = i32::from(step >= len - 1);
+                        w.put(
+                            tx + dx * step,
+                            top - droop,
+                            tz + dz * step,
+                            BlockType::Leaves,
+                            Place::Soft,
+                        );
+                    }
+                }
+                w.put(tx, top + 1, tz, BlockType::Leaves, Place::Soft);
+            }
         }
     }
 
-    fn try_place_fallen_log_detail(
-        &self,
-        chunk: &mut Chunk,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: BlockType,
-    ) -> bool {
-        if x <= 0 || x >= CHUNK_SIZE - 1 || z <= 0 || z >= CHUNK_SIZE - 1 || y <= 0 {
-            return false;
+    fn trunk(&self, w: &mut FeatureWriter, x: i32, y: i32, z: i32, height: i32) {
+        for dy in 0..height {
+            w.put(x, y + dy, z, BlockType::Wood, Place::Wood);
         }
-
-        let ground = chunk.get_block(x, y - 1, z);
-        if !matches!(
-            ground,
-            BlockType::Grass | BlockType::Dirt | BlockType::Clay | BlockType::Sand
-        ) || chunk.get_block(x, y, z) != BlockType::Air
-        {
-            return false;
-        }
-
-        chunk.set_block_raw(x, y, z, block);
-        true
     }
 
-    fn fallen_log_collides_with_tree(
+    /// A straight wooden branch from `(x, y, z)` towards the given offset.
+    #[allow(clippy::too_many_arguments)]
+    fn branch(&self, w: &mut FeatureWriter, x: i32, y: i32, z: i32, dx: f32, dy: f32, dz: f32) {
+        let steps = dx.abs().max(dz.abs()).max(dy.abs()).ceil() as i32;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            w.put(
+                x + (dx * t).round() as i32,
+                y + (dy * t).round() as i32,
+                z + (dz * t).round() as i32,
+                BlockType::Wood,
+                Place::Wood,
+            );
+        }
+    }
+
+    /// Ellipsoidal crown with a ragged edge.
+    #[allow(clippy::too_many_arguments)]
+    fn leaf_blob(
         &self,
-        chunk: &Chunk,
-        lx: i32,
-        y: i32,
-        lz: i32,
-        length: i32,
-        step_x: i32,
-        step_z: i32,
-    ) -> bool {
-        let start = -(length / 2);
-        let side_x = if step_x == 0 { 1 } else { 0 };
-        let side_z = if step_z == 0 { 1 } else { 0 };
-
-        for i in 0..length {
-            let offset = start + i;
-            let nx = lx + step_x * offset;
-            let nz = lz + step_z * offset;
-
-            for side in -2..=2 {
-                for dy in 0..=7 {
-                    let check_x = nx + side_x * side;
-                    let check_y = y + dy;
-                    let check_z = nz + side_z * side;
-
-                    if check_x < 0
-                        || check_x >= CHUNK_SIZE
-                        || check_y < 0
-                        || check_y >= WORLD_HEIGHT
-                        || check_z < 0
-                        || check_z >= CHUNK_SIZE
-                    {
+        w: &mut FeatureWriter,
+        cx: f32,
+        cy: f32,
+        cz: f32,
+        rx: f32,
+        ry: f32,
+        rz: f32,
+    ) {
+        let (x0, x1) = ((cx - rx).floor() as i32, (cx + rx).ceil() as i32);
+        let (y0, y1) = ((cy - ry).floor() as i32, (cy + ry).ceil() as i32);
+        let (z0, z1) = ((cz - rz).floor() as i32, (cz + rz).ceil() as i32);
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    let d = ((x as f32 - cx) / rx).powi(2)
+                        + ((y as f32 - cy) / ry).powi(2)
+                        + ((z as f32 - cz) / rz).powi(2);
+                    if d > 1.0 || (d > 0.6 && self.hash3(x, y, z, 5) % 3 == 0) {
                         continue;
                     }
+                    w.put(x, y, z, BlockType::Leaves, Place::Soft);
+                }
+            }
+        }
+    }
 
-                    if matches!(
-                        chunk.get_block(check_x, check_y, check_z),
-                        BlockType::Wood
-                            | BlockType::WoodLogX
-                            | BlockType::WoodLogZ
-                            | BlockType::Leaves
-                    ) {
-                        return true;
+    /// Flat circular leaf layer; `sparse_edge` trims some rim leaves.
+    fn leaf_disc(&self, w: &mut FeatureWriter, cx: i32, y: i32, cz: i32, radius: f32, sparse_edge: bool) {
+        let ri = radius.ceil() as i32;
+        for dx in -ri..=ri {
+            for dz in -ri..=ri {
+                let d = ((dx * dx + dz * dz) as f32).sqrt();
+                if d > radius
+                    || (sparse_edge
+                        && d > radius - 1.0
+                        && self.hash3(cx + dx, y, cz + dz, 6) % 4 == 0)
+                {
+                    continue;
+                }
+                w.put(cx + dx, y, cz + dz, BlockType::Leaves, Place::Soft);
+            }
+        }
+    }
+
+    /// Strands of leaves hanging from the underside of a crown.
+    fn hanging_leaves(&self, w: &mut FeatureWriter, x: i32, y: i32, z: i32, radius: i32, h: u32) {
+        for i in 0..(radius * 3) as u32 {
+            let angle = unit(self.hash2(x, z, 40 + i)) * std::f32::consts::TAU;
+            let dist = radius as f32 * (0.7 + 0.3 * unit(h.rotate_right(i * 3 + 2)));
+            let px = x + (angle.cos() * dist).round() as i32;
+            let pz = z + (angle.sin() * dist).round() as i32;
+            let length = 1 + (self.hash2(px, pz, 31) % 3) as i32;
+            for dy in 0..length {
+                w.put(px, y - dy, pz, BlockType::Leaves, Place::Soft);
+            }
+        }
+    }
+
+    // ── Hashing ────────────────────────────────────────────────────────── //
+
+    fn hash2(&self, x: i32, z: i32, salt: u32) -> u32 {
+        let mut h = self.seed ^ salt.wrapping_mul(0x27d4_eb2d);
+        h ^= (x as u32).wrapping_mul(0x8da6_b343);
+        h = h.rotate_left(13) ^ (z as u32).wrapping_mul(0xd816_3841);
+        h = (h ^ (h >> 15)).wrapping_mul(0x2c1b_3c6d);
+        h = (h ^ (h >> 12)).wrapping_mul(0x297a_2d39);
+        h ^ (h >> 15)
+    }
+
+    fn hash3(&self, x: i32, y: i32, z: i32, salt: u32) -> u32 {
+        self.hash2(x, z, salt ^ (y as u32).wrapping_mul(0x1b87_3593))
+    }
+}
+
+/// Maps a hash to `[0, 1)`.
+fn unit(h: u32) -> f32 {
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+fn simplex(seed: u32, frequency: f32) -> FastNoiseLite {
+    let mut noise = FastNoiseLite::with_seed(seed as i32);
+    noise.set_noise_type(Some(NoiseType::OpenSimplex2));
+    noise.set_frequency(Some(frequency));
+    noise
+}
+
+fn fbm(seed: u32, frequency: f32, octaves: i32) -> FastNoiseLite {
+    let mut noise = simplex(seed, frequency);
+    noise.set_fractal_type(Some(FractalType::FBm));
+    noise.set_fractal_octaves(Some(octaves));
+    noise.set_fractal_lacunarity(Some(2.0));
+    noise.set_fractal_gain(Some(0.5));
+    noise
+}
+
+fn ridged(seed: u32, frequency: f32, octaves: i32) -> FastNoiseLite {
+    let mut noise = fbm(seed, frequency, octaves);
+    noise.set_fractal_type(Some(FractalType::Ridged));
+    noise
+}
+
+/// Coarse cave field: two channels per lattice point (caverns, soft pockets).
+struct CaveLattice {
+    values: Vec<[f32; 2]>,
+    y_samples: usize,
+}
+
+/// One bit per block of a chunk: carved by a worm tunnel.
+struct WormMask {
+    /// Tunnels that keep a roof on flat ground.
+    bits: Vec<u64>,
+    /// Entrance tunnels, allowed to break through the surface anywhere.
+    open_bits: Vec<u64>,
+}
+
+impl Default for WormMask {
+    fn default() -> Self {
+        let words = ((CHUNK_SIZE * CHUNK_SIZE * WORLD_HEIGHT) as usize).div_ceil(64);
+        Self {
+            bits: vec![0; words],
+            open_bits: vec![0; words],
+        }
+    }
+}
+
+impl WormMask {
+    fn index(lx: i32, y: i32, lz: i32) -> usize {
+        ((y * CHUNK_SIZE + lx) * CHUNK_SIZE + lz) as usize
+    }
+
+    fn get(&self, lx: i32, y: i32, lz: i32) -> bool {
+        let i = Self::index(lx, y, lz);
+        self.bits[i / 64] & (1 << (i % 64)) != 0
+    }
+
+    fn get_open(&self, lx: i32, y: i32, lz: i32) -> bool {
+        let i = Self::index(lx, y, lz);
+        self.open_bits[i / 64] & (1 << (i % 64)) != 0
+    }
+
+    /// Marks the blocks of an ellipsoid (horizontal radius `rh`, vertical
+    /// radius `rv`) that fall inside the chunk at `(base_x, base_z)`.
+    fn carve_ellipsoid(
+        &mut self,
+        base_x: i32,
+        base_z: i32,
+        [x, y, z]: [f32; 3],
+        rh: f32,
+        rv: f32,
+        open: bool,
+    ) {
+        let x0 = ((x - rh).floor() as i32 - base_x).max(0);
+        let x1 = ((x + rh).ceil() as i32 - base_x).min(CHUNK_SIZE - 1);
+        let z0 = ((z - rh).floor() as i32 - base_z).max(0);
+        let z1 = ((z + rh).ceil() as i32 - base_z).min(CHUNK_SIZE - 1);
+        let y0 = ((y - rv).floor() as i32).max(1);
+        let y1 = ((y + rv).ceil() as i32).min(WORLD_HEIGHT - 1);
+        for lx in x0..=x1 {
+            let dx = (base_x + lx) as f32 + 0.5 - x;
+            for lz in z0..=z1 {
+                let dz = (base_z + lz) as f32 + 0.5 - z;
+                let horizontal = (dx * dx + dz * dz) / (rh * rh);
+                if horizontal >= 1.0 {
+                    continue;
+                }
+                for wy in y0..=y1 {
+                    let dy = wy as f32 + 0.5 - y;
+                    if horizontal + dy * dy / (rv * rv) < 1.0 {
+                        let i = Self::index(lx, wy, lz);
+                        let bits = if open { &mut self.open_bits } else { &mut self.bits };
+                        bits[i / 64] |= 1 << (i % 64);
                     }
                 }
             }
         }
-
-        false
-    }
-
-    // ── Hash functions ────────────────────────────────────────────────────── //
-
-    fn position_hash(&self, x: i32, z: i32) -> u32 {
-        let mut hash = self.seed;
-        hash = hash.wrapping_add(x as u32).wrapping_mul(73856093);
-        hash = hash.wrapping_add(z as u32).wrapping_mul(19349663);
-        hash ^ (hash >> 16)
-    }
-
-    fn position_hash_3d(&self, x: i32, y: i32, z: i32) -> u32 {
-        let mut hash = self.seed;
-        hash = hash.wrapping_add(x as u32).wrapping_mul(73856093);
-        hash = hash.wrapping_add(y as u32).wrapping_mul(19349663);
-        hash = hash.wrapping_add(z as u32).wrapping_mul(83492791);
-        hash ^ (hash >> 16)
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Clone
-// ─────────────────────────────────────────────────────────────────────────────
+/// Parameters of one tunnel walk.
+#[derive(Clone, Copy)]
+struct Walk {
+    yaw: f32,
+    pitch: f32,
+    radius: f32,
+    length: i32,
+    seed: u64,
+    /// May split into two side passages.
+    branch: bool,
+    /// Entrance tunnel: may break the surface.
+    open: bool,
+}
 
-impl Clone for ChunkGenerator {
-    fn clone(&self) -> Self {
-        ChunkGenerator::new(self.seed)
+/// Small deterministic xorshift generator for tunnel walks.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn unit(&mut self) -> f32 {
+        (self.next() >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    fn below(&mut self, n: u32) -> u32 {
+        (self.next() % n.max(1) as u64) as u32
     }
 }
 
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
-    a * (1.0 - t) + b * t
+/// Per-column inputs to cave carving.
+struct CaveColumn {
+    surface: i32,
+    slope: i32,
+    entrance: f32,
+    ravine: Option<(i32, f32)>,
+    /// Highest Y that may be carved (below any neighbouring water).
+    carve_ceiling: i32,
 }
 
-fn smoothstep(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+/// Trilinear interpolation of one channel of the cave lattice.
+fn sample_lattice(cave: &CaveLattice, channel: usize, lx: i32, y: i32, lz: i32) -> f32 {
+    let cell = CAVE_CELL_SIZE;
+    let (ix, iy, iz) = (
+        (lx / cell) as usize,
+        (y / cell) as usize,
+        (lz / cell) as usize,
+    );
+    if iy + 1 >= cave.y_samples {
+        return 0.0;
+    }
+    let (tx, ty, tz) = (
+        (lx % cell) as f32 / cell as f32,
+        (y % cell) as f32 / cell as f32,
+        (lz % cell) as f32 / cell as f32,
+    );
+    let at =
+        |x: usize, y: usize, z: usize| cave.values[(x * CAVE_XZ + z) * cave.y_samples + y][channel];
+    let c00 = lerp(at(ix, iy, iz), at(ix + 1, iy, iz), tx);
+    let c10 = lerp(at(ix, iy + 1, iz), at(ix + 1, iy + 1, iz), tx);
+    let c01 = lerp(at(ix, iy, iz + 1), at(ix + 1, iy, iz + 1), tx);
+    let c11 = lerp(at(ix, iy + 1, iz + 1), at(ix + 1, iy + 1, iz + 1), tx);
+    lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz)
 }
 
-/// Minecraft-style ridge transform. A single smooth weirdness field becomes
-/// alternating broad valleys, lowlands and peak bands instead of isolated
-/// random mountain blobs.
-fn peaks_and_valleys(weirdness: f64) -> f64 {
-    (-((weirdness.abs() - 2.0 / 3.0).abs()) + 1.0 / 3.0) * 3.0
+/// Writes the feature blocks that fall inside the chunk being generated.
+struct FeatureWriter<'a> {
+    chunk: &'a mut Chunk,
+    base_x: i32,
+    base_z: i32,
 }
 
-fn half_negative(value: f64) -> f64 {
-    if value < 0.0 { value * 0.5 } else { value }
-}
+impl FeatureWriter<'_> {
+    fn put(&mut self, x: i32, y: i32, z: i32, block: BlockType, place: Place) {
+        let (lx, lz) = (x - self.base_x, z - self.base_z);
+        if !(0..CHUNK_SIZE).contains(&lx)
+            || !(0..CHUNK_SIZE).contains(&lz)
+            || !(1..WORLD_HEIGHT).contains(&y)
+        {
+            return;
+        }
+        let existing = self.chunk.get_block(lx, y, lz);
+        let replaceable = match place {
+            Place::Soft => existing == BlockType::Air,
+            Place::Wood => matches!(
+                existing,
+                BlockType::Air | BlockType::Leaves | BlockType::DeadBush
+            ),
+            Place::Rock => matches!(
+                existing,
+                BlockType::Air
+                    | BlockType::Leaves
+                    | BlockType::DeadBush
+                    | BlockType::Grass
+                    | BlockType::Dirt
+                    | BlockType::Snow
+                    | BlockType::Sand
+            ),
+        };
+        if replaceable {
+            self.chunk.set_block_raw(lx, y, lz, block);
+        }
+    }
 
-fn quarter_negative(value: f64) -> f64 {
-    if value < 0.0 { value * 0.25 } else { value }
+    /// Turns the grass or snow under a trunk into dirt.
+    fn soil(&mut self, x: i32, y: i32, z: i32) {
+        let (lx, lz) = (x - self.base_x, z - self.base_z);
+        if (0..CHUNK_SIZE).contains(&lx)
+            && (0..CHUNK_SIZE).contains(&lz)
+            && matches!(
+                self.chunk.get_block(lx, y, lz),
+                BlockType::Grass | BlockType::Snow
+            )
+        {
+            self.chunk.set_block_raw(lx, y, lz, BlockType::Dirt);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn lazy_cheese_density_matches_eager_noise_samples() {
-        for seed in [0, 42, 2026, u32::MAX] {
-            let generator = ChunkGenerator::new(seed);
-            for (x, z) in [(0, 0), (-17, 29), (1024, -2048), (-4096, 256)] {
-                for surface in [32, 64, 120, 200] {
-                    for entrance in [false, true] {
-                        for y in 0..=WORLD_HEIGHT {
-                            let expected = if y <= 4 || y >= surface {
-                                1.0
-                            } else {
-                                let c1 = generator.noise_cave1.get_noise_3d(
-                                    x as f32 * 0.026,
-                                    y as f32 * 0.009,
-                                    z as f32 * 0.026,
-                                );
-                                let c2 = generator.noise_cave2.get_noise_3d(
-                                    x as f32 * 0.018 + 400.0,
-                                    y as f32 * 0.007 + 400.0,
-                                    z as f32 * 0.018 + 400.0,
-                                );
-                                if generator.is_cave(x, y, z, surface, entrance) {
-                                    -1.0
-                                } else if c1 <= 0.0 {
-                                    1.0
-                                } else {
-                                    ((0.22 - c1.max(0.0) * c2.max(0.0)) * 5.0).clamp(0.06, 1.0)
-                                        as f64
-                                }
-                            };
-                            assert_eq!(
-                                generator.cave_density(x, y, z, surface, entrance).to_bits(),
-                                expected.to_bits(),
-                                "seed={seed}, ({x},{y},{z}), surface={surface}, entrance={entrance}",
-                            );
-                        }
-                    }
+    fn chunk_hash(chunk: &Chunk) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for y in 0..WORLD_HEIGHT {
+                    hash = (hash ^ chunk.get_block(x, y, z) as u64).wrapping_mul(0x100_0000_01b3);
                 }
+                hash = (hash ^ chunk.column_tint(x, z) as u64).wrapping_mul(0x100_0000_01b3);
             }
         }
+        hash
     }
 
     #[test]
-    fn generation_matches_minecraft_like_fixtures() {
-        // FNV-1a hashes of every block, highest opaque Y, empty flags and
-        // opaque flags after the Minecraft-like landform/cave retune.
-        // Regenerate with: cargo run --release --example regen_worldgen_hashes
-        let fixtures = [
-            (0, 0x1d319d9bf7489c48u64),
-            (12, 0x5d7d311b6d6db69f),
-            (42, 0xe23b1f417b218a95),
-            (77, 0x43f93746890344be),
-            (1337, 0x5e2f0bf930023299),
-            (2026, 0xfb5a9ba68438ff2d),
-            (90_210, 0xf35fae6801a37cbd),
-            (u32::MAX, 0xa1df56680b1a0b79),
-        ];
-        for (seed, expected) in fixtures {
-            let generator = ChunkGenerator::new(seed);
-            let mut hash = 0xcbf29ce484222325u64;
-            let mut feed = |byte: u8| {
-                hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
-            };
-            for (cx, cz) in [(0, 0), (2, -3), (-256, 128), (17, -91)] {
-                let chunk = generator.generate_chunk(cx, cz);
-                for x in 0..CHUNK_SIZE {
-                    for z in 0..CHUNK_SIZE {
-                        for byte in chunk.highest_opaque_y(x, z).to_le_bytes() {
-                            feed(byte);
-                        }
-                        for y in 0..WORLD_HEIGHT {
-                            feed(chunk.get_block(x, y, z) as u8);
-                        }
-                    }
-                }
-                for subchunk in &chunk.subchunks {
-                    feed(subchunk.is_empty as u8);
-                    feed(subchunk.is_fully_opaque as u8);
-                }
-            }
-            assert_eq!(hash, expected, "seed {seed}");
+    fn same_seed_generates_identical_chunks() {
+        let a = ChunkGenerator::new(42);
+        let b = ChunkGenerator::new(42);
+        for (cx, cz) in [(0, 0), (5, -3), (-40, 17)] {
+            assert_eq!(
+                chunk_hash(&a.generate_chunk(cx, cz)),
+                chunk_hash(&b.generate_chunk(cx, cz))
+            );
         }
+        assert_ne!(
+            chunk_hash(&ChunkGenerator::new(1).generate_chunk(0, 0)),
+            chunk_hash(&ChunkGenerator::new(2).generate_chunk(0, 0))
+        );
     }
 
     #[test]
-    fn density_bounds_preserve_all_voxel_signs_and_heights() {
-        for seed in [0, 42, 2026, u32::MAX] {
-            let generator = ChunkGenerator::new(seed);
-            for (cx, cz) in [(0, 0), (2, -3), (-256, 128), (17, -91)] {
-                let base_x = cx * CHUNK_SIZE;
-                let base_z = cz * CHUNK_SIZE;
-                let shapes = std::array::from_fn(|ix| {
-                    std::array::from_fn(|iz| {
-                        generator.terrain_shape(&generator.sample_terrain_noise(
-                            base_x + ix as i32 * DENSITY_CELL_SIZE,
-                            base_z + iz as i32 * DENSITY_CELL_SIZE,
-                        ))
-                    })
-                });
-                let actual = generator.build_density_lattice(base_x, base_z, &shapes);
-                let mut reference = [0.0; DENSITY_LATTICE_LEN];
-                for ix in 0..DENSITY_XZ_SAMPLES {
-                    for iz in 0..DENSITY_XZ_SAMPLES {
-                        for iy in 0..DENSITY_Y_SAMPLES {
-                            reference[ChunkGenerator::density_index(ix, iy, iz)] = generator
-                                .terrain_density(
-                                    base_x + ix as i32 * DENSITY_CELL_SIZE,
-                                    iy as i32 * DENSITY_CELL_SIZE,
-                                    base_z + iz as i32 * DENSITY_CELL_SIZE,
-                                    &shapes[ix][iz],
-                                );
-                        }
-                    }
-                }
-                // Include boundary columns used by the cave lattice as well.
-                for lx in 0..=CHUNK_SIZE {
-                    for lz in 0..=CHUNK_SIZE {
-                        let a = generator.density_vertical_column(&actual, lx, lz);
-                        let b = generator.density_vertical_column(&reference, lx, lz);
-                        assert_eq!(
-                            ChunkGenerator::density_surface_height(&a),
-                            ChunkGenerator::density_surface_height(&b)
-                        );
-                        for y in 0..WORLD_HEIGHT {
-                            assert_eq!(
-                                ChunkGenerator::sample_density_column(&a, y) > 0.0,
-                                ChunkGenerator::sample_density_column(&b, y) > 0.0,
-                                "seed {seed}, chunk ({cx}, {cz}), voxel ({lx}, {y}, {lz})"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn cave_columns_match_trilinear_reference_exactly() {
-        let generator = ChunkGenerator::new(42);
-        // Mixed signs and a nontrivial field exercise all interpolation weights.
-        let lattice = std::array::from_fn(|i| ((i * 17 % 101) as f64 - 50.0) / 50.0);
-        for surface in [1, 5, 18, 64, 97, WORLD_HEIGHT - 1, WORLD_HEIGHT] {
+    fn terrain_height_matches_generated_surface() {
+        let generator = ChunkGenerator::new(2026);
+        for (cx, cz) in [(0, 0), (3, 9), (-12, 4), (30, -30)] {
+            let chunk = generator.generate_chunk(cx, cz);
             for lx in 0..CHUNK_SIZE {
                 for lz in 0..CHUNK_SIZE {
-                    let column = generator.cave_vertical_column(&lattice, lx, lz, surface);
-                    for is_entrance in [false, true] {
-                        for y in 0..WORLD_HEIGHT {
-                            let actual = ChunkGenerator::sample_cave_column(
-                                &column,
-                                y,
-                                surface,
-                                is_entrance,
-                            );
-                            let expected = generator.sample_cave_lattice(
-                                &lattice,
-                                lx,
-                                y,
-                                lz,
-                                surface,
-                                is_entrance,
-                            );
-                            assert_eq!(actual.to_bits(), expected.to_bits());
-                        }
+                    let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
+                    let h = generator.get_terrain_height_pub(x, z);
+                    assert!((4..WORLD_HEIGHT - 20).contains(&h));
+                    assert_eq!(chunk.get_block(lx, 0, lz), BlockType::Bedrock);
+                    for y in h + 1..WORLD_HEIGHT {
+                        let block = chunk.get_block(lx, y, lz);
+                        assert!(
+                            !matches!(
+                                block,
+                                BlockType::Grass | BlockType::Dirt | BlockType::Sand | BlockType::Bedrock
+                            ),
+                            "terrain block {block:?} above surface at ({x}, {y}, {z})"
+                        );
                     }
                 }
             }
@@ -2420,213 +1693,78 @@ mod tests {
     }
 
     #[test]
-    fn cached_aquifer_matches_per_voxel_reference() {
-        for seed in [42, 2026, u32::MAX] {
+    fn features_are_identical_from_both_sides_of_a_border() {
+        // Generating chunk B must write exactly the blocks that features
+        // anchored in chunk A would put there: compare B's border columns
+        // against a reference built from A's features alone.
+        let generator = ChunkGenerator::new(7);
+        let mut crossing = 0;
+        for cx in -8..8 {
+            let left = generator.generate_chunk(cx, 0);
+            let right = generator.generate_chunk(cx + 1, 0);
+            for lz in 0..CHUNK_SIZE {
+                for y in 0..WORLD_HEIGHT {
+                    if left.get_block(CHUNK_SIZE - 1, y, lz) == BlockType::Leaves
+                        && right.get_block(0, y, lz) == BlockType::Leaves
+                    {
+                        crossing += 1;
+                    }
+                }
+            }
+        }
+        assert!(crossing > 0, "expected crowns spanning chunk borders");
+        // Regenerating in another order gives the same chunk.
+        let first = chunk_hash(&generator.generate_chunk(3, 0));
+        let _ = generator.generate_chunk(4, 0);
+        assert_eq!(first, chunk_hash(&generator.generate_chunk(3, 0)));
+    }
+
+    #[test]
+    fn world_has_varied_biomes() {
+        let generator = ChunkGenerator::new(12345);
+        let mut seen = std::collections::HashSet::new();
+        for x in (-6000..6000).step_by(97) {
+            for z in (-6000..6000).step_by(89) {
+                seen.insert(generator.get_biome(x, z));
+            }
+        }
+        for biome in [
+            Biome::Ocean,
+            Biome::Plains,
+            Biome::Forest,
+            Biome::Taiga,
+            Biome::Mountains,
+            Biome::River,
+            Biome::Beach,
+        ] {
+            assert!(seen.contains(&biome), "missing {biome:?}; saw {seen:?}");
+        }
+        assert!(seen.len() >= 12, "only {} biomes: {seen:?}", seen.len());
+    }
+
+    #[test]
+    fn spawn_column_is_on_dry_land() {
+        for seed in [0, 1, 7, 42, 2026, 12345, u32::MAX] {
             let generator = ChunkGenerator::new(seed);
-            for (x, z) in [(0, 0), (31, -17), (-4096, 2048)] {
-                for surface in [32, SEA_LEVEL, 88, WORLD_HEIGHT - 1] {
-                    let mut level = None;
-                    for y in 0..WORLD_HEIGHT {
-                        let n = generator
-                            .noise_aquifer
-                            .get_noise_3d(x as f32, y as f32, z as f32)
-                            as f64;
-                        let cell = generator.noise_aquifer.get_noise_3d(
-                            x as f32 + 4000.0,
-                            0.0,
-                            z as f32 - 4000.0,
-                        ) as f64;
-                        let old_level = 28 + ((cell + 1.0) * 0.5 * 36.0) as i32;
-                        let expected =
-                            (surface < SEA_LEVEL && y < SEA_LEVEL) || (y <= old_level && n > 0.06);
-                        assert_eq!(generator.has_fluid(x, y, z, surface, &mut level), expected);
-                    }
-                }
-            }
+            let (x, z) = generator.find_spawn_column();
+            assert!(generator.get_terrain_height_pub(x, z) > SEA_LEVEL, "seed {seed}");
+            assert!(!generator.get_biome(x, z).is_water(), "seed {seed}");
         }
     }
 
     #[test]
-    fn peaks_and_valleys_has_peak_and_valley_bands() {
-        assert!((peaks_and_valleys(0.0) + 1.0).abs() < f64::EPSILON);
-        assert!(peaks_and_valleys(1.0 / 3.0).abs() < f64::EPSILON);
-        assert!((peaks_and_valleys(2.0 / 3.0) - 1.0).abs() < f64::EPSILON);
-        assert!(peaks_and_valleys(1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn same_seed_generates_identical_chunk_blocks() {
-        let first = ChunkGenerator::new(42).generate_chunk(2, -3);
-        let second = ChunkGenerator::new(42).generate_chunk(2, -3);
-
-        for x in 0..CHUNK_SIZE {
-            for y in 0..WORLD_HEIGHT {
-                for z in 0..CHUNK_SIZE {
-                    assert_eq!(first.get_block(x, y, z), second.get_block(x, y, z));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn terrain_height_queries_stay_inside_world_bounds() {
-        let generator = ChunkGenerator::new(2026);
-        let points = [(0, 0), (31, -17), (-128, 256), (1024, -1024), (-4096, 2048)];
-
-        for (x, z) in points {
-            let height = generator.get_terrain_height_pub(x, z);
-            assert!((1..=WORLD_HEIGHT - 20).contains(&height));
-        }
-    }
-
-    #[test]
-    fn generated_chunk_metadata_matches_opaque_columns() {
-        let chunk = ChunkGenerator::new(1337).generate_chunk(0, 0);
-
+    fn generated_chunk_metadata_matches_columns() {
+        let generator = ChunkGenerator::new(99);
+        let chunk = generator.generate_chunk(2, -5);
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let expected = (0..WORLD_HEIGHT)
                     .rev()
                     .find(|&y| chunk.get_block(x, y, z).is_solid_opaque())
-                    .map(|y| y as i16)
-                    .unwrap_or(-1);
-
+                    .map_or(-1, |y| y as i16);
                 assert_eq!(chunk.highest_opaque_y(x, z), expected);
+                assert!((1..=15).contains(&chunk.column_tint(x, z)));
             }
         }
-    }
-
-    #[test]
-    fn sandy_surfaces_do_not_get_single_gravel_or_clay_speckles() {
-        let generator = ChunkGenerator::new(90_210);
-
-        for cx in -1..=1 {
-            for cz in -1..=1 {
-                let chunk = generator.generate_chunk(cx, cz);
-
-                for x in 0..CHUNK_SIZE {
-                    for y in 1..(WORLD_HEIGHT - 1) {
-                        for z in 0..CHUNK_SIZE {
-                            let block = chunk.get_block(x, y, z);
-                            if !matches!(block, BlockType::Gravel | BlockType::Clay) {
-                                continue;
-                            }
-
-                            let below = chunk.get_block(x, y - 1, z);
-                            let above = chunk.get_block(x, y + 1, z);
-                            assert!(
-                                !(below == BlockType::Sand
-                                    && matches!(above, BlockType::Air | BlockType::Water)),
-                                "visible {:?} speckle on sand at chunk ({}, {}), local ({}, {}, {})",
-                                block,
-                                cx,
-                                cz,
-                                x,
-                                y,
-                                z
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn decorations_do_not_generate_shrubs() {
-        let generator = ChunkGenerator::new(12);
-
-        for cx in -1..=1 {
-            for cz in -1..=1 {
-                let chunk = generator.generate_chunk(cx, cz);
-
-                for x in 0..CHUNK_SIZE {
-                    for y in 0..WORLD_HEIGHT {
-                        for z in 0..CHUNK_SIZE {
-                            assert_ne!(chunk.get_block(x, y, z), BlockType::DeadBush);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn fallen_logs_use_axis_specific_blocks_and_textures() {
-        assert_eq!(BlockType::WoodLogX.tex_for_face(0), TEX_WOOD_TOP);
-        assert_eq!(BlockType::WoodLogX.tex_for_face(1), TEX_WOOD_TOP);
-        assert_eq!(BlockType::WoodLogX.tex_for_face(4), TEX_WOOD_SIDE);
-        assert_eq!(BlockType::WoodLogZ.tex_for_face(4), TEX_WOOD_TOP);
-        assert_eq!(BlockType::WoodLogZ.tex_for_face(5), TEX_WOOD_TOP);
-        assert_eq!(BlockType::WoodLogZ.tex_for_face(0), TEX_WOOD_SIDE);
-
-        let generator = ChunkGenerator::new(77);
-        let mut chunk = Chunk::new(0, 0);
-        let y = 70;
-
-        for x in 1..(CHUNK_SIZE - 1) {
-            for z in 1..(CHUNK_SIZE - 1) {
-                chunk.set_block_raw(x, y - 1, z, BlockType::Dirt);
-            }
-        }
-
-        generator.place_fallen_log(&mut chunk, 8, y, 8, 8, 8);
-
-        let expected_log = if generator.position_hash(8, 8) & 1 == 0 {
-            BlockType::WoodLogX
-        } else {
-            BlockType::WoodLogZ
-        };
-        let mut oriented_logs = 0;
-        let mut stump_blocks = 0;
-
-        for x in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                if chunk.get_block(x, y, z) == expected_log {
-                    oriented_logs += 1;
-                }
-                if chunk.get_block(x, y, z) == BlockType::Wood {
-                    stump_blocks += 1;
-                }
-            }
-        }
-
-        assert!(oriented_logs >= 4);
-        assert!(stump_blocks >= 1);
-    }
-
-    #[test]
-    fn fallen_logs_do_not_cut_through_existing_trees() {
-        let generator = ChunkGenerator::new(77);
-        let mut chunk = Chunk::new(0, 0);
-        let y = 70;
-
-        for x in 1..(CHUNK_SIZE - 1) {
-            for z in 1..(CHUNK_SIZE - 1) {
-                chunk.set_block_raw(x, y - 1, z, BlockType::Dirt);
-            }
-        }
-
-        for dy in 0..5 {
-            chunk.set_block_raw(8, y + dy, 8, BlockType::Wood);
-        }
-        chunk.set_block_raw(9, y + 3, 8, BlockType::Leaves);
-
-        generator.place_fallen_log(&mut chunk, 8, y, 8, 8, 8);
-
-        let mut fallen_logs = 0;
-        for x in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                if matches!(
-                    chunk.get_block(x, y, z),
-                    BlockType::WoodLogX | BlockType::WoodLogZ
-                ) {
-                    fallen_logs += 1;
-                }
-            }
-        }
-
-        assert_eq!(fallen_logs, 0);
-        assert_eq!(chunk.get_block(8, y, 8), BlockType::Wood);
     }
 }

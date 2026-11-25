@@ -562,12 +562,18 @@ impl State {
             let mut dirty_this_frame = FxHashSet::default();
             for &(cx, cz) in &newly_inserted_chunks {
                 for sy in 0..NUM_SUBCHUNKS {
+                    // Diagonal neighbours too: sky light reaches across
+                    // chunk corners.
                     for (dirty_cx, dirty_cz) in [
                         (cx, cz),
                         (cx - 1, cz),
                         (cx + 1, cz),
                         (cx, cz - 1),
                         (cx, cz + 1),
+                        (cx - 1, cz - 1),
+                        (cx - 1, cz + 1),
+                        (cx + 1, cz - 1),
+                        (cx + 1, cz + 1),
                     ] {
                         dirty_this_frame.insert(SubchunkKey {
                             chunk_x: dirty_cx,
@@ -691,12 +697,18 @@ impl State {
         // Drain completed mesh results up to the per-frame cap so a burst of
         // ready meshes doesn't cause a single-frame GPU upload spike.
         let section_start = Instant::now();
-        for _ in 0..MAX_MESH_COMMITS_PER_FRAME {
-            if let Some(result) = self.mesh_loader.poll_result() {
-                self.update_subchunk_mesh(result);
-            } else {
+        // The count is a floor so streaming always progresses; the time
+        // budget lets idle frames drain the backlog faster.
+        let mesh_budget = std::time::Duration::from_micros(1500);
+        let mut committed = 0;
+        while committed < MAX_MESH_COMMITS_PER_FRAME * 4
+            && (committed < MAX_MESH_COMMITS_PER_FRAME || section_start.elapsed() < mesh_budget)
+        {
+            let Some(result) = self.mesh_loader.poll_result() else {
                 break;
-            }
+            };
+            self.update_subchunk_mesh(result);
+            committed += 1;
         }
         self.frame_profile.mesh_commit_ms = section_start.elapsed().as_secs_f32() * 1000.0;
         self.frame_profile.update_ms = update_start.elapsed().as_secs_f32() * 1000.0;
@@ -737,8 +749,8 @@ impl State {
     /// Checks are bounds-guarded; out-of-range subchunk indices or absent
     /// chunks are silently skipped.
     pub fn mark_chunk_dirty(&mut self, x: i32, y: i32, z: i32) {
-        let mut affected_subchunks = Vec::with_capacity(7);
-        Self::collect_affected_subchunk_keys(x, y, z, &mut affected_subchunks);
+        let mut affected_subchunks = Vec::with_capacity(32);
+        Self::collect_light_affected_subchunk_keys(x, y, z, &mut affected_subchunks);
 
         let mut queued = Vec::with_capacity(affected_subchunks.len());
         let mut world = self.world.write();
@@ -774,9 +786,6 @@ impl State {
         subchunks.sort_unstable();
         subchunks.dedup();
 
-        let seed = self.world.read().seed;
-        let generator = minerust::ChunkGenerator::new(seed);
-
         for (cx, cz, sy) in subchunks {
             let snapshot = {
                 let world = self.world.read();
@@ -796,7 +805,7 @@ impl State {
                 continue;
             };
 
-            let meshes = minerust::World::build_subchunk_mesh_from_snapshot(&generator, &snapshot);
+            let meshes = minerust::World::build_subchunk_mesh_from_snapshot(&snapshot);
             self.update_subchunk_mesh(minerust::mesh_loader::MeshResult {
                 cx,
                 cz,
@@ -805,6 +814,32 @@ impl State {
                 terrain: meshes.0,
                 water: meshes.1,
             });
+        }
+    }
+
+    /// Every subchunk whose sky light can change when block `(x, y, z)`
+    /// changes: all within the light radius, plus everything below it in
+    /// those columns (opening or closing the sky affects the whole column).
+    ///
+    /// Only the geometric neighbours from [`Self::collect_affected_subchunk_keys`]
+    /// are rebuilt synchronously; the rest catch up through the async queue.
+    fn collect_light_affected_subchunk_keys(
+        x: i32,
+        y: i32,
+        z: i32,
+        out: &mut Vec<(i32, i32, i32)>,
+    ) {
+        let reach = minerust::world::skylight::LIGHT_PAD;
+        let top = (y + reach).div_euclid(SUBCHUNK_HEIGHT).min(NUM_SUBCHUNKS - 1);
+        if !(0..minerust::constants::WORLD_HEIGHT).contains(&y) {
+            return;
+        }
+        for cx in (x - reach).div_euclid(CHUNK_SIZE)..=(x + reach).div_euclid(CHUNK_SIZE) {
+            for cz in (z - reach).div_euclid(CHUNK_SIZE)..=(z + reach).div_euclid(CHUNK_SIZE) {
+                for sy in 0..=top {
+                    out.push((cx, cz, sy));
+                }
+            }
         }
     }
 

@@ -9,8 +9,11 @@ use crate::core::vertex::Vertex;
 pub struct PackedQuad {
     /// x(6), y(6), z(6), face(3), RGB tint(9), AO-diagonal selector(1).
     pub origin_and_face: u32,
-    /// width(6), height(6), material(8), four 2-bit AO values(8).
+    /// width(6), height(6), material(8), four 2-bit AO values(8),
+    /// climate tint palette index(4).
     pub size_material_ao: u32,
+    /// Four 4-bit sky light levels, one per corner (corner 0 in the low bits).
+    pub light: u32,
 }
 
 impl PackedQuad {
@@ -26,9 +29,17 @@ impl PackedQuad {
         material: u8,
         color: [u8; 3],
         ao: [u8; 4],
+        light: [u8; 4],
+        tint: u8,
     ) -> Self {
-        let diagonal =
-            u32::from(u16::from(ao[0]) + u16::from(ao[2]) > u16::from(ao[1]) + u16::from(ao[3]));
+        // Split the quad along the diagonal whose corners are darker, so the
+        // interpolated shading follows the occlusion instead of streaking.
+        let shade = |i: usize| u16::from(ao[i]) * 5 + u16::from(light[i].min(15));
+        let diagonal = u32::from(shade(0) + shade(2) > shade(1) + shade(3));
+        let packed_light = light
+            .iter()
+            .enumerate()
+            .fold(0u32, |bits, (i, &l)| bits | (u32::from(l.min(15)) << (i * 4)));
         let ao = ao.iter().enumerate().fold(0u32, |bits, (i, value)| {
             bits | (u32::from((*value).min(3)) << (i * 2))
         });
@@ -46,7 +57,9 @@ impl PackedQuad {
             size_material_ao: width.clamp(1, 63)
                 | (height.clamp(1, 63) << 6)
                 | (u32::from(material) << 12)
-                | (ao << 20),
+                | (ao << 20)
+                | (u32::from(tint & 0xf) << 28),
+            light: packed_light,
         }
     }
 
@@ -91,6 +104,7 @@ impl PackedQuad {
                 | (color << 21)
                 | (diagonal << 30),
             size_material_ao: width | (height << 6) | (material << 12) | (ao << 20),
+            light: 0xffff,
         }
     }
 }
@@ -108,6 +122,8 @@ pub fn emit_packed_quad(
     material: u8,
     color: [u8; 3],
     ao: [u8; 4],
+    light: [u8; 4],
+    tint: u8,
 ) {
     let half = |value: f32, axis: usize| {
         let value = ((value - subchunk_origin[axis] as f32) * 2.0).round() as i32;
@@ -122,6 +138,8 @@ pub fn emit_packed_quad(
         material,
         color,
         ao,
+        light,
+        tint,
     ));
 }
 
@@ -147,8 +165,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn descriptor_is_eight_bytes_and_preserves_half_block_geometry() {
-        assert_eq!(std::mem::size_of::<PackedQuad>(), 8);
+    fn descriptor_is_twelve_bytes_and_preserves_half_block_geometry() {
+        assert_eq!(std::mem::size_of::<PackedQuad>(), 12);
         let packed = Vertex::pack_with_ao(3, [1.0, 0.5, 0.0], 42, 1, 1, 1, 0);
         let vertices = [
             Vertex {
@@ -170,7 +188,7 @@ mod tests {
         ];
         let quad = PackedQuad::from_vertices(&vertices, &[0, 1, 3, 1, 2, 3], [0, 0, 0]);
         let legacy_default = PackedQuad::from_vertices(&vertices, &[0, 1, 2, 0, 2, 3], [0, 0, 0]);
-        let direct = PackedQuad::terrain([2, 5, 6], 3, 1, 2, 42, [7, 3, 0], [0, 1, 2, 3]);
+        let direct = PackedQuad::terrain([2, 5, 6], 3, 1, 2, 42, [7, 3, 0], [0, 1, 2, 3], [15; 4], 0);
         assert_eq!(legacy_default.origin_and_face, direct.origin_and_face);
         assert_eq!(legacy_default.size_material_ao, direct.size_material_ao);
         assert_eq!(quad.origin_and_face & 0x3ffff, 2 | (5 << 6) | (6 << 12));

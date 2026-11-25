@@ -65,6 +65,7 @@ static GENERATION_OFFSETS: LazyLock<Vec<(i32, i32, i32)>> = LazyLock::new(|| {
         .flat_map(|dx| {
             (-GENERATION_DISTANCE..=GENERATION_DISTANCE).map(move |dz| (dx, dz, dx * dx + dz * dz))
         })
+        .filter(|&(_, _, d2)| d2 <= GENERATION_DISTANCE * GENERATION_DISTANCE)
         .collect();
     offsets.sort_unstable_by_key(|&(dx, dz, priority)| (priority, dx, dz));
     offsets

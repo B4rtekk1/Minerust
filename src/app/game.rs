@@ -23,6 +23,24 @@ use super::render::RenderError;
 use super::server::run_dedicated_server;
 use super::state::State;
 
+/// Frame-rate cap applied while a menu (main menu or connecting screen) is
+/// shown. Gameplay itself stays uncapped.
+const MENU_FPS_LIMIT: u32 = 60;
+/// Frame-rate cap applied after 30 s without input.
+const IDLE_FPS_LIMIT: u32 = 30;
+
+/// Minimum time between frames for the current state, or `None` when uncapped.
+fn frame_interval(state: &State) -> Option<std::time::Duration> {
+    let limit = if state.last_input_time.elapsed().as_secs() >= 30 {
+        IDLE_FPS_LIMIT
+    } else if state.game_state != GameState::Playing {
+        MENU_FPS_LIMIT
+    } else {
+        return None;
+    };
+    Some(std::time::Duration::from_secs(1) / limit)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI argument parsing
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,8 +447,11 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_else(|| frame_start.elapsed().as_secs_f32() * 1000.0);
                     }
 
-                    // Request the next frame immediately (uncapped frame rate).
-                    state.window.request_redraw();
+                    // Uncapped gameplay requests the next frame immediately;
+                    // capped states are paced from `AboutToWait` instead.
+                    if frame_interval(&state).is_none() {
+                        state.window.request_redraw();
+                    }
                 }
 
                 // ── Keyboard input ────────────────────────────────────────── //
@@ -927,23 +948,26 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // ── Idle throttle ─────────────────────────────────────────── //
-                // When no input has been received for 30 seconds the event loop
-                // switches from `Poll` (busy-wait, uncapped FPS) to `WaitUntil`
-                // (wake at most every ~33 ms, ~30 fps) to reduce CPU and GPU
-                // load while the window is open but unused.  Any input event
-                // resets `last_input_time`, causing the next `AboutToWait` to
-                // switch back to `Poll` automatically.
-                Event::AboutToWait => {
-                    let is_idle = state.last_input_time.elapsed().as_secs() >= 30;
-                    if is_idle {
-                        let next_frame = Instant::now() + std::time::Duration::from_millis(33);
-                        elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
-                    } else {
-                        elwt.set_control_flow(ControlFlow::Poll);
+                // ── Frame pacing ──────────────────────────────────────────── //
+                // Gameplay is uncapped. The menus are limited to
+                // `MENU_FPS_LIMIT`, and an idle window (no input for 30 s) to
+                // ~30 fps, so a static screen does not keep the GPU at 100 %.
+                // The redraw is requested only once the frame deadline has
+                // passed; otherwise the loop sleeps until it.
+                Event::AboutToWait => match frame_interval(&state) {
+                    Some(interval) => {
+                        let deadline = state.last_redraw + interval;
+                        if Instant::now() >= deadline {
+                            state.window.request_redraw();
+                        } else {
+                            elwt.set_control_flow(ControlFlow::WaitUntil(deadline));
+                        }
                     }
-                    state.window.request_redraw();
-                }
+                    None => {
+                        elwt.set_control_flow(ControlFlow::Poll);
+                        state.window.request_redraw();
+                    }
+                },
 
                 // ── Window close button ───────────────────────────────────── //
                 Event::WindowEvent {

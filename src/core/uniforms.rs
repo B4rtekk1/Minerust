@@ -150,6 +150,6 @@ pub struct Uniforms {
     /// Non-zero while the main menu is open, enabling menu-only post effects.
     pub menu_blur: f32,
 
-    /// Explicit padding so the uniform block remains 16-byte aligned.
-    pub _pad_uniforms: f32,
+    /// Distance (blocks) at which aerial perspective fully reaches the horizon colour.
+    pub fog_far: f32,
 }

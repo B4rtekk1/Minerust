@@ -294,6 +294,10 @@ pub struct Chunk {
     /// the full world height for every subchunk rebuild.
     highest_opaque_y: [[i16; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
 
+    /// Climate tint palette index per local X/Z column (see
+    /// [`crate::core::biome::climate_tint`]); `0` leaves vegetation untinted.
+    column_tint: [[u8; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
+
     /// `true` if a player has placed or broken any block in this chunk.
     ///
     /// Used to prioritize saving and to distinguish generated chunks from
@@ -313,6 +317,7 @@ impl Chunk {
         Chunk {
             subchunks,
             highest_opaque_y: [[-1i16; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
+            column_tint: [[0u8; CHUNK_SIZE as usize]; CHUNK_SIZE as usize],
             player_modified: false,
         }
     }
@@ -356,6 +361,21 @@ impl Chunk {
         let subchunk_idx = (y / SUBCHUNK_HEIGHT) as usize;
         let local_y = y % SUBCHUNK_HEIGHT;
         self.subchunks[subchunk_idx].set_block_raw(x, local_y, z, block);
+    }
+
+    /// Returns the climate tint palette index of local column `(x, z)`.
+    pub fn column_tint(&self, x: i32, z: i32) -> u8 {
+        if x < 0 || x >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE {
+            return 0;
+        }
+        self.column_tint[x as usize][z as usize]
+    }
+
+    /// Sets the climate tint palette index of local column `(x, z)`.
+    pub fn set_column_tint(&mut self, x: i32, z: i32, tint: u8) {
+        if (0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&z) {
+            self.column_tint[x as usize][z as usize] = tint & 0xf;
+        }
     }
 
     /// Returns the cached highest opaque block in local column `(x, z)`.

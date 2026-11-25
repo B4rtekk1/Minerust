@@ -2,8 +2,8 @@ mod device_info;
 pub mod generator;
 pub mod item_entity;
 pub mod loader;
-mod spline;
 pub mod structures;
+pub mod skylight;
 pub mod terrain;
 
 pub use generator::ChunkGenerator;
