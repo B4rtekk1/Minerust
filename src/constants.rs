@@ -22,8 +22,17 @@ const _: () = {
     assert!(CHUNK_UNLOAD_DISTANCE >= GENERATION_DISTANCE);
 };
 
-/// Temporary day-cycle speed. Set to zero to keep the sun fixed at noon.
+/// Day-cycle speed (radians per second). Zero keeps the sun where the
+/// player leaves it; `[` and `]` move it by hand.
 pub const SUN_MOVEMENT_SPEED: f32 = 0.0;
+/// Sun position at start-up: mid-morning, so terrain casts visible shadows
+/// (π/2 would be noon).
+pub const SUN_START_ANGLE: f32 = 0.95;
+/// How fast `[` / `]` move the sun (radians per second).
+pub const SUN_SCRUB_SPEED: f32 = 0.6;
+/// Sideways tilt of the sun's daily arc, so even noon shadows fall at an
+/// angle instead of straight down.
+pub const SUN_PATH_TILT: f32 = 0.35;
 pub const CHUNK_UNLOAD_DISTANCE: i32 = RENDER_DISTANCE + 5;
 pub const TEX_GRASS_TOP: f32 = 0.0;
 pub const TEX_GRASS_SIDE: f32 = 1.0;
@@ -41,8 +50,41 @@ pub const TEX_CLAY: f32 = 12.0;
 pub const TEX_ICE: f32 = 13.0;
 pub const TEX_CACTUS: f32 = 14.0;
 pub const TEX_DEAD_BUSH: f32 = 15.0;
+pub const TEX_COAL_ORE: f32 = 16.0;
+pub const TEX_IRON_ORE: f32 = 17.0;
+pub const TEX_GOLD_ORE: f32 = 18.0;
+pub const TEX_DIAMOND_ORE: f32 = 19.0;
+pub const TEX_DEEPSLATE: f32 = 20.0;
+pub const TEX_RED_SAND: f32 = 21.0;
+pub const TEX_TERRACOTTA: f32 = 22.0;
+pub const TEX_RED_TERRACOTTA: f32 = 23.0;
+pub const TEX_WHITE_TERRACOTTA: f32 = 24.0;
+pub const TEX_PODZOL_TOP: f32 = 25.0;
+pub const TEX_PODZOL_SIDE: f32 = 26.0;
+pub const TEX_MOSS: f32 = 27.0;
+pub const TEX_MOSSY_STONE: f32 = 28.0;
+pub const TEX_MYCELIUM_TOP: f32 = 29.0;
+pub const TEX_MYCELIUM_SIDE: f32 = 30.0;
+pub const TEX_MUSHROOM_STEM: f32 = 31.0;
+pub const TEX_RED_MUSHROOM: f32 = 32.0;
+pub const TEX_BROWN_MUSHROOM: f32 = 33.0;
+pub const TEX_SANDSTONE: f32 = 34.0;
+pub const TEX_BIRCH_LOG: f32 = 35.0;
+pub const TEX_CHERRY_LEAVES: f32 = 36.0;
+pub const TEX_MAGMA: f32 = 37.0;
+pub const TEX_DRIPSTONE: f32 = 38.0;
+pub const TEX_AMETHYST: f32 = 39.0;
+pub const TEX_CALCITE: f32 = 40.0;
+pub const TEX_CHERRY_LOG: f32 = 41.0;
+/// Side of one square atlas tile (and texture-array layer) in texels.
 pub const TEXTURE_SIZE: u32 = 256;
-pub const ATLAS_SIZE: u32 = 4;
+/// Tiles per row in `assets/textures.png`; tile `i` is at column
+/// `i % ATLAS_COLUMNS`, row `i / ATLAS_COLUMNS`.
+pub const ATLAS_COLUMNS: u32 = 8;
+/// Layers of the block texture array (the atlas holds exactly this many
+/// tiles; the last few are spare). Regenerate the atlas with
+/// `tools/generate_block_textures.py` when adding textures.
+pub const TEXTURE_LAYERS: u32 = 48;
 
 /// Default presentation mode; selects Immediate, Mailbox, or Fifo by support.
 pub const DEFAULT_PRESENT_MODE: wgpu::PresentMode = wgpu::PresentMode::AutoNoVsync;

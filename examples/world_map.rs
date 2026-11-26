@@ -92,7 +92,7 @@ fn column_sample(
     chunk: &minerust::Chunk,
     lx: i32,
     lz: i32,
-    tiles: &[[f32; 3]; 16],
+    tiles: &[[f32; 3]],
 ) -> ([f32; 3], i32, i32) {
     let tint = chunk.column_tint(lx, lz);
     let mut water_top = None;
@@ -122,14 +122,15 @@ fn column_sample(
     (tiles[BlockType::Water.tex_top() as usize], SEA_LEVEL, 1)
 }
 
-/// Average colour of each 4x4 atlas tile, in linear-ish display space.
-fn atlas_tile_colors() -> [[f32; 3]; 16] {
+/// Average colour of each atlas tile, in linear-ish display space.
+fn atlas_tile_colors() -> Vec<[f32; 3]> {
     let atlas = image::open(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/textures.png"))
         .expect("read texture atlas")
         .to_rgba8();
-    let tile = atlas.width() / 4;
-    std::array::from_fn(|i| {
-        let (tx, ty) = ((i as u32 % 4) * tile, (i as u32 / 4) * tile);
+    let columns = minerust::ATLAS_COLUMNS;
+    let tile = atlas.width() / columns;
+    (0..minerust::TEXTURE_LAYERS).map(|i| {
+        let (tx, ty) = ((i % columns) * tile, (i / columns) * tile);
         let mut sum = [0f64; 3];
         let mut n = 0f64;
         for y in ty..ty + tile {
@@ -146,5 +147,5 @@ fn atlas_tile_colors() -> [[f32; 3]; 16] {
             }
         }
         sum.map(|s| (s / n.max(1.0) / 255.0) as f32)
-    })
+    }).collect()
 }

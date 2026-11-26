@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::logger::{LogLevel, log};
-use minerust::{TEXTURE_SIZE, generate_texture_atlas, load_texture_atlas_from_file};
+use minerust::{TEXTURE_LAYERS, TEXTURE_SIZE, generate_texture_atlas, load_texture_atlas_from_file};
 
 /// Manages a file-based cache for the texture atlas binary data.
 ///
@@ -33,8 +33,11 @@ impl TextureAtlasCache {
     /// Attempts to read and return the raw bytes stored in the cache file.
     ///
     /// Returns `Some(bytes)` on success, or `None` if the file cannot be read.
+    /// A cache written for a different layer count (an older atlas) is
+    /// ignored.
     fn load(&self) -> Option<Vec<u8>> {
-        fs::read(&self.cache_path).ok()
+        let expected = (TEXTURE_SIZE * TEXTURE_SIZE * 4 * TEXTURE_LAYERS) as usize;
+        fs::read(&self.cache_path).ok().filter(|data| data.len() == expected)
     }
 }
 
@@ -42,12 +45,12 @@ impl TextureAtlasCache {
 ///
 /// Each mip level is half the size of the previous level in both dimensions
 /// (clamped to a minimum of 1×1). The input atlas is assumed to consist of
-/// `16` array layers packed contiguously in memory (RGBA8, 4 bytes per texel).
+/// `TEXTURE_LAYERS` array layers packed contiguously in memory (RGBA8, 4 bytes per texel).
 /// Downsampling uses a bilinear (Triangle) filter.
 ///
 /// # Arguments
 ///
-/// * `atlas_data`   - Raw RGBA8 pixel data for all 16 layers at mip level 0.
+/// * `atlas_data`   - Raw RGBA8 pixel data for all layers at mip level 0.
 /// * `atlas_width`  - Width of a single layer in texels.
 /// * `atlas_height` - Height of a single layer in texels.
 ///
@@ -74,10 +77,10 @@ pub fn generate_texture_atlas_with_mipmaps(
         let dst_width = (atlas_width >> level).max(1);
         let dst_height = (atlas_height >> level).max(1);
 
-        let mut level_data = Vec::with_capacity((dst_width * dst_height * 4 * 16) as usize);
+        let mut level_data = Vec::with_capacity((dst_width * dst_height * 4 * TEXTURE_LAYERS) as usize);
 
-        // Downsample each of the 16 array layers independently.
-        for layer in 0..16 {
+        // Downsample each array layer independently.
+        for layer in 0..TEXTURE_LAYERS as usize {
             let layer_size = (src_width * src_height * 4) as usize;
             let layer_offset = layer * layer_size;
             let src_data = &mip_levels[src_level as usize];
@@ -104,14 +107,14 @@ pub fn generate_texture_atlas_with_mipmaps(
 /// Uploads a texture atlas (with auto-generated mipmaps) to the GPU.
 ///
 /// Creates a [`wgpu::Texture`] with format [`wgpu::TextureFormat::Rgba8UnormSrgb`],
-/// `16` array layers, and a full mipmap chain. All mip levels are written to the
+/// `TEXTURE_LAYERS` array layers, and a full mipmap chain. All mip levels are written to the
 /// GPU via [`wgpu::Queue::write_texture`].
 ///
 /// # Arguments
 ///
 /// * `device`       - The wgpu device used to allocate the texture.
 /// * `queue`        - The wgpu queue used to upload pixel data.
-/// * `atlas_data`   - Raw RGBA8 pixel data for all 16 layers at mip level 0.
+/// * `atlas_data`   - Raw RGBA8 pixel data for all layers at mip level 0.
 /// * `atlas_width`  - Width of the atlas in texels.
 /// * `atlas_height` - Height of the atlas in texels.
 ///
@@ -133,7 +136,7 @@ pub fn create_texture_atlas_optimized(
         size: wgpu::Extent3d {
             width: atlas_width,
             height: atlas_height,
-            depth_or_array_layers: 16,
+            depth_or_array_layers: TEXTURE_LAYERS,
         },
         mip_level_count,
         sample_count: 1,
@@ -145,8 +148,8 @@ pub fn create_texture_atlas_optimized(
 
     let mip_levels = generate_texture_atlas_with_mipmaps(atlas_data, atlas_width, atlas_height);
 
-    // Upload each mip level. All 16 layers are packed in a single write_texture
-    // call per level by setting depth_or_array_layers to 16.
+    // Upload each mip level. All layers are packed in a single write_texture
+    // call per level by setting depth_or_array_layers to TEXTURE_LAYERS.
     for (level, level_data) in mip_levels.iter().enumerate() {
         let mip_width = (atlas_width >> level).max(1);
         let mip_height = (atlas_height >> level).max(1);
@@ -167,7 +170,7 @@ pub fn create_texture_atlas_optimized(
             wgpu::Extent3d {
                 width: mip_width,
                 height: mip_height,
-                depth_or_array_layers: 16,
+                depth_or_array_layers: TEXTURE_LAYERS,
             },
         );
     }

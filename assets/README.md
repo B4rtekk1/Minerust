@@ -34,6 +34,15 @@ assets/
 ### `textures.png` - Texture Atlas
 **Purpose:** Combined image containing all block textures arranged in a grid.
 
+> **Current layout:** 8 columns × 6 rows of 256×256 tiles (16×16 pixel art
+> scaled up), 48 texture-array layers. Tile `i` is layer `i` and matches the
+> `TEX_*` constants in `src/constants.rs`. Layers 0–15 are the original
+> hand-made tiles; layers 16–41 (ores, deepslate, badlands terracotta,
+> podzol, moss, mycelium, mushroom blocks, sandstone, birch/cherry wood,
+> cherry leaves, magma, dripstone, amethyst, calcite) are generated from
+> them by `python3 tools/generate_block_textures.py`, which can be re-run
+> safely. Layers 42–47 are spare.
+
 **Format & Size:**
 - Format: PNG (RGBA 8-bit)
 - Size: Typically 2048×2048 or 4096×4096 pixels

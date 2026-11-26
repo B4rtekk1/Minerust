@@ -19,7 +19,7 @@ use minerust::{
     SEA_LEVEL, Uniforms, Vertex, WORLD_HEIGHT, World, build_crosshair,
 };
 
-use super::state::{MSAA_SAMPLE_COUNT, State};
+use super::state::{State, depth_resolve_source, ssr_hiz_source};
 
 fn create_menu_background_texture(
     device: &wgpu::Device,
@@ -141,7 +141,9 @@ impl State {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: backend,
-            flags: wgpu::InstanceFlags::default(),
+            // `with_env` lets profiling runs set WGPU_DEBUG=1 so pass labels
+            // show up as markers in Nsight, without a debug build.
+            flags: wgpu::InstanceFlags::default().with_env(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             backend_options: wgpu::BackendOptions::default(),
             display: None,
@@ -214,6 +216,11 @@ impl State {
         // Timestamp queries provide actual GPU execution durations.  Keep the
         // profiler optional so adapters which lack the feature still run the
         // renderer normally.
+        // Needed for sample counts beyond the WebGPU-guaranteed 1 and 4
+        // (2× anti-aliasing).
+        if adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+            requested_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
         let supports_timestamp_queries = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
         if supports_timestamp_queries {
             requested_features |= wgpu::Features::TIMESTAMP_QUERY;
@@ -288,7 +295,31 @@ impl State {
         // memory/bandwidth cost.  All color render passes write to the MSAA
         // texture; it is resolved to the swap-chain image at the end of each
         // frame.
-        let msaa_sample_count = MSAA_SAMPLE_COUNT;
+        let graphics = super::graphics::GraphicsOptions::load();
+        let requested_samples = graphics.anti_aliasing.sample_count();
+        let samples_supported = |format: wgpu::TextureFormat| {
+            adapter
+                .get_texture_format_features(format)
+                .flags
+                .sample_count_supported(requested_samples)
+        };
+        // 1 and 4 are always available; other counts depend on the adapter
+        // (and on TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES being enabled).
+        let msaa_sample_count = if matches!(requested_samples, 1 | 4)
+            || (device
+                .features()
+                .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+                && samples_supported(surface_format)
+                && samples_supported(wgpu::TextureFormat::Depth32Float))
+        {
+            requested_samples
+        } else {
+            log(
+                LogLevel::Warning,
+                &format!("{requested_samples}x MSAA is not supported here; using 4x"),
+            );
+            4
+        };
 
         // A multisampled Depth32Float texture is used for all geometry passes
         // (terrain, water, sun, sky).  A separate single-sampled depth texture
@@ -366,7 +397,7 @@ impl State {
                 // Y coordinate (in world blocks) of the water surface.
                 water_level: SEA_LEVEL as f32 - 1.0,
                 // 1.0 = SSSR enabled, 0.0 = flat reflection fallback.
-                reflection_mode: 1.0,
+                water_quality: 0.0,
                 moon_position: [-0.4, 0.2, -0.3],
                 _pad1_moon: 0.0,
                 moon_intensity: 0.0,
@@ -445,17 +476,42 @@ impl State {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // 3 – Voxel sun-shadow occupancy bits (fragment)
+                    // 4 – Shadow grid header and slot table (fragment)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
+        let shadow_grid = minerust::render::shadow_grid::ShadowGrid::new(&device);
 
         // ------------------------------------------------------------------ //
         // SSR (Screen-Space Reflections) targets
         // ------------------------------------------------------------------ //
 
-        // Resolve opaque color before water samples it for distortion.
-        // The active water shader uses no separate scene-depth texture.
+        // Resolve opaque color for water refraction/reflection and create the
+        // full-resolution depth pyramid used by realistic screen-space reflections.
         let (ssr_color_texture, ssr_color_view) =
             super::resize::create_ssr_targets(&device, &config, surface_format);
+        let (ssr_hiz_texture, ssr_hiz_view, ssr_hiz_mips, ssr_hiz_size) =
+            super::resize::create_ssr_hiz_targets(&device, &config);
 
         // Keep the existing nearest-neighbor sampling of opaque scene color.
         let ssr_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -469,44 +525,50 @@ impl State {
             ..Default::default()
         });
 
-        // Neutral flow map so the shader can enable distortion without an
-        // extra asset dependency.
-        let flow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Flow Map Texture"),
+        // Baked, tiling wave layers for the realistic water shader (see
+        // `minerust::render::water_waves`). Uploaded once with full mips.
+        let wave_mips = minerust::render::water_waves::bake_wave_textures(0x77a7e5);
+        let wave_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Wave Textures"),
             size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
+                width: minerust::render::water_waves::WAVE_TEXTURE_SIZE,
+                height: minerust::render::water_waves::WAVE_TEXTURE_SIZE,
+                depth_or_array_layers: minerust::render::water_waves::WAVE_LAYER_COUNT,
             },
-            mip_level_count: 1,
+            mip_level_count: wave_mips.len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &flow_map_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[128, 128, 128, 255],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        let flow_map_view = flow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let flow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Flow Sampler"),
+        for (level, mip) in wave_mips.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &wave_texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &minerust::render::water_waves::to_rgba16f_bytes(&mip.texels),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(mip.size * 8),
+                    rows_per_image: Some(mip.size),
+                },
+                wgpu::Extent3d {
+                    width: mip.size,
+                    height: mip.size,
+                    depth_or_array_layers: minerust::render::water_waves::WAVE_LAYER_COUNT,
+                },
+            );
+        }
+        let wave_view = wave_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let wave_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Water Wave Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             address_mode_w: wgpu::AddressMode::Repeat,
@@ -523,8 +585,11 @@ impl State {
         // Extends the base uniform/atlas layout with SSR and flow-map bindings:
         //   8 – SSR color texture (fragment)
         //   10 – SSR sampler       (fragment)
-        //   11 – flow map texture  (fragment)
-        //   12 – flow sampler      (fragment)
+        //   11 – baked wave layers (vertex + fragment)
+        //   12 – wave sampler, repeating with mips (vertex + fragment)
+        //   13 – full-resolution non-filterable scene depth (fragment)
+        //   14 – voxel occupancy bits for reflection rays (fragment)
+        //   15 – voxel grid header / slot table (fragment)
         let water_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("water_bind_group_layout"),
@@ -575,18 +640,48 @@ impl State {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 11,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 12,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
                         count: None,
                     },
                 ],
@@ -617,11 +712,23 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: wgpu::BindingResource::TextureView(&flow_map_view),
+                    resource: wgpu::BindingResource::TextureView(&wave_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: wgpu::BindingResource::Sampler(&flow_sampler),
+                    resource: wgpu::BindingResource::Sampler(&wave_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&ssr_hiz_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: shadow_grid.bits_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: shadow_grid.header_buffer().as_entire_binding(),
                 },
             ],
             label: Some("water_bind_group"),
@@ -641,6 +748,14 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&texture_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: shadow_grid.bits_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: shadow_grid.header_buffer().as_entire_binding(),
                 },
             ],
             label: Some("uniform_bind_group"),
@@ -708,48 +823,56 @@ impl State {
         // Render pipelines
         // ------------------------------------------------------------------ //
 
-        // --- Terrain (opaque geometry) ---
+        // --- Terrain ---
+        // Two pipelines share everything but the fragment entry point: fully
+        // opaque blocks use `fs_opaque`, which never discards, so the GPU
+        // can depth-test and depth-write before shading (early-Z). Only the
+        // alpha-tested blocks (leaves, dead bushes) use `fs_main`.
         // Back-face culled, depth write enabled, 4× MSAA.
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&terrain_pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &terrain_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &terrain_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-        });
+        let make_terrain_pipeline = |label: &str, fragment_entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&terrain_pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &terrain_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &terrain_shader,
+                    entry_point: Some(fragment_entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: msaa_sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+            })
+        };
+        let render_pipeline = make_terrain_pipeline("Terrain Opaque Pipeline", "fs_opaque");
+        let cutout_pipeline = make_terrain_pipeline("Terrain Cutout Pipeline", "fs_main");
 
         let player_model_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1142,6 +1265,10 @@ impl State {
             glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
         let menu_render_mode_button_buffer =
             glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
+        let menu_water_button_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
+        let menu_aa_button_buffer =
+            glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
         let menu_server_address_input_buffer =
             glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
 
@@ -1157,7 +1284,7 @@ impl State {
         // The water shader reads opaque color and needs no depth copy.
         let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Resolve Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_resolve.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(depth_resolve_source(msaa_sample_count).into()),
         });
         let depth_resolve_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1169,7 +1296,7 @@ impl State {
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
                             view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: true,
+                            multisampled: msaa_sample_count > 1,
                         },
                         count: None,
                     },
@@ -1201,6 +1328,66 @@ impl State {
                 compilation_options: Default::default(),
             });
 
+        let ssr_hiz_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SSR Hi-Z Shader"),
+            source: wgpu::ShaderSource::Wgsl(ssr_hiz_source(msaa_sample_count).into()),
+        });
+        let ssr_hiz_resolve_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("SSR Hi-Z Resolve Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: msaa_sample_count > 1,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let ssr_hiz_resolve_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("SSR Hi-Z Resolve Pipeline Layout"),
+                bind_group_layouts: &[Some(&ssr_hiz_resolve_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let ssr_hiz_resolve_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("SSR Hi-Z Resolve Pipeline"),
+                layout: Some(&ssr_hiz_resolve_pipeline_layout),
+                cache: None,
+                module: &ssr_hiz_shader,
+                entry_point: Some("resolve"),
+                compilation_options: Default::default(),
+            });
+
+        let ssr_hiz_resolve_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SSR Hi-Z Resolve Bind Group"),
+            layout: &ssr_hiz_resolve_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&depth_texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ssr_hiz_mips[0]),
+                },
+            ],
+        });
         // ------------------------------------------------------------------ //
         // Composite pipeline (post-processing blit)
         // ------------------------------------------------------------------ //
@@ -1226,7 +1413,9 @@ impl State {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let scene_color_view =
@@ -1541,6 +1730,7 @@ impl State {
             queue,
             config,
             render_pipeline,
+            cutout_pipeline,
             player_model_pipeline,
             water_pipeline,
             outline_pipeline,
@@ -1566,6 +1756,7 @@ impl State {
             water_quad_bind_group,
             depth_texture,
             msaa_texture_view,
+            msaa_samples: msaa_sample_count,
             world,
             mesh_loader,
             dirty_mesh_queue: std::collections::VecDeque::new(),
@@ -1587,6 +1778,7 @@ impl State {
             cpu_update_ms: 0.0,
             frame_profile: super::state::FrameProfile::default(),
             gpu_frame_profile: None,
+            gpu_profile_log: Default::default(),
             gpu_timestamp_profiler,
             // Make the debug overlay populate on the first rendered frame.
             last_debug_text_update: Instant::now() - Duration::from_millis(100),
@@ -1610,7 +1802,11 @@ impl State {
             game_state: GameState::Menu,
             has_entered_world: false,
             menu_state: MenuState::default(),
-            reflection_mode: 1,
+            graphics,
+            shadow_grid,
+            bench: super::bench::Bench::from_env(),
+            sun_angle: minerust::SUN_START_ANGLE,
+            sun_scrub: 0.0,
             is_underwater: 0.0,
             sky_visibility: 1.0,
             remote_players: HashMap::new(),
@@ -1633,10 +1829,14 @@ impl State {
             visible_chunk_columns_dirty: true,
             ssr_color_texture,
             ssr_color_view,
+            ssr_hiz_texture,
+            ssr_hiz_view,
+            ssr_hiz_mips,
+            ssr_hiz_size,
             ssr_sampler,
-            flow_map_texture,
-            flow_map_view,
-            flow_sampler,
+            wave_texture,
+            wave_view,
+            wave_sampler,
             water_bind_group,
             water_bind_group_layout,
             surface_format,
@@ -1652,6 +1852,8 @@ impl State {
             menu_connect_button_buffer,
             menu_singleplayer_button_buffer,
             menu_render_mode_button_buffer,
+            menu_water_button_buffer,
+            menu_aa_button_buffer,
             menu_server_address_input_buffer,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,
@@ -1677,6 +1879,8 @@ impl State {
             hiz_valid: false,
             depth_resolve_pipeline,
             depth_resolve_bind_group,
+            ssr_hiz_resolve_pipeline,
+            ssr_hiz_resolve_bind_group,
             supports_indirect_count,
             inventory_ui: Default::default(),
             hotbar_vertex_buffer: None,
@@ -1763,9 +1967,9 @@ impl State {
             sample_count,
             dimension: wgpu::TextureDimension::D2,
             format,
-            // Only used as a render attachment; the resolved result is written
-            // elsewhere so `TEXTURE_BINDING` is not needed here.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // A render attachment; with anti-aliasing off (one sample) it is
+            // copied instead of resolved, hence `COPY_SRC`.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         msaa_texture.create_view(&wgpu::TextureViewDescriptor::default())

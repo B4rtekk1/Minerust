@@ -62,6 +62,11 @@ pub struct World {
     /// Terrain generator used for synchronous chunk generation.  Worker threads
     /// in `ChunkLoader` each hold their own clone of this generator.
     generator: ChunkGenerator,
+
+    /// Unique per `World` value, so GPU-side caches keyed by chunk
+    /// coordinates (the sun-shadow grid) notice when a new world replaces
+    /// this one.
+    pub instance_id: u64,
 }
 
 /// Evicted column keys and the rendered geometry removed with them.
@@ -72,7 +77,7 @@ pub struct ChunkUnloadResult {
     pub rendered_subchunks: u32,
 }
 
-const MESH_CACHE_PAD: usize = 1;
+const MESH_CACHE_PAD: usize = 2;
 const MESH_CACHE_SIZE: usize = CHUNK_SIZE as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_HEIGHT: usize = SUBCHUNK_HEIGHT as usize + MESH_CACHE_PAD * 2;
 const MESH_CACHE_LEN: usize = MESH_CACHE_SIZE * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE;
@@ -111,6 +116,11 @@ impl World {
             last_cleanup_cz: i32::MIN,
             seed,
             generator: ChunkGenerator::new(seed),
+            instance_id: {
+                static NEXT_WORLD_ID: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(1);
+                NEXT_WORLD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
         }
     }
 
@@ -558,9 +568,9 @@ impl World {
     ///
     /// ## 1. Block cache (`block_cache`)
     ///
-    /// A flat array of size `(CHUNK_SIZE + 2) × (SUBCHUNK_HEIGHT + 2) ×
-    /// (CHUNK_SIZE + 2)` (18³ = 5832 entries) is filled with block types
-    /// sampled from `self.chunks`.  The extra ±1 padding on all six faces
+    /// A flat array of size `(CHUNK_SIZE + 4) × (SUBCHUNK_HEIGHT + 4) ×
+    /// (CHUNK_SIZE + 4)` is filled with block types sampled from `self.chunks`.
+    /// The extra ±2 padding on all six faces
     /// means that neighbor lookups during face visibility tests never need a
     /// hash-map access — they always hit the cache.  Blocks in unloaded
     /// neighboring chunks default to `Water` below sea level and `Air` above.
@@ -727,29 +737,26 @@ impl World {
         chunk_x: i32,
         chunk_z: i32,
         subchunk_y: i32,
-    ) -> (
-        Vec<crate::render::quad::PackedQuad>,
-        Vec<crate::render::quad::PackedQuad>,
-    ) {
+    ) -> SubchunkMeshes {
         let snapshot = match self.snapshot_subchunk_mesh(chunk_x, chunk_z, subchunk_y) {
             Some(snapshot) => snapshot,
-            None => return (Vec::new(), Vec::new()),
+            None => return SubchunkMeshes::default(),
         };
 
         Self::build_subchunk_mesh_from_snapshot(&snapshot)
     }
 
-    pub fn build_subchunk_mesh_from_snapshot(
-        snapshot: &SubchunkMeshSnapshot,
-    ) -> (
-        Vec<crate::render::quad::PackedQuad>,
-        Vec<crate::render::quad::PackedQuad>,
-    ) {
+    pub fn build_subchunk_mesh_from_snapshot(snapshot: &SubchunkMeshSnapshot) -> SubchunkMeshes {
         if !snapshot.has_blocks {
-            return (Vec::new(), Vec::new());
+            return SubchunkMeshes::default();
         }
         let mut terrain_quads = Vec::with_capacity(512);
         let mut water_quads = Vec::with_capacity(128);
+        // Distant-water version of the surface: the same tops merged into
+        // large sheets (see `SubchunkMeshes::water_far`).
+        let mut water_far_quads = Vec::new();
+        // Per (x, z) of a Y slice: water-top depth + 1 (0 = no water top).
+        let mut water_far_mask = [0u8; (CHUNK_SIZE * CHUNK_SIZE) as usize];
 
         let chunk_x = snapshot.chunk_x;
         let chunk_z = snapshot.chunk_z;
@@ -760,8 +767,8 @@ impl World {
         let subchunk_origin = [base_x, base_y, base_z];
 
         // ── Block cache setup ─────────────────────────────────────────────── //
-        // 1-block padding on all sides so neighbor lookups never need a
-        // hash-map access during the face visibility and greedy merge tests.
+        // 2-block padding on all sides supports face visibility and the 2×2×2
+        // distant LOD without hash-map lookups.
         const PAD: usize = MESH_CACHE_PAD;
         const S: usize = MESH_CACHE_SIZE;
         const SH: usize = MESH_CACHE_HEIGHT;
@@ -812,6 +819,29 @@ impl World {
             }
             let i = skylight::light_index(rx, ry, rz);
             (snapshot.light_media[i] != skylight::MEDIUM_OPAQUE).then_some(light[i])
+        };
+        // Water depth (blocks, capped at 15) below a water surface cell:
+        // counted down through the light region, which reaches LIGHT_PAD
+        // blocks below the subchunk; anything deeper counts as deep water.
+        let water_depth = |wx: i32, wy: i32, wz: i32| -> u8 {
+            let rx = (wx - base_x + skylight::LIGHT_PAD) as usize;
+            let rz = (wz - base_z + skylight::LIGHT_PAD) as usize;
+            let top = wy - base_y + skylight::LIGHT_PAD;
+            if rx >= skylight::LIGHT_SIZE || rz >= skylight::LIGHT_SIZE || top < 0 {
+                return 15;
+            }
+            let mut depth = 0u8;
+            for ry in (0..=top.min(skylight::LIGHT_HEIGHT as i32 - 1)).rev() {
+                let medium = snapshot.light_media[skylight::light_index(rx, ry as usize, rz)];
+                if medium != skylight::MEDIUM_WATER {
+                    return depth;
+                }
+                depth += 1;
+                if depth >= 15 {
+                    return 15;
+                }
+            }
+            15
         };
         // Smooth light at one face corner: the average of the open cells
         // among the four in front of the face that touch the corner. The
@@ -1210,6 +1240,12 @@ impl World {
             }
         }
 
+        // Distant variant (`SubchunkMeshes::terrain_far`): the same faces
+        // merged with relaxed rules. Stair quads (pass 1) are shared.
+        let stair_quad_count = terrain_quads.len();
+        let mut terrain_far_quads: Vec<PackedQuad> = Vec::new();
+        let mut far_mask = [empty_face; (CHUNK_SIZE as usize) * (SUBCHUNK_HEIGHT as usize)];
+
         // ── Pass 2: greedy meshing for all standard blocks (6 face directions) //
         for face_dir in 0..6 {
             // Map face direction to (slice axis count, d1 axis size, d2 axis size).
@@ -1224,6 +1260,9 @@ impl World {
                 // The mask stores one FaceAttrs entry per (d1, d2) cell.
                 let mask_len = (dim1_size * dim2_size) as usize;
                 mask[..mask_len].fill(empty_face);
+                if face_dir == 3 {
+                    water_far_mask.fill(0);
+                }
 
                 // ── Populate mask for this slice ──────────────────────────── //
                 for d1 in 0..dim1_size {
@@ -1248,21 +1287,40 @@ impl World {
                         if block == BlockType::Water && face_dir == 3 {
                             let neighbor = get_block_world(world_x, y + 1, world_z);
                             if block.should_render_face_against(neighbor) {
-                                let x = world_x as f32;
-                                let y_f = y as f32;
-                                let z = world_z as f32;
-                                emit_corner_quad(
+                                // Water quads carry the water depth below each
+                                // corner (in the light slot), averaged over the
+                                // four columns touching it. Shores average in
+                                // dry land as depth 0, so the realistic water
+                                // shader gets smooth shallows and foam lines.
+                                let corner_depth = |cx: i32, cz: i32| -> u8 {
+                                    let mut sum = 0u32;
+                                    for (dx, dz) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+                                        sum += u32::from(water_depth(cx + dx, y, cz + dz));
+                                    }
+                                    ((sum + 2) / 4) as u8
+                                };
+                                let depths = [
+                                    corner_depth(world_x, world_z),
+                                    corner_depth(world_x, world_z + 1),
+                                    corner_depth(world_x + 1, world_z + 1),
+                                    corner_depth(world_x + 1, world_z),
+                                ];
+                                emit_packed_quad(
                                     &mut water_quads,
-                                    [x, y_f + 1.0, z],
-                                    [x, y_f + 1.0, z + 1.0],
-                                    [x + 1.0, y_f + 1.0, z + 1.0],
-                                    [x + 1.0, y_f + 1.0, z],
-                                    [0.0, 1.0, 0.0],
-                                    skylight::MAX_SKY_LIGHT,
-                                    block.tex_for_face(3),
-                                    block.roughness(),
-                                    block.metallic(),
+                                    subchunk_origin,
+                                    [world_x as f32, (y + 1) as f32, world_z as f32],
+                                    3,
+                                    2,
+                                    2,
+                                    block.tex_for_face(3) as u8,
+                                    [7, 7, 7],
+                                    [3; 4],
+                                    depths,
+                                    0,
                                 );
+                                // Y slices: d1 = x, d2 = z.
+                                water_far_mask[(d1 * dim2_size + d2) as usize] =
+                                    water_depth(world_x, y, world_z) + 1;
                             }
                             continue;
                         }
@@ -1319,6 +1377,10 @@ impl World {
                         };
                     }
                 }
+
+                // The near merge below consumes the mask; keep a copy for
+                // the distant variant.
+                far_mask[..mask_len].copy_from_slice(&mask[..mask_len]);
 
                 // ── Greedy merge and emit quads ───────────────────────────── //
                 for d1 in 0..dim1_size {
@@ -1429,11 +1491,477 @@ impl World {
                         d2 += width; // advance past the merged run
                     }
                 }
+
+                // ── Distant variant: relaxed merging ──────────────────────── //
+                // Beyond the far-mesh distance ambient occlusion and small
+                // sky-light differences are invisible, so faces merge
+                // whenever block, texture and tint match and their darkest
+                // corner falls in the same light band (3 levels wide). This
+                // removes most of the 1×1 faces AO leaves on hilly terrain.
+                let band = |f: &FaceAttrs| f.light.iter().copied().min().unwrap_or(0) / 3;
+                for d1 in 0..dim1_size {
+                    let mut d2 = 0;
+                    while d2 < dim2_size {
+                        let face = far_mask[(d1 * dim2_size + d2) as usize];
+                        if !face.is_active || face.block == BlockType::Water {
+                            d2 += 1;
+                            continue;
+                        }
+                        let key = (face.block, face.tex_index, face.tint, band(&face));
+                        let same = |f: &FaceAttrs| {
+                            f.is_active && (f.block, f.tex_index, f.tint, band(f)) == key
+                        };
+                        let mut width = 1i32;
+                        while d2 + width < dim2_size
+                            && same(&far_mask[(d1 * dim2_size + d2 + width) as usize])
+                        {
+                            width += 1;
+                        }
+                        let mut height = 1i32;
+                        'far_height: while d1 + height < dim1_size {
+                            for w in 0..width {
+                                if !same(&far_mask[((d1 + height) * dim2_size + d2 + w) as usize]) {
+                                    break 'far_height;
+                                }
+                            }
+                            height += 1;
+                        }
+                        for h in 0..height {
+                            for w in 0..width {
+                                far_mask[((d1 + h) * dim2_size + d2 + w) as usize].is_active = false;
+                            }
+                        }
+                        // Same corner conventions as the near merge above.
+                        let (origin, quad_width, quad_height) = match face_dir {
+                            0 => ([base_x + slice, base_y + d1, base_z + d2], width * 2, height * 2),
+                            1 => ([base_x + slice + 1, base_y + d1, base_z + d2 + width], width * 2, height * 2),
+                            2 => ([base_x + d1, base_y + slice, base_z + d2 + width], width * 2, height * 2),
+                            3 => ([base_x + d1, base_y + slice + 1, base_z + d2], width * 2, height * 2),
+                            4 => ([base_x + d1 + height, base_y + d2, base_z + slice], height * 2, width * 2),
+                            _ => ([base_x + d1, base_y + d2, base_z + slice + 1], height * 2, width * 2),
+                        };
+                        // Preserve the actual AO and light at the rectangle's
+                        // four outer corners instead of flattening them. Each
+                        // entry is (d1 edge, d2 edge, source face corner).
+                        let corner_map = match face_dir {
+                            0 | 3 => [(false, false, 0), (false, true, 1), (true, true, 2), (true, false, 3)],
+                            1 | 2 => [(false, true, 0), (false, false, 1), (true, false, 2), (true, true, 3)],
+                            4 => [(true, false, 0), (false, false, 1), (false, true, 2), (true, true, 3)],
+                            _ => [(false, true, 0), (true, true, 1), (true, false, 2), (false, false, 3)],
+                        };
+                        let mut far_ao = [3; 4];
+                        let mut far_light = [skylight::MAX_SKY_LIGHT; 4];
+                        for (corner, (high_d1, high_d2, source_corner)) in
+                            corner_map.into_iter().enumerate()
+                        {
+                            let corner_d1 = d1 + if high_d1 { height - 1 } else { 0 };
+                            let corner_d2 = d2 + if high_d2 { width - 1 } else { 0 };
+                            let source = far_mask[(corner_d1 * dim2_size + corner_d2) as usize];
+                            far_ao[corner] = source.ao[source_corner];
+                            far_light[corner] = source.light[source_corner];
+                        }
+                        emit_packed_quad(
+                            &mut terrain_far_quads,
+                            subchunk_origin,
+                            [origin[0] as f32, origin[1] as f32, origin[2] as f32],
+                            face_dir as u8,
+                            quad_width as u32,
+                            quad_height as u32,
+                            face.tex_index,
+                            face.color,
+                            far_ao,
+                            far_light,
+                            face.tint,
+                        );
+                        d2 += width;
+                    }
+                }
+
+                // Distant water: merge this slice's tops into sheets of equal
+                // depth (open water has one depth, so it merges into a
+                // handful of quads per subchunk).
+                if face_dir == 3 {
+                    Self::merge_water_tops(
+                        &mut water_far_mask,
+                        &mut water_far_quads,
+                        subchunk_origin,
+                        base_y + slice + 1,
+                    );
+                }
             }
         }
 
-        (terrain_quads, water_quads)
+        // The far sets replace the whole near sets, so they also carry the
+        // shared stair quads and the (already merged) water side faces.
+        water_far_quads.extend(water_quads.iter().filter(|quad| quad.face() != 3).copied());
+        terrain_far_quads.extend_from_slice(&terrain_quads[..stair_quad_count]);
+        // Not worth the memory when relaxed merging barely helps.
+        if terrain_far_quads.len() * 10 > terrain_quads.len() * 9 {
+            terrain_far_quads.clear();
+        }
+        let mut terrain_lod_quads = build_lod_terrain_quads(snapshot, subchunk_origin, &light_at);
+        let terrain_far_count = if terrain_far_quads.is_empty() {
+            terrain_quads.len()
+        } else {
+            terrain_far_quads.len()
+        };
+        if terrain_lod_quads.len() * 10 > terrain_far_count * 9 {
+            terrain_lod_quads.clear();
+        }
+        SubchunkMeshes {
+            terrain: terrain_quads,
+            terrain_far: terrain_far_quads,
+            terrain_lod: terrain_lod_quads,
+            water: water_quads,
+            water_far: water_far_quads,
+        }
     }
+
+    /// Greedy-merges a 16×16 mask of water tops (`depth + 1`, 0 = none,
+    /// indexed `x * 16 + z`) at height `top_y` into large quads.
+    fn merge_water_tops(
+        mask: &mut [u8; (CHUNK_SIZE * CHUNK_SIZE) as usize],
+        quads: &mut Vec<PackedQuad>,
+        subchunk_origin: [i32; 3],
+        top_y: i32,
+    ) {
+        let size = CHUNK_SIZE;
+        for x in 0..size {
+            let mut z = 0;
+            while z < size {
+                let value = mask[(x * size + z) as usize];
+                if value == 0 {
+                    z += 1;
+                    continue;
+                }
+                let mut width = 1;
+                while z + width < size && mask[(x * size + z + width) as usize] == value {
+                    width += 1;
+                }
+                let mut height = 1;
+                'grow: while x + height < size {
+                    for w in 0..width {
+                        if mask[((x + height) * size + z + w) as usize] != value {
+                            break 'grow;
+                        }
+                    }
+                    height += 1;
+                }
+                for h in 0..height {
+                    for w in 0..width {
+                        mask[((x + h) * size + z + w) as usize] = 0;
+                    }
+                }
+                // Same corner convention as the +Y faces of the main mesher:
+                // origin at (x, top, z), width along z, height along x.
+                emit_packed_quad(
+                    quads,
+                    subchunk_origin,
+                    [
+                        (subchunk_origin[0] + x) as f32,
+                        top_y as f32,
+                        (subchunk_origin[2] + z) as f32,
+                    ],
+                    3,
+                    (width * 2) as u32,
+                    (height * 2) as u32,
+                    BlockType::Water.tex_for_face(3) as u8,
+                    [7, 7, 7],
+                    [3; 4],
+                    [value - 1; 4],
+                    0,
+                );
+                z += width;
+            }
+        }
+    }
+}
+
+fn build_lod_terrain_quads(
+    snapshot: &SubchunkMeshSnapshot,
+    subchunk_origin: [i32; 3],
+    light_at: &impl Fn(i32, i32, i32) -> Option<u8>,
+) -> Vec<PackedQuad> {
+    const SCALE: i32 = 2;
+    const SIZE: i32 = CHUNK_SIZE / SCALE;
+    const PAD: i32 = MESH_CACHE_PAD as i32;
+    const GRID_SIZE: usize = (SIZE + 2) as usize;
+
+    #[derive(Clone, Copy, Default)]
+    struct LodCell {
+        block: BlockType,
+        tint: u8,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct LodFace {
+        block: BlockType,
+        tex_index: u8,
+        tint: u8,
+        light: u8,
+        active: bool,
+    }
+
+    let block_at = |lx: i32, ly: i32, lz: i32| {
+        let world_y = subchunk_origin[1] + ly;
+        if !(0..WORLD_HEIGHT).contains(&world_y) {
+            return BlockType::Air;
+        }
+        let (px, py, pz) = (lx + PAD, ly + PAD, lz + PAD);
+        if px < 0
+            || px >= MESH_CACHE_SIZE as i32
+            || py < 0
+            || py >= MESH_CACHE_HEIGHT as i32
+            || pz < 0
+            || pz >= MESH_CACHE_SIZE as i32
+        {
+            return BlockType::Air;
+        }
+        snapshot.block_cache[px as usize * MESH_CACHE_HEIGHT * MESH_CACHE_SIZE
+            + py as usize * MESH_CACHE_SIZE
+            + pz as usize]
+    };
+
+    let cell_index = |x: i32, y: i32, z: i32| {
+        ((x + 1) as usize * GRID_SIZE + (y + 1) as usize) * GRID_SIZE + (z + 1) as usize
+    };
+    let aggregate_cell = |x: i32, y: i32, z: i32| {
+        let mut counts = [0u8; BlockType::ALL.len()];
+        let mut sources = [[0i32; 3]; BlockType::ALL.len()];
+        for dx in 0..SCALE {
+            for dy in 0..SCALE {
+                for dz in 0..SCALE {
+                    let local = [x * SCALE + dx, y * SCALE + dy, z * SCALE + dz];
+                    let block = block_at(local[0], local[1], local[2]);
+                    if matches!(block, BlockType::Air | BlockType::Water) {
+                        continue;
+                    }
+                    let index = block as usize;
+                    if counts[index] == 0 {
+                        sources[index] = local;
+                    }
+                    counts[index] += 1;
+                }
+            }
+        }
+        let mut selected = BlockType::Air;
+        let mut selected_count = 0;
+        for (index, &count) in counts.iter().enumerate() {
+            if count > selected_count {
+                selected = BlockType::ALL[index];
+                selected_count = count;
+            }
+        }
+        if selected_count < 2 && selected != BlockType::WoodStairs {
+            return LodCell::default();
+        }
+        let source = sources[selected as usize];
+        let tint_x = source[0].clamp(0, CHUNK_SIZE - 1) as usize;
+        let tint_z = source[2].clamp(0, CHUNK_SIZE - 1) as usize;
+        LodCell {
+            block: selected,
+            tint: snapshot.tint_cache[tint_x * CHUNK_SIZE as usize + tint_z],
+        }
+    };
+
+    // Include one neighbouring 2×2×2 cell on every side. The two-block
+    // snapshot padding makes decisions consistent across chunk/subchunk edges.
+    let mut cells = vec![LodCell::default(); GRID_SIZE * GRID_SIZE * GRID_SIZE];
+    for x in -1..=SIZE {
+        for y in -1..=SIZE {
+            for z in -1..=SIZE {
+                cells[cell_index(x, y, z)] = aggregate_cell(x, y, z);
+            }
+        }
+    }
+
+    let mut quads = Vec::new();
+    let mut mask = [LodFace::default(); (SIZE * SIZE) as usize];
+    for face_dir in 0..6 {
+        let (dx, dy, dz) = match face_dir {
+            0 => (-1, 0, 0),
+            1 => (1, 0, 0),
+            2 => (0, -1, 0),
+            3 => (0, 1, 0),
+            4 => (0, 0, -1),
+            _ => (0, 0, 1),
+        };
+        for slice in 0..SIZE {
+            mask.fill(LodFace::default());
+            for d1 in 0..SIZE {
+                for d2 in 0..SIZE {
+                    let (x, y, z) = match face_dir {
+                        0 | 1 => (slice, d1, d2),
+                        2 | 3 => (d1, slice, d2),
+                        _ => (d1, d2, slice),
+                    };
+                    let cell = cells[cell_index(x, y, z)];
+                    if cell.block == BlockType::Air {
+                        continue;
+                    }
+                    let neighbor = cells[cell_index(x + dx, y + dy, z + dz)];
+                    if !cell.block.should_render_face_against(neighbor.block) {
+                        continue;
+                    }
+                    let tex_index = cell.block.tex_for_face(face_dir) as u8;
+                    let tint = if crate::core::biome::tint_applies(tex_index) {
+                        cell.tint
+                    } else {
+                        0
+                    };
+                    let front = [
+                        subchunk_origin[0]
+                            + x * SCALE
+                            + if dx < 0 { -1 } else if dx > 0 { SCALE } else { 1 },
+                        subchunk_origin[1]
+                            + y * SCALE
+                            + if dy < 0 { -1 } else if dy > 0 { SCALE } else { 1 },
+                        subchunk_origin[2]
+                            + z * SCALE
+                            + if dz < 0 { -1 } else if dz > 0 { SCALE } else { 1 },
+                    ];
+                    let light =
+                        light_at(front[0], front[1], front[2]).unwrap_or(skylight::MAX_SKY_LIGHT);
+                    let index = (d1 * SIZE + d2) as usize;
+                    mask[index] = LodFace {
+                        block: cell.block,
+                        tex_index,
+                        tint,
+                        light: light / 3,
+                        active: true,
+                    };
+                }
+            }
+
+            for d1 in 0..SIZE {
+                let mut d2 = 0;
+                while d2 < SIZE {
+                    let index = (d1 * SIZE + d2) as usize;
+                    let face = mask[index];
+                    if !face.active {
+                        d2 += 1;
+                        continue;
+                    }
+                    let same = |other: LodFace| {
+                        other.active
+                            && other.block == face.block
+                            && other.tex_index == face.tex_index
+                            && other.tint == face.tint
+                            && other.light == face.light
+                    };
+                    let mut width = 1;
+                    while d2 + width < SIZE && same(mask[(d1 * SIZE + d2 + width) as usize]) {
+                        width += 1;
+                    }
+                    let mut height = 1;
+                    'grow: while d1 + height < SIZE {
+                        for w in 0..width {
+                            if !same(mask[((d1 + height) * SIZE + d2 + w) as usize]) {
+                                break 'grow;
+                            }
+                        }
+                        height += 1;
+                    }
+                    for h in 0..height {
+                        for w in 0..width {
+                            mask[((d1 + h) * SIZE + d2 + w) as usize].active = false;
+                        }
+                    }
+                    let (origin, quad_width, quad_height) = match face_dir {
+                        0 => (
+                            [
+                                subchunk_origin[0] + slice * SCALE,
+                                subchunk_origin[1] + d1 * SCALE,
+                                subchunk_origin[2] + d2 * SCALE,
+                            ],
+                            width * SCALE * 2,
+                            height * SCALE * 2,
+                        ),
+                        1 => (
+                            [
+                                subchunk_origin[0] + (slice + 1) * SCALE,
+                                subchunk_origin[1] + d1 * SCALE,
+                                subchunk_origin[2] + (d2 + width) * SCALE,
+                            ],
+                            width * SCALE * 2,
+                            height * SCALE * 2,
+                        ),
+                        2 => (
+                            [
+                                subchunk_origin[0] + d1 * SCALE,
+                                subchunk_origin[1] + slice * SCALE,
+                                subchunk_origin[2] + (d2 + width) * SCALE,
+                            ],
+                            width * SCALE * 2,
+                            height * SCALE * 2,
+                        ),
+                        3 => (
+                            [
+                                subchunk_origin[0] + d1 * SCALE,
+                                subchunk_origin[1] + (slice + 1) * SCALE,
+                                subchunk_origin[2] + d2 * SCALE,
+                            ],
+                            width * SCALE * 2,
+                            height * SCALE * 2,
+                        ),
+                        4 => (
+                            [
+                                subchunk_origin[0] + (d1 + height) * SCALE,
+                                subchunk_origin[1] + d2 * SCALE,
+                                subchunk_origin[2] + slice * SCALE,
+                            ],
+                            height * SCALE * 2,
+                            width * SCALE * 2,
+                        ),
+                        _ => (
+                            [
+                                subchunk_origin[0] + d1 * SCALE,
+                                subchunk_origin[1] + d2 * SCALE,
+                                subchunk_origin[2] + (slice + 1) * SCALE,
+                            ],
+                            height * SCALE * 2,
+                            width * SCALE * 2,
+                        ),
+                    };
+                    let light = (face.light * 3 + 2).min(skylight::MAX_SKY_LIGHT);
+                    emit_packed_quad(
+                        &mut quads,
+                        subchunk_origin,
+                        [origin[0] as f32, origin[1] as f32, origin[2] as f32],
+                        face_dir as u8,
+                        quad_width as u32,
+                        quad_height as u32,
+                        face.tex_index,
+                        [7; 3],
+                        [3; 4],
+                        [light; 4],
+                        face.tint,
+                    );
+                    d2 += width;
+                }
+            }
+        }
+    }
+    quads
+}
+
+/// Packed geometry of one subchunk.
+#[derive(Default)]
+pub struct SubchunkMeshes {
+    /// Opaque and alpha-tested terrain.
+    pub terrain: Vec<PackedQuad>,
+    /// The same terrain merged with relaxed rules (no ambient occlusion,
+    /// coarse light bands): far fewer quads, drawn instead of `terrain`
+    /// beyond the far-mesh distance. Empty when it would not save much.
+    pub terrain_far: Vec<PackedQuad>,
+    /// A 2×2×2 voxel aggregation for the furthest terrain ring.
+    pub terrain_lod: Vec<PackedQuad>,
+    /// Water near the camera: 1×1 surface quads (the wave displacement
+    /// needs the vertices) plus any water side faces.
+    pub water: Vec<PackedQuad>,
+    /// The same water merged into large quads (plus the side faces), drawn
+    /// instead of `water` for subchunks beyond the wave-displacement range.
+    pub water_far: Vec<PackedQuad>,
 }
 
 #[cfg(test)]
@@ -1509,12 +2037,12 @@ mod tests {
                         }
                     };
 
-                    if px > 0
-                        && px < (MESH_CACHE_SIZE - 1) as i32
-                        && py > 0
-                        && py < (MESH_CACHE_HEIGHT - 1) as i32
-                        && pz > 0
-                        && pz < (MESH_CACHE_SIZE - 1) as i32
+                    if px >= MESH_CACHE_PAD as i32
+                        && px < (MESH_CACHE_PAD as i32 + CHUNK_SIZE)
+                        && py >= MESH_CACHE_PAD as i32
+                        && py < (MESH_CACHE_PAD as i32 + SUBCHUNK_HEIGHT)
+                        && pz >= MESH_CACHE_PAD as i32
+                        && pz < (MESH_CACHE_PAD as i32 + CHUNK_SIZE)
                         && block != BlockType::Air
                     {
                         has_blocks = true;
@@ -1539,6 +2067,325 @@ mod tests {
             light_media: light_media.into_boxed_slice(),
             light_sky_height: light_sky_height.into_boxed_slice(),
         })
+    }
+
+    fn quad_ao(quad: &PackedQuad) -> [u8; 4] {
+        std::array::from_fn(|corner| {
+            ((quad.size_material_ao >> (20 + corner * 2)) & 0x3) as u8
+        })
+    }
+
+    fn quad_light(quad: &PackedQuad) -> [u8; 4] {
+        std::array::from_fn(|corner| ((quad.light >> (corner * 4)) & 0xf) as u8)
+    }
+
+    fn quad_corner_positions(quad: &PackedQuad) -> [[i32; 3]; 4] {
+        let face = quad.face();
+        if face >= 6 {
+            return [[-1; 3]; 4];
+        }
+        let origin = [
+            (quad.origin_and_face & 0x3f) as i32,
+            ((quad.origin_and_face >> 6) & 0x3f) as i32,
+            ((quad.origin_and_face >> 12) & 0x3f) as i32,
+        ];
+        let width = (quad.size_material_ao & 0x3f) as i32;
+        let height = ((quad.size_material_ao >> 6) & 0x3f) as i32;
+        let u = [
+            [0, 0, 1],
+            [0, 0, -1],
+            [0, 0, -1],
+            [0, 0, 1],
+            [-1, 0, 0],
+            [1, 0, 0],
+        ][face];
+        let v = [
+            [0, 1, 0],
+            [0, 1, 0],
+            [1, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 1, 0],
+        ][face];
+        let offsets = [(0, 0), (width, 0), (width, height), (0, height)];
+        std::array::from_fn(|corner| {
+            let (along_u, along_v) = offsets[corner];
+            std::array::from_fn(|axis| {
+                origin[axis] + u[axis] * along_u + v[axis] * along_v
+            })
+        })
+    }
+
+    fn far_corners_match_near(far: &PackedQuad, near: &[PackedQuad]) -> bool {
+        let positions = quad_corner_positions(far);
+        let ao = quad_ao(far);
+        let light = quad_light(far);
+        positions.iter().enumerate().all(|(corner, position)| {
+            near.iter().any(|quad| {
+                if quad.face() != far.face() || quad.material() != far.material() {
+                    return false;
+                }
+                let near_positions = quad_corner_positions(quad);
+                let near_ao = quad_ao(quad);
+                let near_light = quad_light(quad);
+                near_positions.iter().enumerate().any(|(near_corner, near_position)| {
+                    near_position == position
+                        && near_ao[near_corner] == ao[corner]
+                        && near_light[near_corner] == light[corner]
+                })
+            })
+        })
+    }
+
+    fn lod_quads_with_world_light(snapshot: &SubchunkMeshSnapshot) -> Vec<PackedQuad> {
+        let origin = [
+            snapshot.chunk_x * CHUNK_SIZE,
+            snapshot.subchunk_y * SUBCHUNK_HEIGHT,
+            snapshot.chunk_z * CHUNK_SIZE,
+        ];
+        let solved = skylight::solve(
+            &snapshot.light_media,
+            &snapshot.light_sky_height,
+            origin[1] - skylight::LIGHT_PAD,
+        );
+        let light_at = |wx: i32, wy: i32, wz: i32| {
+            let rx = wx - origin[0] + skylight::LIGHT_PAD;
+            let ry = wy - origin[1] + skylight::LIGHT_PAD;
+            let rz = wz - origin[2] + skylight::LIGHT_PAD;
+            if rx < 0
+                || rx >= skylight::LIGHT_SIZE as i32
+                || ry < 0
+                || ry >= skylight::LIGHT_HEIGHT as i32
+                || rz < 0
+                || rz >= skylight::LIGHT_SIZE as i32
+            {
+                return Some(skylight::MAX_SKY_LIGHT);
+            }
+            let index = skylight::light_index(rx as usize, ry as usize, rz as usize);
+            (snapshot.light_media[index] != skylight::MEDIUM_OPAQUE).then_some(solved[index])
+        };
+        build_lod_terrain_quads(snapshot, origin, &light_at)
+    }
+
+    #[test]
+    fn distant_water_is_merged_into_sheets() {
+        // 3×3 chunks of stone below y = 40 and water up to sea level.
+        let mut world = World::new_empty_with_seed(1);
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                let mut chunk = Chunk::new(cx, cz);
+                for x in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        for y in 0..SEA_LEVEL {
+                            let block = if y < 40 { BlockType::Stone } else { BlockType::Water };
+                            chunk.set_block_raw(x, y, z, block);
+                        }
+                    }
+                }
+                chunk.rebuild_metadata();
+                world.chunks.insert((cx, cz), chunk);
+            }
+        }
+        let meshes = world.build_subchunk_mesh(0, 0, (SEA_LEVEL - 1) / SUBCHUNK_HEIGHT);
+        assert_eq!(meshes.water.len(), 256, "near water keeps 1×1 wave tiles");
+        assert_eq!(meshes.water_far.len(), 1, "open water merges into one sheet");
+        let sheet = meshes.water_far[0];
+        assert_eq!(sheet.face(), 3);
+        // Covers the whole 16×16 subchunk (sizes are in half blocks).
+        assert_eq!(sheet.size_material_ao & 0x3f, 32);
+        assert_eq!((sheet.size_material_ao >> 6) & 0x3f, 32);
+        // Buried subchunks have no water at all.
+        assert!(world.build_subchunk_mesh(0, 0, 1).water_far.is_empty());
+    }
+
+    #[test]
+    fn far_terrain_variant_needs_fewer_quads() {
+        let generator = crate::world::ChunkGenerator::new(2026);
+        let mut world = World::new_empty_with_seed(2026);
+        for cx in -3..=3 {
+            for cz in -3..=3 {
+                world.chunks.insert((cx, cz), generator.generate_chunk(cx, cz));
+            }
+        }
+        let (mut near, mut far, mut lod) = (0usize, 0usize, 0usize);
+        let (mut near_corner_variation, mut far_corner_variation, mut matched_far_corners) =
+            (false, false, false);
+        for cx in -2..=2 {
+            for cz in -2..=2 {
+                for sy in 0..NUM_SUBCHUNKS {
+                    let meshes = world.build_subchunk_mesh(cx, cz, sy);
+                    near += meshes.terrain.len();
+                    near_corner_variation |= meshes.terrain.iter().any(|quad| {
+                        let ao = quad_ao(quad);
+                        let light = quad_light(quad);
+                        ao.iter().any(|&value| value != ao[0])
+                            || light.iter().any(|&value| value != light[0])
+                    });
+                    far_corner_variation |= meshes.terrain_far.iter().any(|quad| {
+                        let ao = quad_ao(quad);
+                        let light = quad_light(quad);
+                        ao.iter().any(|&value| value != ao[0])
+                            || light.iter().any(|&value| value != light[0])
+                    });
+                    if !matched_far_corners {
+                        matched_far_corners = meshes.terrain_far.iter().any(|quad| {
+                            let width = quad.size_material_ao & 0x3f;
+                            let height = (quad.size_material_ao >> 6) & 0x3f;
+                            (width > 2 || height > 2)
+                                && far_corners_match_near(quad, &meshes.terrain)
+                        });
+                    }
+                    // An empty far set means "draw the near one".
+                    far += if meshes.terrain_far.is_empty() {
+                        meshes.terrain.len()
+                    } else {
+                        meshes.terrain_far.len()
+                    };
+                    lod += if meshes.terrain_lod.is_empty() {
+                        meshes.terrain_far.len().max(meshes.terrain.len())
+                    } else {
+                        meshes.terrain_lod.len()
+                    };
+                }
+            }
+        }
+        println!("terrain quads: near {near}, far {far}, 2×2×2 {lod}");
+        assert!(far * 4 < near * 3, "near {near}, far {far}");
+        assert!(lod < far, "far {far}, 2×2×2 {lod}");
+        assert!(near_corner_variation, "near mesh should retain varied corner shading");
+        assert!(far_corner_variation, "far merges should retain varied outer-corner AO/light");
+        assert!(matched_far_corners, "far outer-corner AO/light must match the near mesh");
+    }
+
+    #[test]
+    fn lod_face_light_is_sampled_in_front_of_open_and_enclosed_surfaces() {
+        let mut open_world = World::new_empty_with_seed(1);
+        let mut open_chunk = Chunk::new(0, 0);
+        for x in 4..6 {
+            for y in 4..6 {
+                for z in 4..6 {
+                    open_chunk.set_block_raw(x, y, z, BlockType::Stone);
+                }
+            }
+        }
+        open_chunk.rebuild_metadata();
+        open_world.chunks.insert((0, 0), open_chunk);
+
+        let open_snapshot = reference_snapshot(&open_world, 0, 0, 0).unwrap();
+        let open_mesh = lod_quads_with_world_light(&open_snapshot);
+        let sky_face = open_mesh
+            .iter()
+            .find(|quad| quad.face() == 3 && quad.origin_and_face & 0x3f == 8)
+            .expect("open supercell should have an LOD top face");
+        assert_eq!(quad_light(sky_face), [15; 4]);
+
+        let mut cave_world = World::new_empty_with_seed(1);
+        let mut cave_chunk = Chunk::new(0, 0);
+        for x in 2..12 {
+            for y in 2..12 {
+                for z in 2..12 {
+                    let inside_cave = (4..10).contains(&x)
+                        && (4..10).contains(&y)
+                        && (4..10).contains(&z);
+                    if !inside_cave {
+                        cave_chunk.set_block_raw(x, y, z, BlockType::Stone);
+                    }
+                }
+            }
+        }
+        cave_chunk.rebuild_metadata();
+        cave_world.chunks.insert((0, 0), cave_chunk);
+
+        let cave_snapshot = reference_snapshot(&cave_world, 0, 0, 0).unwrap();
+        let cave_mesh = lod_quads_with_world_light(&cave_snapshot);
+        let cave_wall = cave_mesh
+            .iter()
+            .find(|quad| quad.face() == 1 && quad.origin_and_face & 0x3f == 8)
+            .expect("enclosed cave wall should have an LOD face");
+        assert!(
+            quad_light(cave_wall).iter().all(|&light| light < 15),
+            "cave wall should use the dark light from the open cave side"
+        );
+    }
+
+    #[test]
+    fn terrain_lod_uses_two_block_faces_and_merges_rough_surfaces() {
+        let mut world = World::new_empty_with_seed(1);
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..8 {
+            for z in 0..8 {
+                let height = 8 + (x + z) % 2;
+                for y in 0..=height {
+                    chunk.set_block_raw(x, y, z, BlockType::Stone);
+                }
+            }
+        }
+        chunk.rebuild_metadata();
+        world.chunks.insert((0, 0), chunk);
+
+        let meshes = world.build_subchunk_mesh(0, 0, 0);
+        assert!(!meshes.terrain_lod.is_empty());
+        assert!(meshes.terrain_lod.len() < meshes.terrain.len());
+        for quad in meshes.terrain_lod {
+            assert_eq!(
+                (quad.size_material_ao & 0x3f) % 4,
+                0,
+                "LOD width must align to 2 blocks"
+            );
+            assert_eq!(
+                ((quad.size_material_ao >> 6) & 0x3f) % 4,
+                0,
+                "LOD height must align to 2 blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_lod_uses_neighboring_supercells_at_chunk_boundaries() {
+        let mut world = World::new_empty_with_seed(1);
+        let mut left = Chunk::new(0, 0);
+        let mut right = Chunk::new(1, 0);
+        for x in 14..16 {
+            for y in 4..8 {
+                for z in 8..12 {
+                    left.set_block_raw(x, y, z, BlockType::Stone);
+                }
+            }
+        }
+        for x in 0..2 {
+            for y in 4..8 {
+                for z in 8..12 {
+                    right.set_block_raw(x, y, z, BlockType::Stone);
+                }
+            }
+        }
+        // Add a rough surface so the distant LOD is retained for comparison.
+        for x in 0..8 {
+            for z in 0..8 {
+                let height = 8 + (x + z) % 2;
+                for y in 0..=height {
+                    left.set_block_raw(x, y, z, BlockType::Stone);
+                }
+            }
+        }
+        left.rebuild_metadata();
+        right.rebuild_metadata();
+        world.chunks.insert((0, 0), left);
+        world.chunks.insert((1, 0), right);
+
+        let lod = world.build_subchunk_mesh(0, 0, 0).terrain_lod;
+        assert!(!lod.is_empty());
+        let has_internal_boundary_face = lod.iter().any(|quad| {
+            let face = (quad.origin_and_face >> 18) & 0x7;
+            let x = quad.origin_and_face & 0x3f;
+            let y = (quad.origin_and_face >> 6) & 0x3f;
+            let z = (quad.origin_and_face >> 12) & 0x3f;
+            face == 1 && x == 32 && (8..16).contains(&y) && (16..24).contains(&z)
+        });
+        assert!(
+            !has_internal_boundary_face,
+            "neighboring 2×2×2 cells must hide their shared face"
+        );
     }
 
     fn snapshot_fixture() -> World {

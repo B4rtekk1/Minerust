@@ -64,7 +64,9 @@ struct AtmosParams {
 @vertex
 fn vs_sky(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = vec4<f32>(model.position.xy, 0.9999, 1.0);
+    // Exactly on the far plane: drawn after terrain with LessEqual, only
+    // uncovered pixels (depth still cleared to 1.0) pass.
+    out.clip_position = vec4<f32>(model.position.xy, 1.0, 1.0);
     out.ndc_pos       = model.position.xy;
 
     let clip    = vec4<f32>(model.position.xy, 1.0, 1.0);

@@ -86,6 +86,15 @@ impl State {
 
         match layout.hit_test(x, y) {
             Some(MenuHit::RenderMode) => self.toggle_present_mode(),
+            Some(MenuHit::AntiAliasing) => {
+                // Takes effect at the next start (pipelines are rebuilt).
+                self.graphics.anti_aliasing = self.graphics.anti_aliasing.next();
+                self.graphics.save();
+            }
+            Some(MenuHit::WaterQuality) => {
+                self.graphics.water = self.graphics.water.toggled();
+                self.graphics.save();
+            }
             Some(MenuHit::NewWorld) => self.start_new_world(),
             Some(MenuHit::Multiplayer) => self.menu_state.show_server_address_input(),
             None => self.menu_state.select_field(MenuField::None),
@@ -102,8 +111,17 @@ impl State {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn start_new_world(&mut self) {
-        let mut world = World::new();
+    pub(super) fn start_new_world(&mut self) {
+        self.start_new_world_with_seed(None);
+    }
+
+    /// Starts a new world; `seed` fixes the world for reproducible runs
+    /// (profiling, benchmarks), otherwise a random seed is used.
+    pub(super) fn start_new_world_with_seed(&mut self, seed: Option<u32>) {
+        let mut world = match seed {
+            Some(seed) => World::new_empty_with_seed(seed),
+            None => World::new(),
+        };
         // Spawn selection needs the actual blocks (trees, ceilings, etc.),
         // not only the height-map. Generate the initial area before searching.
         let (spawn_x, spawn_z) = world.spawn_column();

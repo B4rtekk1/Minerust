@@ -28,8 +28,14 @@ pub struct MeshResult {
     pub mesh_version: u64,
     /// Opaque terrain faces, ready for vertex pulling.
     pub terrain: Vec<PackedQuad>,
+    /// Greedily merged terrain for the distant ring.
+    pub terrain_far: Vec<PackedQuad>,
+    /// 2×2×2 voxel LOD for the furthest terrain ring.
+    pub terrain_lod: Vec<PackedQuad>,
     /// Water faces, in the same vertex-pulling format.
     pub water: Vec<PackedQuad>,
+    /// Merged water for distant drawing (see `SubchunkMeshes::water_far`).
+    pub water_far: Vec<PackedQuad>,
 }
 
 /// Completion message sent by a mesh worker.  A request must produce one of
@@ -101,8 +107,11 @@ impl MeshLoader {
                                     cz: req.cz,
                                     sy: req.sy,
                                     mesh_version: snapshot.mesh_version,
-                                    terrain: meshes.0,
-                                    water: meshes.1,
+                                    terrain: meshes.terrain,
+                                    terrain_far: meshes.terrain_far,
+                                    terrain_lod: meshes.terrain_lod,
+                                    water: meshes.water,
+                                    water_far: meshes.water_far,
                                 })
                             }
                             None => MeshJobResult::Cancelled {

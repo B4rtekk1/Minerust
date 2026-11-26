@@ -112,11 +112,8 @@ pub struct Uniforms {
     /// Used by water shaders and above/below-surface transitions.
     pub water_level: f32,
 
-    /// Selects the active water-reflection technique.
-    ///
-    /// Kept in this slot to match the WGSL `Uniforms` layout used by the
-    /// current terrain and water renderers.
-    pub reflection_mode: f32,
+    /// Water rendering path: `0` = classic, `1` = realistic.
+    pub water_quality: f32,
 
     /// Normalized direction vector toward the moon `[x, y, z]` in world space.
     ///

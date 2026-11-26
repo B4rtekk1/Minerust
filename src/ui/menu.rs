@@ -249,6 +249,10 @@ impl MenuState {
 pub enum MenuHit {
     /// The render presentation mode toggle was clicked.
     RenderMode,
+    /// The water quality (classic / realistic) toggle was clicked.
+    WaterQuality,
+    /// The anti-aliasing (4× / 2× / off) toggle was clicked.
+    AntiAliasing,
     /// The "new world" menu label was clicked.
     NewWorld,
     /// The "multiplayer" menu label was clicked.
@@ -286,6 +290,10 @@ impl Rect {
 /// with the origin at the top-left of the window.
 #[derive(Debug, Clone, Copy)]
 pub struct MenuLayout {
+    /// Clickable bounds for the anti-aliasing toggle.
+    pub anti_aliasing_text: Rect,
+    /// Clickable bounds for the water quality toggle.
+    pub water_text: Rect,
     /// Clickable bounds for the render mode toggle.
     pub render_mode_text: Rect,
     /// Clickable bounds for the "new world" label.
@@ -313,10 +321,12 @@ impl MenuLayout {
         let hit_w = (w * 0.22).clamp(180.0, 300.0).min((w - 32.0).max(160.0));
         let hit_h = 48.0;
         let gap = 14.0;
-        let total_h = hit_h * 3.0 + gap * 2.0;
+        let total_h = hit_h * 5.0 + gap * 4.0;
         let x = (w * 0.045).clamp(20.0, 72.0);
         let bottom_margin = (h * 0.14).clamp(48.0, 120.0);
-        let y = (h - total_h - bottom_margin).max(24.0);
+        let anti_aliasing_y = (h - total_h - bottom_margin).max(24.0);
+        let water_y = anti_aliasing_y + hit_h + gap;
+        let y = water_y + hit_h + gap;
         let new_world_y = y + hit_h + gap;
         let multiplayer_y = new_world_y + hit_h + gap;
 
@@ -340,6 +350,18 @@ impl MenuLayout {
         };
 
         Self {
+            anti_aliasing_text: Rect {
+                x,
+                y: anti_aliasing_y,
+                w: hit_w,
+                h: hit_h,
+            },
+            water_text: Rect {
+                x,
+                y: water_y,
+                w: hit_w,
+                h: hit_h,
+            },
             render_mode_text: Rect {
                 x,
                 y,
@@ -378,6 +400,12 @@ impl MenuLayout {
     /// * `px` - Cursor X position in pixels from the left edge of the window.
     /// * `py` - Cursor Y position in pixels from the top edge of the window.
     pub fn hit_test(&self, px: f32, py: f32) -> Option<MenuHit> {
+        if self.anti_aliasing_text.contains(px, py) {
+            return Some(MenuHit::AntiAliasing);
+        }
+        if self.water_text.contains(px, py) {
+            return Some(MenuHit::WaterQuality);
+        }
         if self.render_mode_text.contains(px, py) {
             return Some(MenuHit::RenderMode);
         }

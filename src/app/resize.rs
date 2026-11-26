@@ -1,6 +1,6 @@
 use glyphon::Resolution;
 
-use super::state::{MSAA_SAMPLE_COUNT, State};
+use super::state::State;
 
 pub(super) fn create_ssr_targets(
     device: &wgpu::Device,
@@ -20,12 +20,49 @@ pub(super) fn create_ssr_targets(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     (color_texture, color_view)
+}
+
+pub(super) fn create_ssr_hiz_targets(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+) -> (wgpu::Texture, wgpu::TextureView, Vec<wgpu::TextureView>, [u32; 2]) {
+    let size = [config.width, config.height];
+    // Water reflections only read the resolved full-resolution depth.
+    let mip_level_count = 1;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("SSR Hi-Z Texture"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mips = (0..mip_level_count)
+        .map(|level| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("SSR Hi-Z Mip View {level}")),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    (texture, view, mips, size)
 }
 
 impl State {
@@ -71,6 +108,7 @@ impl State {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
         self.recreate_size_dependent_targets();
+        self.recreate_ssr_hiz_targets();
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -87,12 +125,12 @@ impl State {
 
     fn recreate_size_dependent_targets(&mut self) {
         self.depth_texture =
-            Self::create_depth_texture(&self.device, &self.config, MSAA_SAMPLE_COUNT);
+            Self::create_depth_texture(&self.device, &self.config, self.msaa_samples);
         self.msaa_texture_view = Self::create_msaa_texture(
             &self.device,
             &self.config,
             self.surface_format,
-            MSAA_SAMPLE_COUNT,
+            self.msaa_samples,
         );
 
         self.scene_color_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -106,7 +144,9 @@ impl State {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         self.scene_color_view = self
@@ -146,14 +186,49 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: wgpu::BindingResource::TextureView(&self.flow_map_view),
+                    resource: wgpu::BindingResource::TextureView(&self.wave_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: wgpu::BindingResource::Sampler(&self.flow_sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.wave_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&self.ssr_hiz_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.shadow_grid.bits_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self.shadow_grid.header_buffer().as_entire_binding(),
                 },
             ],
         });
+    }
+
+    fn recreate_ssr_hiz_targets(&mut self) {
+        let (texture, view, mips, size) = create_ssr_hiz_targets(&self.device, &self.config);
+        let resolve_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SSR Hi-Z Resolve Bind Group"),
+            layout: &self.ssr_hiz_resolve_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&mips[0]),
+                },
+            ],
+        });
+        self.ssr_hiz_texture = texture;
+        self.ssr_hiz_view = view;
+        self.ssr_hiz_mips = mips;
+        self.ssr_hiz_size = size;
+        self.ssr_hiz_resolve_bind_group = resolve_bind_group;
     }
 
     fn rebuild_composite_bind_groups(&mut self) {

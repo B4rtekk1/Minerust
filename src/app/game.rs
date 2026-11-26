@@ -23,6 +23,35 @@ use super::render::RenderError;
 use super::server::run_dedicated_server;
 use super::state::State;
 
+/// Creates the event loop, preferring X11 (XWayland) over native Wayland on
+/// Linux machines running the NVIDIA driver.
+///
+/// On NVIDIA hybrid laptops under GNOME/Mutter, presenting a fullscreen
+/// Vulkan surface over native Wayland fails with
+/// `failed to import supplied dmabufs … Protocol error 7`: the compositor
+/// tries to scan out the NVIDIA buffer through the integrated GPU and
+/// cannot import it, and the game exits. XWayland does not hit this path.
+/// Set `MINERUST_WAYLAND=1` to force native Wayland anyway.
+fn build_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        let on_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let x11_available = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+        let force_wayland = std::env::var("MINERUST_WAYLAND").is_ok_and(|v| v == "1");
+        if on_wayland && x11_available && nvidia && !force_wayland {
+            log(
+                LogLevel::Info,
+                "NVIDIA driver on Wayland: using X11 (XWayland) to avoid dmabuf import \
+                 failures in fullscreen; set MINERUST_WAYLAND=1 to override",
+            );
+            return EventLoop::builder().with_x11().build();
+        }
+    }
+    EventLoop::new()
+}
+
 /// Frame-rate cap applied while a menu (main menu or connecting screen) is
 /// shown. Gameplay itself stays uncapped.
 const MENU_FPS_LIMIT: u32 = 60;
@@ -319,7 +348,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
     // Create the event loop. If creation can fail in this winit version,
     // log the error and return it; otherwise this simply constructs the
     // event loop value.
-    let event_loop = match EventLoop::new() {
+    let event_loop = match build_event_loop() {
         // If EventLoop::new returns a Result in this winit version
         // handle Ok/Err.
         Ok(ev) => ev,
@@ -377,6 +406,16 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     event: WindowEvent::RedrawRequested,
                     ..
                 } => {
+                    // MINERUST_AUTOSTART=<seed> enters a fixed world straight
+                    // away, for reproducible profiling and benchmarks.
+                    if !state.has_entered_world && state.game_state == GameState::Menu {
+                        if let Some(seed) = std::env::var("MINERUST_AUTOSTART")
+                            .ok()
+                            .and_then(|s| s.parse::<u32>().ok())
+                        {
+                            state.start_new_world_with_seed(Some(seed));
+                        }
+                    }
                     let now = Instant::now();
                     // Wall-clock time between the last two redraws, used for
                     // the frame-time display in the debug HUD.
@@ -400,6 +439,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     let frame_start = Instant::now();
 
                     // Run game logic (camera, physics, chunk uploads, networking).
+                    state.bench_before_frame();
                     state.update();
 
                     match state.render() {
@@ -445,6 +485,11 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         state.cpu_update_ms = frame_cpu_start
                             .map(|start| (process_cpu_time_ms().unwrap_or(start) - start) as f32)
                             .unwrap_or_else(|| frame_start.elapsed().as_secs_f32() * 1000.0);
+                    }
+
+                    if state.bench_after_frame() {
+                        elwt.exit();
+                        return;
                     }
 
                     // Uncapped gameplay requests the next frame immediately;
@@ -624,6 +669,22 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     "Off"
                                 };
                                 log(LogLevel::Info, &format!("Debug overlay: {}", state_name));
+                            }
+
+                            // ---- Sun shadows and time of day ----------------
+                            KeyCode::F7 if pressed && !repeat => {
+                                state.graphics.shadows = !state.graphics.shadows;
+                                state.graphics.save();
+                                let state_name = if state.graphics.shadows { "On" } else { "Off" };
+                                log(LogLevel::Info, &format!("Sun shadows: {}", state_name));
+                            }
+                            KeyCode::BracketLeft | KeyCode::BracketRight => {
+                                let direction = if key == KeyCode::BracketLeft { -1.0 } else { 1.0 };
+                                if pressed {
+                                    state.sun_scrub = direction;
+                                } else if state.sun_scrub == direction {
+                                    state.sun_scrub = 0.0;
+                                }
                             }
 
                             KeyCode::F4 if pressed && !repeat && state.game_state == GameState::Playing => {

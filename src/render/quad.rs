@@ -109,6 +109,64 @@ impl PackedQuad {
     }
 }
 
+/// Terrain draw groups per subchunk: six face directions of opaque geometry
+/// (indexed like the mesher's `face_dir`) followed by alpha-tested geometry.
+pub const TERRAIN_GROUPS: usize = 7;
+/// Index of the alpha-tested (cutout) group.
+pub const CUTOUT_GROUP: usize = 6;
+
+/// Atlas layers drawn with alpha testing (leaves, dead bush, cherry leaves).
+pub fn is_cutout_material(tex_index: u8) -> bool {
+    matches!(tex_index, 8 | 15 | 36)
+}
+
+impl PackedQuad {
+    /// Face direction (0..6) of the quad.
+    pub fn face(&self) -> usize {
+        ((self.origin_and_face >> 18) & 0x7) as usize
+    }
+
+    /// Atlas layer of the quad.
+    pub fn material(&self) -> u8 {
+        ((self.size_material_ao >> 12) & 0xff) as u8
+    }
+
+    /// Draw group of a terrain quad (see [`TERRAIN_GROUPS`]).
+    pub fn terrain_group(&self) -> usize {
+        if is_cutout_material(self.material()) {
+            CUTOUT_GROUP
+        } else {
+            self.face().min(5)
+        }
+    }
+}
+
+/// Reorders terrain quads into contiguous draw groups (stable counting
+/// sort) and returns the quad count of each group.
+pub fn group_terrain_quads(quads: &[PackedQuad]) -> (Vec<PackedQuad>, [u32; TERRAIN_GROUPS]) {
+    let mut counts = [0u32; TERRAIN_GROUPS];
+    for quad in quads {
+        counts[quad.terrain_group()] += 1;
+    }
+    let mut starts = [0usize; TERRAIN_GROUPS];
+    for group in 1..TERRAIN_GROUPS {
+        starts[group] = starts[group - 1] + counts[group - 1] as usize;
+    }
+    debug_assert!(
+        counts
+            .iter()
+            .all(|&c| c as usize <= crate::render::indirect::MAX_QUADS_PER_DRAW),
+        "a terrain draw group exceeds the shared index pattern"
+    );
+    let mut grouped = vec![PackedQuad::default(); quads.len()];
+    for quad in quads {
+        let group = quad.terrain_group();
+        grouped[starts[group]] = *quad;
+        starts[group] += 1;
+    }
+    (grouped, counts)
+}
+
 /// Appends one terrain quad directly to the compact descriptor stream.
 /// Coordinates are world-space block units; dimensions are half-block units.
 #[inline]
@@ -202,6 +260,38 @@ mod tests {
         assert_eq!((quad.size_material_ao >> 12) & 0xff, 42);
         assert_eq!((quad.size_material_ao >> 20) & 0xff, 0b11_10_01_00);
         assert_eq!((quad.origin_and_face >> 30) & 1, 1);
+    }
+
+    #[test]
+    fn packed_quad_preserves_per_corner_ao_and_light() {
+        let ao = [0, 1, 2, 3];
+        let light = [1, 5, 10, 15];
+        let quad = PackedQuad::terrain([0; 3], 3, 2, 2, 0, [7; 3], ao, light, 0);
+
+        let unpacked_ao = std::array::from_fn(|corner| {
+            ((quad.size_material_ao >> (20 + corner * 2)) & 0x3) as u8
+        });
+        let unpacked_light = std::array::from_fn(|corner| {
+            ((quad.light >> (corner * 4)) & 0xf) as u8
+        });
+
+        assert_eq!(unpacked_ao, ao);
+        assert_eq!(unpacked_light, light);
+    }
+
+    #[test]
+    fn terrain_quads_are_grouped_by_direction_with_cutout_last() {
+        let quad = |face: u8, material: u8| {
+            PackedQuad::terrain([0, 0, 0], face, 2, 2, material, [7; 3], [3; 4], [15; 4], 0)
+        };
+        let input = [quad(3, 0), quad(8, 8), quad(0, 3), quad(3, 2), quad(5, 15), quad(1, 3)];
+        let (grouped, counts) = group_terrain_quads(&input);
+        assert_eq!(counts, [1, 1, 0, 2, 0, 0, 2]);
+        let groups: Vec<usize> = grouped.iter().map(PackedQuad::terrain_group).collect();
+        assert_eq!(groups, [0, 1, 3, 3, CUTOUT_GROUP, CUTOUT_GROUP]);
+        // Stable: original order kept within a group.
+        assert_eq!(grouped[2].material(), 0);
+        assert_eq!(grouped[3].material(), 2);
     }
 
     #[test]

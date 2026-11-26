@@ -13,10 +13,15 @@
 //!    small islands rise out of the open ocean.
 //! 3. **Climate**: temperature (cooled with altitude) and humidity pick the
 //!    biome and a smooth vegetation tint (see [`crate::core::biome`]).
-//! 4. **Blocks**: surface rules by biome, slope and depth; caves from an
-//!    winding "worm" tunnels that open onto hillsides, ravines, deep
-//!    caverns and flooded underground lakes.
-//! 5. **Features**: trees, cacti, boulders, logs and ice spikes. Features are
+//! 4. **Blocks**: surface rules by biome, slope and depth (terracotta bands
+//!    in badlands, sandstone under deserts, deepslate deep down); caves from
+//!    winding "worm" tunnels that open onto hillsides, noodle tunnels,
+//!    ravines, deep pillared caverns and flooded underground lakes.
+//! 5. **Underground**: ore veins, amethyst geodes and cave biomes — lush
+//!    (moss, hanging foliage), dripstone (stalactites and stalagmites) and
+//!    volcanic (magma floors).
+//! 6. **Features**: trees, huge mushrooms, cacti, boulders, logs and ice
+//!    spikes. Features are
 //!    anchored on a global jittered grid and evaluated for every anchor within
 //!    reach of the chunk, so trees that straddle a chunk border are generated
 //!    identically from both sides instead of being cut off.
@@ -43,6 +48,17 @@ const WORM_MAX_LENGTH: i32 = 118;
 const _: () = assert!(WORM_MAX_LENGTH + 8 < WORM_SOURCE_RADIUS * CHUNK_SIZE);
 /// Carved cave space at or below this height fills with water.
 const CAVE_WATER_LEVEL: i32 = 10;
+/// Below this height stone turns into deepslate (dithered over a few blocks).
+const DEEPSLATE_LEVEL: i32 = 18;
+/// Chunks around a chunk whose ore veins and geodes can reach into it.
+const ORE_SOURCE_RADIUS: i32 = 1;
+/// Ore veins per chunk: block, veins, lowest y, highest y, min/max size.
+const ORE_VEINS: [(BlockType, u32, i32, i32, u32, u32); 4] = [
+    (BlockType::CoalOre, 18, 8, 120, 5, 12),
+    (BlockType::IronOre, 11, 4, 64, 4, 9),
+    (BlockType::GoldOre, 4, 3, 34, 3, 8),
+    (BlockType::DiamondOre, 2, 2, 16, 2, 6),
+];
 /// Horizontal lattice points of the cave field across one chunk.
 const CAVE_XZ: usize = (CHUNK_SIZE / CAVE_CELL_SIZE + 1) as usize;
 
@@ -101,6 +117,11 @@ struct ColumnSample {
     /// Island strength in open ocean.
     island: f32,
     swamp: f32,
+    /// Badlands strength (hot, dry mesa country).
+    badlands: f32,
+    /// Low-frequency field that picks biome variants (birch forest,
+    /// old-growth taiga, cherry groves...).
+    variant: f32,
     temperature: f32,
     humidity: f32,
 }
@@ -132,6 +153,12 @@ enum TreeKind {
     Acacia,
     SwampOak,
     Palm,
+    /// Tall, slim birch.
+    TallBirch,
+    /// Two-by-two old-growth spruce.
+    MegaSpruce,
+    /// Cherry with a wide, pink, multi-lobed crown.
+    Cherry,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -142,6 +169,9 @@ enum Feature {
     Boulder,
     FallenLog,
     IceSpike,
+    MossyBoulder,
+    HugeRedMushroom,
+    HugeBrownMushroom,
 }
 
 /// What a feature block may replace.
@@ -178,6 +208,11 @@ pub struct ChunkGenerator {
     ravines: FastNoiseLite,
     ravine_mask: FastNoiseLite,
     ravine_floor: FastNoiseLite,
+    variant: FastNoiseLite,
+    noodle_a: FastNoiseLite,
+    noodle_b: FastNoiseLite,
+    cave_biome: FastNoiseLite,
+    pillars: FastNoiseLite,
     pub seed: u32,
 }
 
@@ -213,6 +248,11 @@ impl ChunkGenerator {
             ravines: fbm(s(23), 0.0032, 2),
             ravine_mask: simplex(s(24), 0.0018),
             ravine_floor: simplex(s(25), 0.02),
+            variant: fbm(s(26), 0.0024, 2),
+            noodle_a: simplex(s(27), 0.011),
+            noodle_b: simplex(s(28), 0.011),
+            cave_biome: fbm(s(29), 0.0065, 2),
+            pillars: simplex(s(30), 0.085),
             seed,
         }
     }
@@ -252,10 +292,23 @@ impl ChunkGenerator {
         let humidity =
             (self.humidity.get_noise_2d(fx + 4000.0, fz - 2500.0) * 1.7).clamp(-1.0, 1.0);
 
+        // Badlands: the hottest, driest land rises into flat-topped mesas
+        // that are terraced below.
+        let variant = self.variant.get_noise_2d(fx, fz);
+        let badlands = smoothstep(0.3, 0.5, temperature_raw)
+            * smoothstep(-0.12, -0.4, humidity)
+            * smoothstep(-0.05, 0.25, variant)
+            * smoothstep(0.0, 0.2, continental);
+        if badlands > 0.0 {
+            let mesa = smoothstep(-0.15, 0.35, self.plateaus.get_noise_2d(fx * 1.9 + 300.0, fz * 1.9));
+            height += badlands * mesa * 26.0;
+        }
+
         // Terraced plateaus in hot, dry uplands.
-        let terrace = smoothstep(0.25, 0.55, temperature_raw)
+        let terrace = (smoothstep(0.25, 0.55, temperature_raw)
             * smoothstep(0.05, -0.35, humidity)
-            * smoothstep(0.1, 0.45, self.plateaus.get_noise_2d(fx, fz))
+            * smoothstep(0.1, 0.45, self.plateaus.get_noise_2d(fx, fz)))
+        .max(badlands)
             * smoothstep(sea + 6.0, sea + 16.0, height);
         if terrace > 0.0 {
             let step = 7.0;
@@ -326,6 +379,8 @@ impl ChunkGenerator {
             lake,
             island,
             swamp,
+            badlands,
+            variant,
             temperature,
             humidity,
         }
@@ -353,7 +408,15 @@ impl ChunkGenerator {
             };
         }
         if s.island > 0.3 && surface <= sea + 12 {
-            return if surface <= sea + 1 { Biome::Beach } else { Biome::Island };
+            // Some archipelagos are fungal: mushroom fields.
+            let fungal = self.variant.get_noise_2d(x as f32 * 0.5 + 7000.0, z as f32 * 0.5) > 0.22;
+            return if surface <= sea + 1 {
+                Biome::Beach
+            } else if fungal {
+                Biome::MushroomFields
+            } else {
+                Biome::Island
+            };
         }
         if surface <= sea + 2 && s.continental < 0.14 && s.river < 0.3 && s.lake < 0.2 {
             return if slope >= 3 { Biome::StonyShore } else { Biome::Beach };
@@ -364,13 +427,19 @@ impl ChunkGenerator {
         if s.mountain > 0.35 && surface > 100 {
             return Biome::Mountains;
         }
-        let (t, h) = (s.temperature, s.humidity);
+        let (t, h, v) = (s.temperature, s.humidity, s.variant);
         if s.swamp > 0.45 {
             Biome::Swamp
+        } else if s.badlands > 0.35 && t > 0.3 {
+            Biome::Badlands
         } else if t < -0.55 {
             Biome::Tundra
         } else if t < -0.2 {
-            Biome::Taiga
+            if v > 0.1 && h > -0.2 {
+                Biome::OldGrowthTaiga
+            } else {
+                Biome::Taiga
+            }
         } else if t > 0.42 {
             if h < -0.3 {
                 Biome::Desert
@@ -380,7 +449,13 @@ impl ChunkGenerator {
                 Biome::Jungle
             }
         } else if h > 0.12 {
-            Biome::Forest
+            if v > 0.22 {
+                Biome::BirchForest
+            } else {
+                Biome::Forest
+            }
+        } else if surface > 78 && v < -0.28 && t > -0.1 && t < 0.35 {
+            Biome::CherryGrove
         } else if surface > 84 && h > -0.25 {
             Biome::Meadow
         } else {
@@ -432,7 +507,13 @@ impl ChunkGenerator {
             let biome_ok = if strict {
                 matches!(
                     col.biome,
-                    Biome::Plains | Biome::Meadow | Biome::Forest | Biome::Savanna | Biome::Taiga
+                    Biome::Plains
+                        | Biome::Meadow
+                        | Biome::Forest
+                        | Biome::BirchForest
+                        | Biome::CherryGrove
+                        | Biome::Savanna
+                        | Biome::Taiga
                 )
             } else {
                 !col.biome.is_water()
@@ -580,6 +661,7 @@ impl ChunkGenerator {
                     entrance,
                     ravine,
                     carve_ceiling,
+                    pillar: self.pillars.get_noise_2d(wx as f32, wz as f32) > 0.7,
                 };
 
                 for y in 0..=col.surface {
@@ -603,6 +685,10 @@ impl ChunkGenerator {
                             block = BlockType::Gravel;
                         } else if pocket < -0.6 && y > 30 {
                             block = BlockType::Dirt;
+                        } else if pocket < -0.62 && y <= 30 {
+                            block = BlockType::Calcite;
+                        } else if self.is_deepslate(wx, y, wz) {
+                            block = BlockType::Deepslate;
                         }
                     }
                     chunk.set_block_raw(lx, y, lz, block);
@@ -625,7 +711,14 @@ impl ChunkGenerator {
             }
         }
 
-        // Pass 4: features from every anchor whose reach overlaps the chunk.
+        // Pass 4: ore veins and geodes inside the rock.
+        self.place_ores(&mut chunk, base_x, base_z);
+        self.place_geodes(&mut chunk, base_x, base_z);
+
+        // Pass 5: cave biomes decorate floors and ceilings.
+        self.decorate_caves(&mut chunk, base_x, base_z, &columns);
+
+        // Pass 6: features from every anchor whose reach overlaps the chunk.
         self.place_features(&mut chunk, base_x, base_z, &columns);
 
         chunk.rebuild_metadata();
@@ -668,8 +761,19 @@ impl ChunkGenerator {
             Biome::Beach => {
                 if depth <= 4 {
                     BlockType::Sand
+                } else if depth <= 7 {
+                    BlockType::Sandstone
                 } else {
                     BlockType::Stone
+                }
+            }
+            Biome::Badlands => {
+                if depth > 30 + (patch * 6.0) as i32 {
+                    BlockType::Stone
+                } else if underwater || (depth <= 1 && col.slope < 3) {
+                    BlockType::RedSand
+                } else {
+                    badlands_band(y, patch)
                 }
             }
             Biome::StonyShore => {
@@ -681,9 +785,11 @@ impl ChunkGenerator {
             }
             Biome::Desert => {
                 if col.slope >= 7 && depth < 3 {
-                    BlockType::Stone
+                    BlockType::Sandstone
                 } else if depth <= filler_depth + 2 {
                     BlockType::Sand
+                } else if depth <= filler_depth + 7 {
+                    BlockType::Sandstone
                 } else {
                     BlockType::Stone
                 }
@@ -714,6 +820,8 @@ impl ChunkGenerator {
                 if steep {
                     return if depth == 0 && col.biome == Biome::Tundra {
                         BlockType::Snow
+                    } else if col.biome == Biome::OldGrowthTaiga && patch > -0.1 {
+                        BlockType::MossyStone
                     } else {
                         BlockType::Stone
                     };
@@ -741,6 +849,10 @@ impl ChunkGenerator {
                     Biome::Taiga if patch > 0.3 => BlockType::Dirt,
                     Biome::Savanna if patch > 0.36 => BlockType::Dirt,
                     Biome::Island if col.surface <= SEA_LEVEL + 2 => BlockType::Sand,
+                    Biome::MushroomFields => BlockType::Mycelium,
+                    Biome::OldGrowthTaiga if patch > 0.4 => BlockType::Moss,
+                    Biome::OldGrowthTaiga if patch > -0.35 => BlockType::Podzol,
+                    Biome::Jungle if patch > 0.42 => BlockType::Podzol,
                     _ => BlockType::Grass,
                 }
             }
@@ -752,7 +864,7 @@ impl ChunkGenerator {
     /// Samples the cave fields on a coarse lattice. Lattice points sit
     /// on chunk boundaries, so neighbouring chunks agree exactly.
     fn cave_lattice(&self, base_x: i32, base_z: i32, y_samples: usize) -> CaveLattice {
-        let mut values = vec![[0.0f32; 2]; CAVE_XZ * CAVE_XZ * y_samples];
+        let mut values = vec![[0.0f32; 4]; CAVE_XZ * CAVE_XZ * y_samples];
         for ix in 0..CAVE_XZ {
             for iz in 0..CAVE_XZ {
                 let x = (base_x + ix as i32 * CAVE_CELL_SIZE) as f32;
@@ -763,6 +875,8 @@ impl ChunkGenerator {
                     values[(ix * CAVE_XZ + iz) * y_samples + iy] = [
                         self.caverns.get_noise_3d(x, y * 1.6, z),
                         self.pockets.get_noise_3d(x, y * 1.3, z),
+                        self.noodle_a.get_noise_3d(x, y * 1.25, z),
+                        self.noodle_b.get_noise_3d(x + 1300.0, y * 1.25, z - 800.0),
                     ];
                 }
             }
@@ -813,12 +927,25 @@ impl ChunkGenerator {
             return true;
         }
 
-        // Caverns: big low halls, only deep underground.
-        if depth < 16 || y > 48 {
+        // Noodle tunnels: where two independent smooth fields both cross
+        // zero, the intersection traces long, thin, winding passages that
+        // link the worm networks and caverns together.
+        if depth >= 10 && y > 6 && y < 100 {
+            let width = 0.055 + 0.025 * smoothstep(60.0, 20.0, y as f32);
+            if sample_lattice(cave, 2, lx, y, lz).abs() < width
+                && sample_lattice(cave, 3, lx, y, lz).abs() < width
+            {
+                return true;
+            }
+        }
+
+        // Caverns: big low halls, only deep underground. Rare stone
+        // pillars are left standing from floor to ceiling.
+        if depth < 16 || y > 52 || col.pillar {
             return false;
         }
         let cavern = sample_lattice(cave, 0, lx, y, lz);
-        let threshold = 0.4 + 0.3 * smoothstep(20.0, 48.0, y as f32);
+        let threshold = 0.36 + 0.32 * smoothstep(20.0, 52.0, y as f32);
         cavern > threshold
     }
 
@@ -966,6 +1093,163 @@ impl ChunkGenerator {
         }
     }
 
+    // ── Underground ────────────────────────────────────────────────────── //
+
+    /// Stone turns into deepslate below [`DEEPSLATE_LEVEL`], dithered over
+    /// a few blocks so the boundary is not a flat plane.
+    fn is_deepslate(&self, x: i32, y: i32, z: i32) -> bool {
+        if y < DEEPSLATE_LEVEL - 4 {
+            return true;
+        }
+        if y > DEEPSLATE_LEVEL + 3 {
+            return false;
+        }
+        (self.hash3(x, y, z, 0xdee9) % 8) as i32 >= y - (DEEPSLATE_LEVEL - 4)
+    }
+
+    /// Ore veins: short random walks through stone. Veins start in this
+    /// chunk or its neighbours and are simulated identically from every
+    /// chunk they touch, so they never get cut at a chunk border.
+    fn place_ores(&self, chunk: &mut Chunk, base_x: i32, base_z: i32) {
+        let (cx, cz) = (base_x.div_euclid(CHUNK_SIZE), base_z.div_euclid(CHUNK_SIZE));
+        for sx in cx - ORE_SOURCE_RADIUS..=cx + ORE_SOURCE_RADIUS {
+            for sz in cz - ORE_SOURCE_RADIUS..=cz + ORE_SOURCE_RADIUS {
+                let mut rng = Rng(self.hash2(sx, sz, 0x04e5) as u64 | 1);
+                for (ore, veins, y_min, y_max, size_min, size_max) in ORE_VEINS {
+                    for _ in 0..veins {
+                        let mut p = [
+                            (sx * CHUNK_SIZE) as f32 + rng.unit() * CHUNK_SIZE as f32,
+                            y_min as f32 + rng.unit() * (y_max - y_min) as f32,
+                            (sz * CHUNK_SIZE) as f32 + rng.unit() * CHUNK_SIZE as f32,
+                        ];
+                        let size = size_min + rng.below(size_max - size_min + 1);
+                        for _ in 0..size {
+                            put_underground(chunk, base_x, base_z, p, ore);
+                            for axis in &mut p {
+                                *axis += (rng.unit() - 0.5) * 2.2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rare amethyst geodes: a hollow crystal-lined sphere in a calcite
+    /// shell, buried well below the surface.
+    fn place_geodes(&self, chunk: &mut Chunk, base_x: i32, base_z: i32) {
+        let (cx, cz) = (base_x.div_euclid(CHUNK_SIZE), base_z.div_euclid(CHUNK_SIZE));
+        for sx in cx - ORE_SOURCE_RADIUS..=cx + ORE_SOURCE_RADIUS {
+            for sz in cz - ORE_SOURCE_RADIUS..=cz + ORE_SOURCE_RADIUS {
+                let mut rng = Rng(self.hash2(sx, sz, 0x6e0d) as u64 | 1);
+                if rng.below(22) != 0 {
+                    continue;
+                }
+                let gx = (sx * CHUNK_SIZE) as f32 + 4.0 + rng.unit() * (CHUNK_SIZE - 8) as f32;
+                let gz = (sz * CHUNK_SIZE) as f32 + 4.0 + rng.unit() * (CHUNK_SIZE - 8) as f32;
+                let gy = 20.0 + rng.unit() * 26.0;
+                let radius = 4.2 + rng.unit() * 1.4;
+                if (self.sample_column(gx as i32, gz as i32).surface() as f32) < gy + radius + 10.0 {
+                    continue;
+                }
+                let ri = radius.ceil() as i32;
+                for dx in -ri..=ri {
+                    for dy in -ri..=ri {
+                        for dz in -ri..=ri {
+                            let p = [gx + dx as f32, gy + dy as f32, gz + dz as f32];
+                            let d = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
+                            let block = if d <= radius - 2.2 {
+                                BlockType::Air
+                            } else if d <= radius - 1.1 {
+                                BlockType::Amethyst
+                            } else if d <= radius {
+                                BlockType::Calcite
+                            } else {
+                                continue;
+                            };
+                            put_geode(chunk, base_x, base_z, p, block);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cave biomes. Every open cave cell is checked for a stone floor below
+    /// or a stone ceiling above, and decorated by the local cave biome:
+    ///
+    /// - **lush** (humid regions): moss floors, mossy ceilings and hanging
+    ///   foliage;
+    /// - **dripstone** (dry regions): dripstone floors, stalactites and
+    ///   stalagmites;
+    /// - **volcanic** (deep down): magma patches on cavern floors.
+    ///
+    /// Only blocks of the column itself are touched, so the result does not
+    /// depend on neighbouring chunks.
+    fn decorate_caves(&self, chunk: &mut Chunk, base_x: i32, base_z: i32, columns: &[Column]) {
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                let col = &columns[(lx * CHUNK_SIZE + lz) as usize];
+                let (wx, wz) = (base_x + lx, base_z + lz);
+                let (fx, fz) = (wx as f32, wz as f32);
+                let biome_n = self.cave_biome.get_noise_2d(fx, fz);
+                let lush = biome_n + col.sample.humidity * 0.45 > 0.3;
+                let dripstone = !lush && biome_n - col.sample.humidity * 0.3 < -0.22;
+                let volcanic = self.cave_biome.get_noise_2d(fx * 1.7 + 5000.0, fz * 1.7) > 0.2;
+                let top = col.surface - 3;
+                for y in 2..top {
+                    if chunk.get_block(lx, y, lz) != BlockType::Air {
+                        continue;
+                    }
+                    let below = chunk.get_block(lx, y - 1, lz);
+                    let above = chunk.get_block(lx, y + 1, lz);
+                    let h = self.hash3(wx, y, wz, 0xcafe);
+                    let floor = below.is_stone_like() || matches!(below, BlockType::Gravel | BlockType::Dirt);
+                    let ceiling = above.is_stone_like();
+                    if floor {
+                        if lush {
+                            let moss = if h % 6 == 0 { BlockType::MossyStone } else { BlockType::Moss };
+                            chunk.set_block_raw(lx, y - 1, lz, moss);
+                            if h % 23 == 0 && above == BlockType::Air {
+                                // Small azalea-like shrub.
+                                chunk.set_block_raw(lx, y, lz, BlockType::Leaves);
+                            }
+                        } else if dripstone {
+                            if h % 3 != 0 {
+                                chunk.set_block_raw(lx, y - 1, lz, BlockType::Dripstone);
+                            }
+                            if (h >> 8) % 9 == 0 {
+                                let length = 1 + ((h >> 16) % 3) as i32;
+                                grow(chunk, lx, y, lz, 1, length, BlockType::Dripstone);
+                            }
+                        } else if volcanic && y < 26 && h % 3 == 0 {
+                            chunk.set_block_raw(lx, y - 1, lz, BlockType::Magma);
+                        }
+                    }
+                    if ceiling {
+                        if lush {
+                            if h % 4 == 1 {
+                                chunk.set_block_raw(lx, y + 1, lz, BlockType::MossyStone);
+                            }
+                            if (h >> 4) % 8 == 0 {
+                                let length = 1 + ((h >> 12) % 4) as i32;
+                                grow(chunk, lx, y, lz, -1, length, BlockType::Leaves);
+                            }
+                        } else if dripstone {
+                            if h % 3 == 1 {
+                                chunk.set_block_raw(lx, y + 1, lz, BlockType::Dripstone);
+                            }
+                            if (h >> 4) % 7 == 0 {
+                                let length = 1 + ((h >> 12) % 4) as i32;
+                                grow(chunk, lx, y, lz, -1, length, BlockType::Dripstone);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── Features ───────────────────────────────────────────────────────── //
 
     fn place_features(&self, chunk: &mut Chunk, base_x: i32, base_z: i32, columns: &[Column]) {
@@ -978,6 +1262,8 @@ impl ChunkGenerator {
             chunk,
             base_x,
             base_z,
+            log: BlockType::Wood,
+            leaves: BlockType::Leaves,
         };
         // A fixed global iteration order keeps overlapping features resolved
         // identically in every chunk they touch.
@@ -1031,6 +1317,12 @@ impl ChunkGenerator {
                 Biome::Plains => TreeKind::BigOak,
                 Biome::Meadow if pick < 0.6 => TreeKind::Oak,
                 Biome::Meadow => TreeKind::Birch,
+                Biome::BirchForest if pick < 0.7 => TreeKind::TallBirch,
+                Biome::BirchForest => TreeKind::Birch,
+                Biome::CherryGrove if pick < 0.9 => TreeKind::Cherry,
+                Biome::CherryGrove => TreeKind::Birch,
+                Biome::OldGrowthTaiga if pick < 0.4 => TreeKind::MegaSpruce,
+                Biome::OldGrowthTaiga => TreeKind::Spruce,
                 Biome::Forest if pick < 0.42 => TreeKind::Oak,
                 Biome::Forest if pick < 0.78 => TreeKind::Birch,
                 Biome::Forest => TreeKind::BigOak,
@@ -1066,6 +1358,15 @@ impl ChunkGenerator {
             }
             Biome::Tundra if roll < 0.012 => Some(Feature::IceSpike),
             Biome::Tundra if roll > 0.99 => Some(Feature::Boulder),
+            Biome::Badlands if roll < 0.05 => Some(Feature::DeadBush),
+            Biome::Badlands if roll < 0.08 => Some(Feature::Cactus),
+            Biome::OldGrowthTaiga if roll < 0.035 => Some(Feature::FallenLog),
+            Biome::OldGrowthTaiga if roll > 0.955 => Some(Feature::MossyBoulder),
+            Biome::BirchForest if roll < 0.02 => Some(Feature::FallenLog),
+            Biome::MushroomFields if roll < 0.07 => Some(Feature::HugeRedMushroom),
+            Biome::MushroomFields if roll < 0.13 => Some(Feature::HugeBrownMushroom),
+            Biome::Swamp if roll < 0.012 => Some(Feature::HugeBrownMushroom),
+            Biome::Forest if roll > 0.996 => Some(Feature::HugeRedMushroom),
             _ => None,
         }
     }
@@ -1083,7 +1384,13 @@ impl ChunkGenerator {
         match feature {
             Feature::Tree(kind) => {
                 w.soil(x, y - 1, z);
+                (w.log, w.leaves) = match kind {
+                    TreeKind::Birch | TreeKind::TallBirch => (BlockType::BirchLog, BlockType::Leaves),
+                    TreeKind::Cherry => (BlockType::CherryLog, BlockType::CherryLeaves),
+                    _ => (BlockType::Wood, BlockType::Leaves),
+                };
                 self.place_tree(w, kind, x, y, z, h);
+                (w.log, w.leaves) = (BlockType::Wood, BlockType::Leaves);
             }
             Feature::Cactus => {
                 for dy in 0..1 + (h % 3) as i32 {
@@ -1125,6 +1432,63 @@ impl ChunkGenerator {
                     // sink where the terrain changes height.
                     if self.sample_column(px, pz).surface() == col.surface {
                         w.put(px, y, pz, block, Place::Wood);
+                    }
+                }
+            }
+            Feature::MossyBoulder => {
+                let r = 1.4 + (h % 100) as f32 / 100.0 * 1.4;
+                let ri = r.ceil() as i32;
+                for dx in -ri..=ri {
+                    for dy in -ri..=ri {
+                        for dz in -ri..=ri {
+                            let d = ((dx * dx) as f32 + (dy * dy) as f32 * 1.3 + (dz * dz) as f32)
+                                .sqrt();
+                            if d <= r {
+                                let roll = self.hash3(x + dx, y + dy, z + dz, 4) % 6;
+                                let block = match roll {
+                                    0 | 1 if dy >= 0 => BlockType::Moss,
+                                    0..=3 => BlockType::MossyStone,
+                                    _ => BlockType::Stone,
+                                };
+                                w.put(x + dx, y - 1 + dy, z + dz, block, Place::Rock);
+                            }
+                        }
+                    }
+                }
+            }
+            Feature::HugeRedMushroom => {
+                let stem = 5 + (h % 3) as i32;
+                for dy in 0..stem {
+                    w.put(x, y + dy, z, BlockType::MushroomStem, Place::Wood);
+                }
+                let top = y + stem;
+                // Domed cap: a flat top and hanging walls around the stem.
+                for dx in -3i32..=3 {
+                    for dz in -3i32..=3 {
+                        let d = ((dx * dx + dz * dz) as f32).sqrt();
+                        if d <= 2.2 {
+                            w.put(x + dx, top, z + dz, BlockType::RedMushroomBlock, Place::Soft);
+                        }
+                        if d > 1.6 && d <= 3.1 {
+                            for dy in 1..=3 {
+                                w.put(x + dx, top - dy, z + dz, BlockType::RedMushroomBlock, Place::Soft);
+                            }
+                        }
+                    }
+                }
+            }
+            Feature::HugeBrownMushroom => {
+                let stem = 4 + (h % 3) as i32;
+                for dy in 0..stem {
+                    w.put(x, y + dy, z, BlockType::MushroomStem, Place::Wood);
+                }
+                // Wide, flat cap.
+                let radius = 3.0 + ((h >> 4) % 2) as f32 * 0.6;
+                for dx in -4i32..=4 {
+                    for dz in -4i32..=4 {
+                        if ((dx * dx + dz * dz) as f32).sqrt() <= radius {
+                            w.put(x + dx, y + stem, z + dz, BlockType::BrownMushroomBlock, Place::Soft);
+                        }
                     }
                 }
             }
@@ -1179,14 +1543,63 @@ impl ChunkGenerator {
                 self.trunk(w, x, y, z, trunk);
                 self.leaf_blob(w, x as f32, (y + trunk) as f32 - 1.5, z as f32, 2.1, 3.2, 2.1);
             }
+            TreeKind::TallBirch => {
+                let trunk = 9 + r(0, 4);
+                self.trunk(w, x, y, z, trunk);
+                self.leaf_blob(w, x as f32, (y + trunk) as f32 - 2.0, z as f32, 2.2, 4.0, 2.2);
+            }
+            TreeKind::Cherry => {
+                let trunk = 4 + r(0, 2);
+                self.trunk(w, x, y, z, trunk);
+                let top = y + trunk;
+                self.leaf_blob(w, x as f32, top as f32 + 1.0, z as f32, 3.2, 1.9, 3.2);
+                // Two or three arching limbs, each with a drooping crown.
+                for limb in 0..(2 + r(8, 2) as u32) {
+                    let angle = unit(h.rotate_left(limb * 9 + 4)) * tau;
+                    let (dx, dz) = (angle.cos() * 3.0, angle.sin() * 3.0);
+                    self.branch(w, x, top - 2, z, dx, 2.0, dz);
+                    let (cx, cz) = (x as f32 + dx, z as f32 + dz);
+                    self.leaf_blob(w, cx, top as f32 + 0.5, cz, 2.8, 1.7, 2.8);
+                    // Blossom curtains hanging under the crown.
+                    for i in 0..5u32 {
+                        let a = unit(self.hash2(x, z, 60 + limb * 8 + i)) * tau;
+                        let px = (cx + a.cos() * 2.2).round() as i32;
+                        let pz = (cz + a.sin() * 2.2).round() as i32;
+                        for dy in 1..=1 + (self.hash2(px, pz, 61) % 2) as i32 {
+                            w.put(px, top - 1 - dy, pz, w.leaves, Place::Soft);
+                        }
+                    }
+                }
+            }
+            TreeKind::MegaSpruce => {
+                let trunk = 16 + r(0, 10);
+                for (ox, oz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    w.soil(x + ox, y - 1, z + oz);
+                    self.trunk(w, x + ox, y, z + oz, trunk);
+                }
+                let top = y + trunk;
+                for (ox, oz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    w.put(x + ox, top, z + oz, w.leaves, Place::Soft);
+                }
+                w.put(x, top + 1, z, w.leaves, Place::Soft);
+                // A tall, narrow cone that starts high up the trunk.
+                let lowest = y + trunk / 3 + r(4, 3);
+                for (i, ly) in (lowest..top).rev().enumerate() {
+                    let base = (i as f32 * 0.32 + 1.2).min(5.2);
+                    let radius = if i % 3 == 2 { base - 1.3 } else { base };
+                    for (ox, oz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        self.leaf_disc(w, x + ox, ly, z + oz, (radius - 0.6).max(1.0), true);
+                    }
+                }
+            }
             TreeKind::Spruce | TreeKind::SmallSpruce => {
                 let tall = kind == TreeKind::Spruce;
                 let trunk = if tall { 9 + r(0, 6) } else { 5 + r(0, 3) };
                 let max_radius = if tall { 3 } else { 2 };
                 self.trunk(w, x, y, z, trunk);
                 let top = y + trunk;
-                w.put(x, top, z, BlockType::Leaves, Place::Soft);
-                w.put(x, top + 1, z, BlockType::Leaves, Place::Soft);
+                w.put(x, top, z, w.leaves, Place::Soft);
+                w.put(x, top + 1, z, w.leaves, Place::Soft);
                 // Layered cone: the radius grows downwards, with every other
                 // layer pulled in for the classic tiered silhouette.
                 let lowest = y + 2 + r(4, 2);
@@ -1238,9 +1651,9 @@ impl ChunkGenerator {
                 for _ in 0..bend {
                     tx += dir.0;
                     tz += dir.1;
-                    w.put(tx, ty, tz, BlockType::Wood, Place::Wood);
+                    w.put(tx, ty, tz, w.log, Place::Wood);
                     ty += 1;
-                    w.put(tx, ty, tz, BlockType::Wood, Place::Wood);
+                    w.put(tx, ty, tz, w.log, Place::Wood);
                 }
                 self.leaf_disc(w, tx, ty + 1, tz, 3.6, false);
                 self.leaf_disc(w, tx, ty + 2, tz, 2.2, false);
@@ -1275,7 +1688,7 @@ impl ChunkGenerator {
                         tx += dir.0;
                         tz += dir.1;
                     }
-                    w.put(tx, y + i, tz, BlockType::Wood, Place::Wood);
+                    w.put(tx, y + i, tz, w.log, Place::Wood);
                 }
                 let top = y + trunk;
                 self.leaf_disc(w, tx, top, tz, 1.5, false);
@@ -1296,19 +1709,19 @@ impl ChunkGenerator {
                             tx + dx * step,
                             top - droop,
                             tz + dz * step,
-                            BlockType::Leaves,
+                            w.leaves,
                             Place::Soft,
                         );
                     }
                 }
-                w.put(tx, top + 1, tz, BlockType::Leaves, Place::Soft);
+                w.put(tx, top + 1, tz, w.leaves, Place::Soft);
             }
         }
     }
 
     fn trunk(&self, w: &mut FeatureWriter, x: i32, y: i32, z: i32, height: i32) {
         for dy in 0..height {
-            w.put(x, y + dy, z, BlockType::Wood, Place::Wood);
+            w.put(x, y + dy, z, w.log, Place::Wood);
         }
     }
 
@@ -1322,7 +1735,7 @@ impl ChunkGenerator {
                 x + (dx * t).round() as i32,
                 y + (dy * t).round() as i32,
                 z + (dz * t).round() as i32,
-                BlockType::Wood,
+                w.log,
                 Place::Wood,
             );
         }
@@ -1352,7 +1765,7 @@ impl ChunkGenerator {
                     if d > 1.0 || (d > 0.6 && self.hash3(x, y, z, 5) % 3 == 0) {
                         continue;
                     }
-                    w.put(x, y, z, BlockType::Leaves, Place::Soft);
+                    w.put(x, y, z, w.leaves, Place::Soft);
                 }
             }
         }
@@ -1371,7 +1784,7 @@ impl ChunkGenerator {
                 {
                     continue;
                 }
-                w.put(cx + dx, y, cz + dz, BlockType::Leaves, Place::Soft);
+                w.put(cx + dx, y, cz + dz, w.leaves, Place::Soft);
             }
         }
     }
@@ -1385,15 +1798,18 @@ impl ChunkGenerator {
             let pz = z + (angle.sin() * dist).round() as i32;
             let length = 1 + (self.hash2(px, pz, 31) % 3) as i32;
             for dy in 0..length {
-                w.put(px, y - dy, pz, BlockType::Leaves, Place::Soft);
+                w.put(px, y - dy, pz, w.leaves, Place::Soft);
             }
         }
     }
 
     // ── Hashing ────────────────────────────────────────────────────────── //
 
-    fn hash2(&self, x: i32, z: i32, salt: u32) -> u32 {
-        let mut h = self.seed ^ salt.wrapping_mul(0x27d4_eb2d);
+    /// Hashes coordinates for deterministic world-generation streams.
+    /// Stream values distinguish generation decisions; they are not
+    /// cryptographic salts. Keep the mixing stable to preserve existing worlds.
+    fn hash2(&self, x: i32, z: i32, stream: u32) -> u32 {
+        let mut h = self.seed ^ stream.wrapping_mul(0x27d4_eb2d);
         h ^= (x as u32).wrapping_mul(0x8da6_b343);
         h = h.rotate_left(13) ^ (z as u32).wrapping_mul(0xd816_3841);
         h = (h ^ (h >> 15)).wrapping_mul(0x2c1b_3c6d);
@@ -1401,8 +1817,75 @@ impl ChunkGenerator {
         h ^ (h >> 15)
     }
 
-    fn hash3(&self, x: i32, y: i32, z: i32, salt: u32) -> u32 {
-        self.hash2(x, z, salt ^ (y as u32).wrapping_mul(0x1b87_3593))
+    /// Hashes 3D coordinates for deterministic world-generation streams.
+    fn hash3(&self, x: i32, y: i32, z: i32, stream: u32) -> u32 {
+        self.hash2(x, z, stream ^ (y as u32).wrapping_mul(0x1b87_3593))
+    }
+}
+
+/// Terracotta band of the badlands at height `y`. Bands are horizontal and
+/// shared by every column, so mesa walls show continuous stripes; `patch`
+/// tilts them a little.
+fn badlands_band(y: i32, patch: f32) -> BlockType {
+    match (y + (patch * 3.0) as i32).rem_euclid(19) {
+        0 | 1 | 9 => BlockType::RedTerracotta,
+        5 | 14 => BlockType::WhiteTerracotta,
+        11 => BlockType::Sandstone,
+        _ => BlockType::Terracotta,
+    }
+}
+
+/// Chunk-local coordinates of world point `p`, if it lies inside the chunk.
+fn local(base_x: i32, base_z: i32, p: [f32; 3]) -> Option<(i32, i32, i32)> {
+    let (lx, y, lz) = (
+        p[0].floor() as i32 - base_x,
+        p[1].floor() as i32,
+        p[2].floor() as i32 - base_z,
+    );
+    ((0..CHUNK_SIZE).contains(&lx) && (1..WORLD_HEIGHT).contains(&y) && (0..CHUNK_SIZE).contains(&lz))
+        .then_some((lx, y, lz))
+}
+
+/// Writes an ore block, replacing only plain stone or deepslate.
+fn put_underground(chunk: &mut Chunk, base_x: i32, base_z: i32, p: [f32; 3], ore: BlockType) {
+    if let Some((lx, y, lz)) = local(base_x, base_z, p) {
+        if chunk.get_block(lx, y, lz).is_stone_like() {
+            chunk.set_block_raw(lx, y, lz, ore);
+        }
+    }
+}
+
+/// Writes a geode block. The shell only replaces rock (never open caves or
+/// water); the hollow core only clears rock.
+fn put_geode(chunk: &mut Chunk, base_x: i32, base_z: i32, p: [f32; 3], block: BlockType) {
+    if let Some((lx, y, lz)) = local(base_x, base_z, p) {
+        let existing = chunk.get_block(lx, y, lz);
+        let rock = existing.is_solid()
+            && existing != BlockType::Bedrock
+            && !existing.is_leaves()
+            && existing != BlockType::Water;
+        if rock {
+            chunk.set_block_raw(lx, y, lz, block);
+        }
+    }
+}
+
+/// Grows a column of `block` from `(lx, y, lz)` up (`dir = 1`) or down
+/// (`dir = -1`) through open air, at most `length` blocks.
+fn grow(chunk: &mut Chunk, lx: i32, y: i32, lz: i32, dir: i32, length: i32, block: BlockType) {
+    for i in 0..length {
+        let wy = y + i * dir;
+        if !(1..WORLD_HEIGHT).contains(&wy) || chunk.get_block(lx, wy, lz) != BlockType::Air {
+            return;
+        }
+        // Leave a one-block gap so stalactites never seal a passage.
+        let next = wy + dir;
+        if (1..WORLD_HEIGHT).contains(&next) && i + 1 == length {
+            if chunk.get_block(lx, next, lz) != BlockType::Air {
+                return;
+            }
+        }
+        chunk.set_block_raw(lx, wy, lz, block);
     }
 }
 
@@ -1433,9 +1916,10 @@ fn ridged(seed: u32, frequency: f32, octaves: i32) -> FastNoiseLite {
     noise
 }
 
-/// Coarse cave field: two channels per lattice point (caverns, soft pockets).
+/// Coarse cave field: four channels per lattice point (caverns, soft
+/// pockets and the two noodle-tunnel fields).
 struct CaveLattice {
-    values: Vec<[f32; 2]>,
+    values: Vec<[f32; 4]>,
     y_samples: usize,
 }
 
@@ -1552,6 +2036,8 @@ struct CaveColumn {
     ravine: Option<(i32, f32)>,
     /// Highest Y that may be carved (below any neighbouring water).
     carve_ceiling: i32,
+    /// A cavern pillar stands in this column.
+    pillar: bool,
 }
 
 /// Trilinear interpolation of one channel of the cave lattice.
@@ -1584,6 +2070,10 @@ struct FeatureWriter<'a> {
     chunk: &'a mut Chunk,
     base_x: i32,
     base_z: i32,
+    /// Trunk block of the tree being placed.
+    log: BlockType,
+    /// Foliage block of the tree being placed.
+    leaves: BlockType,
 }
 
 impl FeatureWriter<'_> {
@@ -1598,20 +2088,23 @@ impl FeatureWriter<'_> {
         let existing = self.chunk.get_block(lx, y, lz);
         let replaceable = match place {
             Place::Soft => existing == BlockType::Air,
-            Place::Wood => matches!(
-                existing,
-                BlockType::Air | BlockType::Leaves | BlockType::DeadBush
-            ),
-            Place::Rock => matches!(
-                existing,
-                BlockType::Air
-                    | BlockType::Leaves
-                    | BlockType::DeadBush
-                    | BlockType::Grass
-                    | BlockType::Dirt
-                    | BlockType::Snow
-                    | BlockType::Sand
-            ),
+            Place::Wood => existing.is_leaves() || matches!(existing, BlockType::Air | BlockType::DeadBush),
+            Place::Rock => {
+                existing.is_leaves()
+                    || matches!(
+                        existing,
+                        BlockType::Air
+                            | BlockType::DeadBush
+                            | BlockType::Grass
+                            | BlockType::Dirt
+                            | BlockType::Snow
+                            | BlockType::Sand
+                            | BlockType::RedSand
+                            | BlockType::Podzol
+                            | BlockType::Moss
+                            | BlockType::Mycelium
+                    )
+            }
         };
         if replaceable {
             self.chunk.set_block_raw(lx, y, lz, block);
@@ -1648,6 +2141,27 @@ mod tests {
             }
         }
         hash
+    }
+
+    #[test]
+    fn coordinate_hashes_are_stable() {
+        assert_eq!(ChunkGenerator::new(42).hash2(0, 0, 0), 0xf1f5_261a);
+        assert_eq!(ChunkGenerator::new(42).hash2(-17, 29, 3), 0xec7f_c347);
+        assert_eq!(
+            ChunkGenerator::new(u32::MAX).hash2(i32::MAX, i32::MIN, 0x04e5),
+            0x964d_9058
+        );
+
+        // Stream 3 is used by the boulder material selector.
+        assert_eq!(ChunkGenerator::new(42).hash3(12, 64, -9, 3), 0x89ef_2bb8);
+        assert_eq!(
+            ChunkGenerator::new(7).hash3(-33, -48, 91, 0xdee9),
+            0xecb8_9a1c
+        );
+        assert_eq!(
+            ChunkGenerator::new(u32::MAX).hash3(i32::MAX, i32::MIN, 0, 0xcafe),
+            0xd66d_5eb0
+        );
     }
 
     #[test]
@@ -1736,6 +2250,10 @@ mod tests {
             Biome::Mountains,
             Biome::River,
             Biome::Beach,
+            Biome::Badlands,
+            Biome::BirchForest,
+            Biome::CherryGrove,
+            Biome::OldGrowthTaiga,
         ] {
             assert!(seen.contains(&biome), "missing {biome:?}; saw {seen:?}");
         }

@@ -48,9 +48,134 @@ pub enum BlockType {
     WoodLogX,
     /// Horizontal wood log aligned along the Z axis.
     WoodLogZ,
+    // ── Added with the richer world generator. New variants must be
+    // appended so saved worlds and network ids keep their meaning. ──
+    /// Stone with coal seams; common at every depth.
+    CoalOre,
+    /// Stone with iron deposits; mid depths.
+    IronOre,
+    /// Deepslate with gold veins; deep underground and in badlands.
+    GoldOre,
+    /// Deepslate with diamonds; only near the bottom of the world.
+    DiamondOre,
+    /// Dark, dense stone of the deep underground.
+    Deepslate,
+    /// Iron-rich sand of the badlands.
+    RedSand,
+    /// Orange fired clay, the main badlands layer.
+    Terracotta,
+    /// Red terracotta band.
+    RedTerracotta,
+    /// Pale terracotta band.
+    WhiteTerracotta,
+    /// Needle-covered forest floor of old-growth taiga.
+    Podzol,
+    /// Soft moss carpet block (lush caves, old forests).
+    Moss,
+    /// Moss-overgrown stone.
+    MossyStone,
+    /// Fungal soil of mushroom fields.
+    Mycelium,
+    /// Stem of a huge mushroom.
+    MushroomStem,
+    /// Cap of a huge red mushroom.
+    RedMushroomBlock,
+    /// Cap of a huge brown mushroom.
+    BrownMushroomBlock,
+    /// Compressed sand under deserts.
+    Sandstone,
+    /// White birch trunk.
+    BirchLog,
+    /// Pink cherry blossom foliage (alpha tested, like leaves).
+    CherryLeaves,
+    /// Glowing volcanic rock found in deep caves.
+    Magma,
+    /// Stalactites and stalagmites of dripstone caves.
+    Dripstone,
+    /// Purple crystal lining geodes.
+    Amethyst,
+    /// White mineral shell around geodes.
+    Calcite,
+    /// Dark cherry wood trunk.
+    CherryLog,
 }
 
 impl BlockType {
+    /// Every block type, in id order (`ALL[id as usize] as u8 == id`).
+    pub const ALL: [BlockType; 42] = [
+        BlockType::Air,
+        BlockType::Grass,
+        BlockType::Dirt,
+        BlockType::Stone,
+        BlockType::Sand,
+        BlockType::Water,
+        BlockType::Wood,
+        BlockType::Leaves,
+        BlockType::Bedrock,
+        BlockType::Snow,
+        BlockType::Gravel,
+        BlockType::Clay,
+        BlockType::Ice,
+        BlockType::Cactus,
+        BlockType::DeadBush,
+        BlockType::WoodStairs,
+        BlockType::WoodLogX,
+        BlockType::WoodLogZ,
+        BlockType::CoalOre,
+        BlockType::IronOre,
+        BlockType::GoldOre,
+        BlockType::DiamondOre,
+        BlockType::Deepslate,
+        BlockType::RedSand,
+        BlockType::Terracotta,
+        BlockType::RedTerracotta,
+        BlockType::WhiteTerracotta,
+        BlockType::Podzol,
+        BlockType::Moss,
+        BlockType::MossyStone,
+        BlockType::Mycelium,
+        BlockType::MushroomStem,
+        BlockType::RedMushroomBlock,
+        BlockType::BrownMushroomBlock,
+        BlockType::Sandstone,
+        BlockType::BirchLog,
+        BlockType::CherryLeaves,
+        BlockType::Magma,
+        BlockType::Dripstone,
+        BlockType::Amethyst,
+        BlockType::Calcite,
+        BlockType::CherryLog,
+    ];
+
+    /// Converts a numeric id (as sent over the network) back to a block.
+    /// Unknown ids become [`BlockType::Air`].
+    pub fn from_u8(id: u8) -> BlockType {
+        Self::ALL.get(id as usize).copied().unwrap_or(BlockType::Air)
+    }
+
+    /// `true` for any kind of tree foliage.
+    pub fn is_leaves(&self) -> bool {
+        matches!(self, BlockType::Leaves | BlockType::CherryLeaves)
+    }
+
+    /// `true` for any kind of vertical tree trunk.
+    pub fn is_log(&self) -> bool {
+        matches!(
+            self,
+            BlockType::Wood
+                | BlockType::WoodLogX
+                | BlockType::WoodLogZ
+                | BlockType::BirchLog
+                | BlockType::CherryLog
+                | BlockType::MushroomStem
+        )
+    }
+
+    /// `true` for the stone family that ores and cave decoration replace.
+    pub fn is_stone_like(&self) -> bool {
+        matches!(self, BlockType::Stone | BlockType::Deepslate)
+    }
+
     /// Returns the base RGB color used for vertex coloring and the minimap.
     ///
     /// Components are in linear `[0.0, 1.0]` space. [`BlockType::Air`] returns
@@ -73,6 +198,30 @@ impl BlockType {
             BlockType::Cactus => [0.2, 0.55, 0.2],
             BlockType::DeadBush => [0.55, 0.4, 0.25],
             BlockType::WoodStairs => [0.6, 0.4, 0.2],
+            BlockType::CoalOre => [0.4, 0.4, 0.4],
+            BlockType::IronOre => [0.6, 0.53, 0.48],
+            BlockType::GoldOre => [0.45, 0.4, 0.25],
+            BlockType::DiamondOre => [0.3, 0.45, 0.47],
+            BlockType::Deepslate => [0.26, 0.26, 0.29],
+            BlockType::RedSand => [0.74, 0.39, 0.16],
+            BlockType::Terracotta => [0.62, 0.37, 0.26],
+            BlockType::RedTerracotta => [0.57, 0.24, 0.18],
+            BlockType::WhiteTerracotta => [0.83, 0.7, 0.64],
+            BlockType::Podzol => [0.37, 0.25, 0.11],
+            BlockType::Moss => [0.33, 0.42, 0.16],
+            BlockType::MossyStone => [0.42, 0.48, 0.36],
+            BlockType::Mycelium => [0.44, 0.38, 0.43],
+            BlockType::MushroomStem => [0.8, 0.78, 0.74],
+            BlockType::RedMushroomBlock => [0.77, 0.17, 0.16],
+            BlockType::BrownMushroomBlock => [0.57, 0.43, 0.31],
+            BlockType::Sandstone => [0.84, 0.77, 0.55],
+            BlockType::BirchLog => [0.88, 0.87, 0.84],
+            BlockType::CherryLeaves => [0.93, 0.66, 0.77],
+            BlockType::Magma => [0.78, 0.31, 0.08],
+            BlockType::Dripstone => [0.53, 0.42, 0.35],
+            BlockType::Amethyst => [0.51, 0.38, 0.75],
+            BlockType::Calcite => [0.84, 0.85, 0.83],
+            BlockType::CherryLog => [0.24, 0.15, 0.19],
         }
     }
 
@@ -119,6 +268,7 @@ impl BlockType {
             BlockType::Air
                 | BlockType::Water
                 | BlockType::Leaves
+                | BlockType::CherryLeaves
                 | BlockType::Ice
                 | BlockType::DeadBush
                 | BlockType::WoodStairs
@@ -154,7 +304,7 @@ impl BlockType {
         if neighbor == BlockType::Water {
             return true;
         }
-        if *self == BlockType::Leaves && neighbor == BlockType::Leaves {
+        if self.is_leaves() && neighbor.is_leaves() {
             return true;
         }
         if neighbor == BlockType::WoodStairs {
@@ -186,6 +336,23 @@ impl BlockType {
             BlockType::Cactus => 0.4,
             BlockType::DeadBush => 0.0,
             BlockType::WoodStairs => 2.0,
+            BlockType::CoalOre | BlockType::IronOre => 3.0,
+            BlockType::GoldOre | BlockType::DiamondOre => 4.0,
+            BlockType::Deepslate => 3.5,
+            BlockType::RedSand => 0.5,
+            BlockType::Terracotta | BlockType::RedTerracotta | BlockType::WhiteTerracotta => 1.25,
+            BlockType::Podzol | BlockType::Mycelium => 0.6,
+            BlockType::Moss => 0.3,
+            BlockType::MossyStone => 2.5,
+            BlockType::MushroomStem
+            | BlockType::RedMushroomBlock
+            | BlockType::BrownMushroomBlock => 0.3,
+            BlockType::Sandstone => 1.0,
+            BlockType::BirchLog | BlockType::CherryLog => 2.0,
+            BlockType::CherryLeaves => 0.2,
+            BlockType::Magma => 0.8,
+            BlockType::Dripstone => 1.5,
+            BlockType::Amethyst | BlockType::Calcite => 1.0,
         }
     }
 
@@ -212,6 +379,29 @@ impl BlockType {
             BlockType::Cactus => TEX_CACTUS,
             BlockType::DeadBush => TEX_DEAD_BUSH,
             BlockType::WoodStairs => TEX_WOOD_TOP,
+            BlockType::CoalOre => TEX_COAL_ORE,
+            BlockType::IronOre => TEX_IRON_ORE,
+            BlockType::GoldOre => TEX_GOLD_ORE,
+            BlockType::DiamondOre => TEX_DIAMOND_ORE,
+            BlockType::Deepslate => TEX_DEEPSLATE,
+            BlockType::RedSand => TEX_RED_SAND,
+            BlockType::Terracotta => TEX_TERRACOTTA,
+            BlockType::RedTerracotta => TEX_RED_TERRACOTTA,
+            BlockType::WhiteTerracotta => TEX_WHITE_TERRACOTTA,
+            BlockType::Podzol => TEX_PODZOL_TOP,
+            BlockType::Moss => TEX_MOSS,
+            BlockType::MossyStone => TEX_MOSSY_STONE,
+            BlockType::Mycelium => TEX_MYCELIUM_TOP,
+            BlockType::MushroomStem => TEX_MUSHROOM_STEM,
+            BlockType::RedMushroomBlock => TEX_RED_MUSHROOM,
+            BlockType::BrownMushroomBlock => TEX_BROWN_MUSHROOM,
+            BlockType::Sandstone => TEX_SANDSTONE,
+            BlockType::BirchLog | BlockType::CherryLog => TEX_WOOD_TOP,
+            BlockType::CherryLeaves => TEX_CHERRY_LEAVES,
+            BlockType::Magma => TEX_MAGMA,
+            BlockType::Dripstone => TEX_DRIPSTONE,
+            BlockType::Amethyst => TEX_AMETHYST,
+            BlockType::Calcite => TEX_CALCITE,
         }
     }
 
@@ -224,6 +414,10 @@ impl BlockType {
         match self {
             BlockType::Grass => TEX_GRASS_SIDE,
             BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => TEX_WOOD_SIDE,
+            BlockType::Podzol => TEX_PODZOL_SIDE,
+            BlockType::Mycelium => TEX_MYCELIUM_SIDE,
+            BlockType::BirchLog => TEX_BIRCH_LOG,
+            BlockType::CherryLog => TEX_CHERRY_LOG,
             _ => self.tex_top(),
         }
     }
@@ -235,7 +429,7 @@ impl BlockType {
     /// [`Self::tex_top`].
     pub fn tex_bottom(&self) -> f32 {
         match self {
-            BlockType::Grass => TEX_DIRT,
+            BlockType::Grass | BlockType::Podzol | BlockType::Mycelium => TEX_DIRT,
             BlockType::Wood => TEX_WOOD_TOP,
             BlockType::WoodLogX | BlockType::WoodLogZ => TEX_WOOD_SIDE,
             BlockType::WoodStairs => TEX_WOOD_TOP,
@@ -280,6 +474,26 @@ impl BlockType {
     pub fn roughness(&self) -> f32 {
         match self {
             BlockType::Stone | BlockType::Bedrock | BlockType::Gravel | BlockType::Clay => 0.7,
+            BlockType::CoalOre
+            | BlockType::IronOre
+            | BlockType::Deepslate
+            | BlockType::MossyStone
+            | BlockType::Dripstone
+            | BlockType::Calcite
+            | BlockType::Sandstone
+            | BlockType::Magma => 0.75,
+            BlockType::GoldOre | BlockType::DiamondOre | BlockType::Amethyst => 0.35,
+            BlockType::RedSand
+            | BlockType::Terracotta
+            | BlockType::RedTerracotta
+            | BlockType::WhiteTerracotta => 0.85,
+            BlockType::Podzol | BlockType::Moss | BlockType::Mycelium => 1.0,
+            BlockType::CherryLeaves => 0.5,
+            BlockType::MushroomStem
+            | BlockType::RedMushroomBlock
+            | BlockType::BrownMushroomBlock
+            | BlockType::BirchLog
+            | BlockType::CherryLog => 0.6,
             BlockType::Sand => 0.8,
             BlockType::Grass | BlockType::Dirt | BlockType::DeadBush => 1.0,
             BlockType::Leaves => 0.5,
@@ -327,6 +541,54 @@ impl BlockType {
             BlockType::Cactus => "Cactus",
             BlockType::DeadBush => "Dead Bush",
             BlockType::WoodStairs => "Wood Stairs",
+            BlockType::CoalOre => "Coal Ore",
+            BlockType::IronOre => "Iron Ore",
+            BlockType::GoldOre => "Gold Ore",
+            BlockType::DiamondOre => "Diamond Ore",
+            BlockType::Deepslate => "Deepslate",
+            BlockType::RedSand => "Red Sand",
+            BlockType::Terracotta => "Terracotta",
+            BlockType::RedTerracotta => "Red Terracotta",
+            BlockType::WhiteTerracotta => "White Terracotta",
+            BlockType::Podzol => "Podzol",
+            BlockType::Moss => "Moss",
+            BlockType::MossyStone => "Mossy Stone",
+            BlockType::Mycelium => "Mycelium",
+            BlockType::MushroomStem => "Mushroom Stem",
+            BlockType::RedMushroomBlock => "Red Mushroom Block",
+            BlockType::BrownMushroomBlock => "Brown Mushroom Block",
+            BlockType::Sandstone => "Sandstone",
+            BlockType::BirchLog => "Birch Log",
+            BlockType::CherryLeaves => "Cherry Leaves",
+            BlockType::Magma => "Magma",
+            BlockType::Dripstone => "Dripstone",
+            BlockType::Amethyst => "Amethyst",
+            BlockType::Calcite => "Calcite",
+            BlockType::CherryLog => "Cherry Log",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_round_trip_through_all() {
+        for (id, block) in BlockType::ALL.iter().enumerate() {
+            assert_eq!(*block as u8 as usize, id, "{block:?} is out of order in ALL");
+            assert_eq!(BlockType::from_u8(id as u8), *block);
+        }
+        assert_eq!(BlockType::from_u8(250), BlockType::Air);
+    }
+
+    #[test]
+    fn every_texture_index_fits_the_atlas() {
+        for block in BlockType::ALL {
+            for face in 0..6 {
+                let tex = block.tex_for_face(face) as u32;
+                assert!(tex < TEXTURE_LAYERS, "{block:?} face {face} uses layer {tex}");
+            }
         }
     }
 }

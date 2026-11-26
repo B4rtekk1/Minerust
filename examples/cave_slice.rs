@@ -26,7 +26,7 @@ fn color(block: BlockType, y: i32) -> [u8; 3] {
         BlockType::Bedrock => [50, 50, 50],
         BlockType::Leaves => [50, 120, 40],
         BlockType::Wood | BlockType::WoodLogX | BlockType::WoodLogZ => [110, 80, 45],
-        _ => [200, 60, 200],
+        _ => block.color().map(|c| (c * 255.0) as u8),
     }
 }
 

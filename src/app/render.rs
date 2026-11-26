@@ -7,13 +7,14 @@ use wgpu::util::DeviceExt;
 
 use minerust::{
     BlockType, CHUNK_SIZE, DEFAULT_FOV, MAX_MESH_BUILDS_PER_FRAME, RENDER_DISTANCE, SEA_LEVEL,
-    SUN_MOVEMENT_SPEED, Uniforms, Vertex, World, build_block_outline, build_item_model,
+    SUN_PATH_TILT, Uniforms, Vertex, World, build_block_outline, build_item_model,
     build_player_model, extract_frustum_planes,
 };
 
 use crate::logger::{LogLevel, log};
 use crate::multiplayer::player::queue_remote_players_labels;
 use crate::ui::menu::{GameState, MenuField, MenuHit, MenuLayout};
+use super::graphics::WaterQuality;
 
 use super::init::frustum_planes_to_array;
 use super::state::State;
@@ -219,10 +220,12 @@ impl State {
         if let Some(profiler) = &mut self.gpu_timestamp_profiler {
             if let Some(profile) = profiler.poll() {
                 self.gpu_frame_profile = Some(profile);
+                self.gpu_profile_log.record(&profile);
             }
         }
 
         // ── Acquire swap-chain texture ────────────────────────────────────── //
+        let render_start = Instant::now();
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -237,6 +240,7 @@ impl State {
             menu_visible && (self.has_entered_world || world_has_loaded_chunks);
         let render_world_scene = !menu_visible || menu_uses_world_background;
         let preparation_start = Instant::now();
+        self.frame_profile.acquire_ms = (preparation_start - render_start).as_secs_f32() * 1000.0;
 
         // ── Dynamic world-model buffers ──────────────────────────────────── //
         // Remote players and dropped items share one vertex/index pair. This
@@ -368,16 +372,12 @@ impl State {
         // ── Day/night cycle ───────────────────────────────────────────────── //
         let time = self.game_start_time.elapsed().as_secs_f32();
 
-        // Keep the speed in constants so the day cycle can be re-enabled
-        // without changing render logic. It is currently fixed at noon.
-        let day_cycle_speed = SUN_MOVEMENT_SPEED;
-        // Offset by π/2 so the sun starts at noon (Y = +1) rather than
-        // the horizon.
-        let sun_angle = time * day_cycle_speed + std::f32::consts::FRAC_PI_2;
-        let sun_x = 0.0;
-        let sun_y = sun_angle.sin(); // +1 = overhead noon, −1 = midnight
-        let sun_z = sun_angle.cos();
-        let sun_dir = Vec3::new(sun_x, sun_y, sun_z).normalize();
+        // The sun angle is advanced in `update` (day cycle and the `[` / `]`
+        // keys); π/2 is noon. The arc is tilted sideways so shadows never
+        // fall straight down.
+        let sun_angle = self.sun_angle;
+        let sun_dir = Vec3::new(SUN_PATH_TILT, sun_angle.sin(), sun_angle.cos()).normalize();
+        let (sun_x, sun_y, sun_z) = (sun_dir.x, sun_dir.y, sun_dir.z);
         let moon_intensity = (-sun_dir.y).clamp(0.0, 1.0);
 
         // The moon is always opposite the sun direction.
@@ -398,6 +398,24 @@ impl State {
         let eye_pos = self.camera.eye_position();
         let is_underwater = self.is_underwater;
 
+        // ── Sun-shadow voxel grid ─────────────────────────────────────────── //
+        // Streams changed chunk columns into the occupancy window (a few
+        // per frame, nearest first).
+        let section_start = Instant::now();
+        if render_world_scene {
+            let world = self.world.read();
+            self.shadow_grid.update(
+                &self.queue,
+                &world,
+                player_cx,
+                player_cz,
+                self.graphics.shadows,
+                self.graphics.water == WaterQuality::Realistic,
+            );
+            drop(world);
+        }
+        self.frame_profile.shadow_grid_ms = section_start.elapsed().as_secs_f32() * 1000.0;
+
         // ── Upload uniforms ───────────────────────────────────────────────── //
         let section_start = Instant::now();
         self.queue.write_buffer(
@@ -412,7 +430,7 @@ impl State {
                 is_underwater,
                 screen_size: [self.config.width as f32, self.config.height as f32],
                 water_level: SEA_LEVEL as f32 - 1.0,
-                reflection_mode: self.reflection_mode as f32,
+                water_quality: self.graphics.water.shader_value(),
                 moon_position,
                 _pad1_moon: 0.0,
                 moon_intensity,
@@ -519,6 +537,7 @@ impl State {
             [0.0, 0.0]
         };
 
+        self.indirect_manager.flush_slot_clears(&self.queue);
         self.indirect_manager.dispatch_culling(
             &mut encoder,
             &self.queue,
@@ -528,7 +547,9 @@ impl State {
             &self.water_indirect_manager,
             &view_proj,
             &frustum_planes_array,
-            self.camera.position.into(),
+            // The eye, not the feet: back-facing direction culling must use
+            // the point the image is actually rendered from.
+            eye_pos.into(),
             hiz_size_f,
             [self.config.width as f32, self.config.height as f32],
         );
@@ -543,8 +564,9 @@ impl State {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
                     // Resolve MSAA into the SSR color target so the water
-                    // shader can sample the opaque scene for reflections.
-                    resolve_target: Some(&self.ssr_color_view),
+                    // shader can sample the opaque scene for reflections
+                    // (copied below instead when anti-aliasing is off).
+                    resolve_target: (self.msaa_samples > 1).then_some(&self.ssr_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         // Clear to the sky color computed above.
@@ -577,36 +599,42 @@ impl State {
                 ..Default::default()
             });
 
-            // --- Sky dome ---
-            // Uses LessEqual depth compare so it renders at depth 1.0 without
-            // being clipped, and the same quad geometry as the sun billboard.
-            opaque_pass.set_pipeline(&self.sky_pipeline);
-            opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
-            opaque_pass
-                .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            opaque_pass.draw_indexed(0..6, 0, 0..1);
-
             // --- Terrain chunks (indirect) ---
-            // `multi_draw_indirect[_count]` emits one draw call per
-            // visible chunk; the GPU cull pass already filtered the list.
-            opaque_pass.set_pipeline(&self.render_pipeline);
+            // The GPU cull pass emits one draw per visible subchunk face
+            // direction (back-facing directions are skipped).
+            // Opaque blocks first (no `discard`, so early-Z works), then the
+            // alpha-tested leaves and dead bushes with their own pipeline.
             opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             opaque_pass.set_bind_group(1, &self.terrain_quad_bind_group, &[]);
-            if self.supports_indirect_count {
-                opaque_pass.multi_draw_indirect_count(
+            // Indexed: 4 pulled vertices per quad via a shared index pattern.
+            opaque_pass.set_index_buffer(
+                self.indirect_manager.quad_index_buffer().slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            for (pipeline, commands, count, max_count) in [
+                (
+                    &self.render_pipeline,
                     self.indirect_manager.draw_commands(),
-                    0,
                     self.indirect_manager.visible_count_buffer(),
-                    0,
-                    self.indirect_manager.active_count(),
-                );
-            } else {
-                opaque_pass.multi_draw_indirect(
-                    self.indirect_manager.draw_commands(),
-                    0,
-                    self.indirect_manager.active_count(),
-                );
+                    self.indirect_manager.max_terrain_draws(),
+                ),
+                (
+                    &self.cutout_pipeline,
+                    self.indirect_manager.cutout_draw_commands(),
+                    self.indirect_manager.cutout_count_buffer(),
+                    self.indirect_manager.max_cutout_draws(),
+                ),
+            ] {
+                if max_count == 0 {
+                    continue;
+                }
+                opaque_pass.set_pipeline(pipeline);
+                if self.supports_indirect_count {
+                    opaque_pass.multi_draw_indexed_indirect_count(commands, 0, count, 0, max_count);
+                } else {
+                    // Unused entries were cleared to zero-index draws.
+                    opaque_pass.multi_draw_indexed_indirect(commands, 0, max_count);
+                }
             }
 
             // --- Remote player models ---
@@ -625,6 +653,17 @@ impl State {
                 }
             }
 
+            // --- Sky dome ---
+            // Drawn after all opaque geometry at depth 1.0 with LessEqual and
+            // no depth write: early-Z skips every pixel already covered by
+            // terrain, so the expensive sky shader only runs where sky shows.
+            opaque_pass.set_pipeline(&self.sky_pipeline);
+            opaque_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            opaque_pass.set_vertex_buffer(0, self.sun_vertex_buffer.slice(..));
+            opaque_pass
+                .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            opaque_pass.draw_indexed(0..6, 0, 0..1);
+
             // --- Sun / moon billboard ---
             // No depth write; depth test enabled so the disc is occluded by
             // terrain on the horizon.
@@ -634,6 +673,26 @@ impl State {
             opaque_pass
                 .set_index_buffer(self.sun_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             opaque_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.copy_single_sample_color(&mut encoder, &self.ssr_color_view);
+
+        if render_world_scene && self.graphics.water == WaterQuality::Realistic {
+            let mut ssr_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("SSR Hi-Z Resolve Pass"),
+                timestamp_writes: None,
+            });
+            ssr_resolve_pass.set_pipeline(&self.ssr_hiz_resolve_pipeline);
+            ssr_resolve_pass.set_bind_group(0, &self.ssr_hiz_resolve_bind_group, &[]);
+            ssr_resolve_pass.dispatch_workgroups(
+                self.ssr_hiz_size[0].div_ceil(16),
+                self.ssr_hiz_size[1].div_ceil(16),
+                1,
+            );
+            // Water reflections are ray-marched through the voxel grid and
+            // only read this full-resolution depth to reuse the lit scene
+            // for visible hits, so no depth mip pyramid is built.
+            drop(ssr_resolve_pass);
         }
 
         // ── Depth resolve + Hi-Z generation ───────────────────────────────── //
@@ -704,7 +763,7 @@ impl State {
                 label: Some("Transparent Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
-                    resolve_target: Some(&self.scene_color_view),
+                    resolve_target: (self.msaa_samples > 1).then_some(&self.scene_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // keep opaque scene color
@@ -749,6 +808,8 @@ impl State {
             }
         }
 
+        self.copy_single_sample_color(&mut encoder, &self.scene_color_view);
+
         // ── Block outline pass ───────────────────────────────────────────── //
         // Draw the targeted block outline before the composite pass so the
         // resolved scene color includes the visible edges. The pass uses the
@@ -759,7 +820,7 @@ impl State {
                 label: Some("Block Outline Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa_texture_view,
-                    resolve_target: Some(&self.scene_color_view),
+                    resolve_target: (self.msaa_samples > 1).then_some(&self.scene_color_view),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -806,6 +867,11 @@ impl State {
                     outline_pass.draw_indexed(0..outline_indices.len() as u32, 0, 0..1);
                 }
             }
+        }
+
+        if self.game_state == GameState::Playing {
+            // The outline pass drew into the main target again.
+            self.copy_single_sample_color(&mut encoder, &self.scene_color_view);
         }
 
         // ── Composite pass (post-processing blit) ─────────────────────────── //
@@ -1136,6 +1202,9 @@ impl State {
         }
 
         // ── Text pass (glyphon) ───────────────────────────────────────────── //
+        let text_start = Instant::now();
+        self.frame_profile.encode_ms = (text_start - preparation_start).as_secs_f32() * 1000.0
+            - self.frame_profile.frame_preparation_ms;
         // All on-screen text is batched into a single `TextRenderer::prepare`
         // call and rendered in one pass.  The individual `glyphon::Buffer`
         // objects are updated lazily (only when the underlying text changes)
@@ -1306,6 +1375,8 @@ impl State {
                 let new_world_hovered = matches!(hovered, Some(MenuHit::NewWorld));
                 let multiplayer_hovered = matches!(hovered, Some(MenuHit::Multiplayer));
                 let render_mode_hovered = matches!(hovered, Some(MenuHit::RenderMode));
+                let water_hovered = matches!(hovered, Some(MenuHit::WaterQuality));
+                let aa_hovered = matches!(hovered, Some(MenuHit::AntiAliasing));
                 let hover_text_color = Color::rgb(255, 255, 255);
                 let menu_text_top_offset = 3.0;
                 let menu_text_bounds = TextBounds {
@@ -1330,6 +1401,32 @@ impl State {
                     Color::rgb(184, 205, 220)
                 };
 
+                text_areas.push(TextArea {
+                    buffer: &self.menu_aa_button_buffer,
+                    left: layout.anti_aliasing_text.x,
+                    top: layout.anti_aliasing_text.y + menu_text_top_offset,
+                    scale: 1.0,
+                    bounds: menu_text_bounds,
+                    default_color: if aa_hovered {
+                        hover_text_color
+                    } else {
+                        Color::rgb(184, 205, 220)
+                    },
+                    custom_glyphs: &[],
+                });
+                text_areas.push(TextArea {
+                    buffer: &self.menu_water_button_buffer,
+                    left: layout.water_text.x,
+                    top: layout.water_text.y + menu_text_top_offset,
+                    scale: 1.0,
+                    bounds: menu_text_bounds,
+                    default_color: if water_hovered {
+                        hover_text_color
+                    } else {
+                        Color::rgb(184, 205, 220)
+                    },
+                    custom_glyphs: &[],
+                });
                 text_areas.push(TextArea {
                     buffer: &self.menu_render_mode_button_buffer,
                     left: layout.render_mode_text.x,
@@ -1548,6 +1645,8 @@ impl State {
         }
 
         // ── Submit & present ──────────────────────────────────────────────── //
+        let submit_start = Instant::now();
+        self.frame_profile.text_ms = (submit_start - text_start).as_secs_f32() * 1000.0;
         if let (Some(profiler), Some(slot)) =
             (&self.gpu_timestamp_profiler, timestamp_readback_slot)
         {
@@ -1560,10 +1659,29 @@ impl State {
             profiler.request_readback(slot);
         }
         self.queue.present(output);
+        self.frame_profile.submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+        self.frame_profile.render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
         Ok(())
     }
 
     /// Updates the main-menu labels and the optional server-address input.
+    /// With anti-aliasing off the main color target has a single sample and
+    /// cannot be resolved; copy it to where a resolve would have written.
+    fn copy_single_sample_color(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        if self.msaa_samples > 1 {
+            return;
+        }
+        encoder.copy_texture_to_texture(
+            self.msaa_texture_view.texture().as_image_copy(),
+            target.texture().as_image_copy(),
+            wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     pub fn prepare_menu_text(&mut self) {
         let layout = MenuLayout::new(self.config.width, self.config.height);
 
@@ -1606,6 +1724,38 @@ impl State {
         self.menu_render_mode_button_buffer
             .shape_until_scroll(&mut self.font_system, false);
         self.menu_render_mode_button_buffer.set_size(
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        self.menu_water_button_buffer.set_text(
+            self.graphics.water.menu_label(),
+            &self.ui_font.attrs(),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_water_button_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.menu_water_button_buffer.set_size(
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+
+        let aa = self.graphics.anti_aliasing;
+        let aa_text = if aa.sample_count() == self.msaa_samples {
+            aa.menu_label().to_string()
+        } else {
+            format!("{} (RESTART)", aa.menu_label())
+        };
+        self.menu_aa_button_buffer.set_text(
+            &aa_text,
+            &self.ui_font.attrs(),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_aa_button_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.menu_aa_button_buffer.set_size(
             Some(self.config.width as f32),
             Some(self.config.height as f32),
         );

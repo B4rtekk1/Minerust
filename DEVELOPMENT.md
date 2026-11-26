@@ -316,6 +316,18 @@ cargo test -- --nocapture  # Show output
 cargo bench
 ```
 
+**In-game CPU frame-time benchmark.** Enters a fixed world, flies the camera
+along a curving path at 20 blocks/s (forcing chunk streaming, meshing and
+unloading) and, after the given number of seconds, prints frame-time
+percentiles, a per-section breakdown and the worst frames, then exits:
+
+```bash
+MINERUST_AUTOSTART=12345 MINERUST_BENCH=30 cargo run --release
+```
+
+`MINERUST_BENCH_SPEED` changes the flight speed; `MINERUST_GPU_LOG=1` adds
+GPU pass timings to the log.
+
 ### Debug Assertions
 
 ```rust

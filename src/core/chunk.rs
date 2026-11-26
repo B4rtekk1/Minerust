@@ -51,6 +51,10 @@ pub struct SubChunk {
     /// results cannot clear a newer dirty state.
     pub mesh_version: u64,
 
+    /// Counts actual block changes (not re-meshing requests from neighbour
+    /// lighting), for caches of block data such as the sun-shadow grid.
+    pub block_version: u32,
+
     /// Number of solid-geometry quad descriptors in the current GPU mesh.
     ///
     /// Used by the render pass to issue the correct `draw_indexed` call.
@@ -96,6 +100,7 @@ impl SubChunk {
             is_fully_opaque: false,
             mesh_dirty: true,
             mesh_version: 0,
+            block_version: 0,
             num_quads: 0,
             num_water_quads: 0,
             aabb: AABB::new(
@@ -132,6 +137,7 @@ impl SubChunk {
             if !self.write_block(Self::block_index(x as usize, y as usize, z as usize), block) {
                 return;
             }
+            self.block_version = self.block_version.wrapping_add(1);
             self.mark_mesh_dirty();
             if block != BlockType::Air {
                 self.is_empty = false;
@@ -151,7 +157,9 @@ impl SubChunk {
     /// metadata is rebuilt once at the end via [`Chunk::rebuild_metadata`].
     pub fn set_block_raw(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
         if x >= 0 && x < CHUNK_SIZE && y >= 0 && y < SUBCHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE {
-            self.write_block(Self::block_index(x as usize, y as usize, z as usize), block);
+            if self.write_block(Self::block_index(x as usize, y as usize, z as usize), block) {
+                self.block_version = self.block_version.wrapping_add(1);
+            }
         }
     }
 
@@ -186,6 +194,13 @@ impl SubChunk {
             SubChunkStorage::Uniform(block) => block.is_solid_opaque(),
             SubChunkStorage::Dense(blocks) => blocks.iter().all(BlockType::is_solid_opaque),
         };
+    }
+
+    /// Raw block storage, for bulk readers that would otherwise call
+    /// [`Self::get_block`] for every cell. Dense data is indexed
+    /// `(x * SUBCHUNK_HEIGHT + y) * CHUNK_SIZE + z`.
+    pub fn storage(&self) -> &SubChunkStorage {
+        &self.storage
     }
 
     fn block_index(x: usize, y: usize, z: usize) -> usize {

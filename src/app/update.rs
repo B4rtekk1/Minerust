@@ -223,20 +223,29 @@ impl State {
             subchunk_y: sy,
         };
 
-        let terrain_uploaded = self.indirect_manager.upload_subchunk(
+        let terrain_uploaded = self.indirect_manager.upload_terrain_variants(
             &self.device,
             &self.queue,
             key,
             &result.terrain,
+            &result.terrain_far,
+            &result.terrain_lod,
             &aabb_copy,
         );
 
-        let water_uploaded = self.water_indirect_manager.upload_subchunk(
+        // Near water quads followed by the merged far set; the cull pass
+        // draws one range or the other by distance.
+        let water_detail = result.water.len() as u32;
+        let mut water = result.water;
+        if water_detail > 0 {
+            water.extend_from_slice(&result.water_far);
+        }
+        let water_uploaded = self.water_indirect_manager.upload_subchunk_with_detail(
             &self.device,
             &self.queue,
             key,
-            &result.water,
-            &aabb_copy,
+            &water,
+            water_detail,
         );
 
         // Compaction relocates every live allocation in an arena. Rebuild the
@@ -353,6 +362,11 @@ impl State {
         // tunnel through terrain or fly out of bounds.
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
+
+        // Time of day: the slow day cycle plus the `[` / `]` keys.
+        self.sun_angle = (self.sun_angle
+            + (minerust::SUN_MOVEMENT_SPEED + self.sun_scrub * minerust::SUN_SCRUB_SPEED) * dt)
+            .rem_euclid(std::f32::consts::TAU);
 
         if self.game_state != GameState::Playing {
             self.input.jump = false;
@@ -811,8 +825,11 @@ impl State {
                 cz,
                 sy,
                 mesh_version: snapshot.mesh_version,
-                terrain: meshes.0,
-                water: meshes.1,
+                terrain: meshes.terrain,
+                terrain_far: meshes.terrain_far,
+                terrain_lod: meshes.terrain_lod,
+                water: meshes.water,
+                water_far: meshes.water_far,
             });
         }
     }
@@ -931,25 +948,7 @@ impl State {
         if !block_changes.is_empty() {
             // Drop lock before calling &mut self methods
             for (bx, by, bz, block_type) in block_changes {
-                let bt = match block_type {
-                    0 => BlockType::Air,
-                    1 => BlockType::Grass,
-                    2 => BlockType::Dirt,
-                    3 => BlockType::Stone,
-                    4 => BlockType::Sand,
-                    5 => BlockType::Water,
-                    6 => BlockType::Wood,
-                    7 => BlockType::Leaves,
-                    8 => BlockType::Bedrock,
-                    9 => BlockType::Snow,
-                    10 => BlockType::Gravel,
-                    11 => BlockType::Clay,
-                    12 => BlockType::Ice,
-                    13 => BlockType::Cactus,
-                    14 => BlockType::DeadBush,
-                    15 => BlockType::WoodStairs,
-                    _ => BlockType::Air, // fallback
-                };
+                let bt = BlockType::from_u8(block_type);
 
                 {
                     let mut world = self.world.write();

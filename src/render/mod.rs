@@ -4,7 +4,9 @@ pub mod indirect;
 pub mod mesh;
 pub mod mesh_loader;
 pub mod quad;
+pub mod shadow_grid;
 pub mod texture;
+pub mod water_waves;
 
 pub mod atlas_map;
 

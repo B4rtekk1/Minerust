@@ -16,9 +16,27 @@ use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 use rustc_hash::FxHashSet;
 
-pub(super) const MSAA_SAMPLE_COUNT: u32 = 4;
-// depth_resolve.wgsl explicitly loads the four depth samples.
-const _: () = assert!(MSAA_SAMPLE_COUNT == 4);
+/// Depth-resolve shader source specialised for `samples` per pixel.
+pub(super) fn depth_resolve_source(samples: u32) -> String {
+    let source = include_str!("../shaders/depth_resolve.wgsl")
+        .replace("const SAMPLE_COUNT: i32 = 4;", &format!("const SAMPLE_COUNT: i32 = {samples};"));
+    if samples > 1 {
+        source
+    } else {
+        source.replace("texture_depth_multisampled_2d", "texture_depth_2d")
+    }
+}
+
+/// Hi-Z SSR shader source specialised for `samples` per pixel.
+pub(super) fn ssr_hiz_source(samples: u32) -> String {
+    let source = include_str!("../shaders/ssr_hiz.wgsl")
+        .replace("const SAMPLE_COUNT: i32 = 4;", &format!("const SAMPLE_COUNT: i32 = {samples};"));
+    if samples > 1 {
+        source
+    } else {
+        source.replace("texture_depth_multisampled_2d", "texture_depth_2d")
+    }
+}
 
 /// Tracks block placement while RMB is held so repeat placement stays in one line.
 #[derive(Default)]
@@ -38,7 +56,7 @@ impl BlockPlacementState {
 /// Raw wall-clock timings from one frame.  Unlike the process CPU-time
 /// average, every field here is sampled in the same frame, so child sums are
 /// meaningful when diagnosing overlaps or gaps in instrumentation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct FrameProfile {
     pub update_ms: f32,
     pub network_ms: f32,
@@ -54,6 +72,18 @@ pub struct FrameProfile {
     pub render_chunk_scan_ms: f32,
     pub mesh_request_submit_ms: f32,
     pub remote_players_ms: f32,
+    /// Waiting for the swap-chain image (GPU/display back-pressure).
+    pub acquire_ms: f32,
+    /// Sun-shadow grid streaming.
+    pub shadow_grid_ms: f32,
+    /// Recording every render pass between preparation and the text pass.
+    pub encode_ms: f32,
+    /// Text shaping, glyph atlas preparation and the text pass.
+    pub text_ms: f32,
+    /// `queue.submit` plus `present`.
+    pub submit_ms: f32,
+    /// Whole `render()` call.
+    pub render_ms: f32,
 }
 
 /// GPU durations from the most recently completed timestamp-query readback.
@@ -70,6 +100,67 @@ pub struct GpuFrameProfile {
     pub composite_ms: f32,
     pub ui_ms: f32,
     pub text_ms: f32,
+}
+
+/// Optional periodic log of averaged GPU pass times, enabled with the
+/// `MINERUST_GPU_LOG=1` environment variable. Useful for before/after
+/// comparisons of rendering changes without a profiler.
+pub struct GpuProfileLog {
+    enabled: bool,
+    started: std::time::Instant,
+    frames: u32,
+    sum: GpuFrameProfile,
+}
+
+impl Default for GpuProfileLog {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("MINERUST_GPU_LOG").is_ok_and(|v| v == "1"),
+            started: std::time::Instant::now(),
+            frames: 0,
+            sum: GpuFrameProfile::default(),
+        }
+    }
+}
+
+impl GpuProfileLog {
+    pub fn record(&mut self, p: &GpuFrameProfile) {
+        if !self.enabled {
+            return;
+        }
+        let s = &mut self.sum;
+        s.frame_ms += p.frame_ms;
+        s.cull_ms += p.cull_ms;
+        s.opaque_ms += p.opaque_ms;
+        s.depth_resolve_ms += p.depth_resolve_ms;
+        s.hiz_ms += p.hiz_ms;
+        s.water_ms += p.water_ms;
+        s.composite_ms += p.composite_ms;
+        s.ui_ms += p.ui_ms;
+        s.text_ms += p.text_ms;
+        self.frames += 1;
+        if self.started.elapsed().as_secs_f32() < 5.0 {
+            return;
+        }
+        let n = self.frames.max(1) as f32;
+        crate::logger::log(
+            crate::logger::LogLevel::Info,
+            &format!(
+                "GPU avg over {} frames: frame {:.3} ms, opaque {:.3}, water {:.3}, composite {:.3}, cull {:.3}, hiz {:.3}",
+                self.frames,
+                s.frame_ms / n,
+                s.opaque_ms / n,
+                s.water_ms / n,
+                s.composite_ms / n,
+                s.cull_ms / n,
+                s.hiz_ms / n,
+            ),
+        );
+        *self = Self {
+            enabled: true,
+            ..Self::default()
+        };
+    }
 }
 
 const GPU_TIMESTAMP_COUNT: u32 = 16;
@@ -262,6 +353,8 @@ pub struct State {
     // -------------------------------------------------------------------------
     /// Main opaque terrain render pipeline.
     pub render_pipeline: wgpu::RenderPipeline,
+    /// Terrain pipeline for alpha-tested blocks (leaves, dead bushes).
+    pub cutout_pipeline: wgpu::RenderPipeline,
     /// Legacy vertex-input pipeline used only by dynamic player models.
     pub player_model_pipeline: wgpu::RenderPipeline,
     /// Transparent water render pipeline (blended over opaque geometry).
@@ -279,6 +372,8 @@ pub struct State {
     /// Compute pipeline that resolves the MSAA depth buffer into Hi-Z seed
     /// half-resolution Hi-Z base in one pass.
     pub depth_resolve_pipeline: wgpu::ComputePipeline,
+    /// Full-resolution minimum-depth resolve pipeline used by water SSR.
+    pub ssr_hiz_resolve_pipeline: wgpu::ComputePipeline,
 
     // -------------------------------------------------------------------------
     // Static geometry buffers
@@ -327,6 +422,8 @@ pub struct State {
     pub menu_composite_bind_group: wgpu::BindGroup,
     /// Bind group for the depth-resolve compute pass.
     pub depth_resolve_bind_group: wgpu::BindGroup,
+    /// Bind group that resolves opaque depth into mip zero of the SSR pyramid.
+    pub ssr_hiz_resolve_bind_group: wgpu::BindGroup,
 
     // -------------------------------------------------------------------------
     // Render targets and textures
@@ -335,6 +432,9 @@ pub struct State {
     pub depth_texture: wgpu::TextureView,
     /// MSAA resolve target view (matches the surface format).
     pub msaa_texture_view: wgpu::TextureView,
+    /// Samples per pixel of the main color/depth targets, fixed at startup
+    /// from the anti-aliasing option (1 = anti-aliasing off).
+    pub msaa_samples: u32,
     /// Intermediate scene color texture rendered into before compositing.
     pub scene_color_texture: wgpu::Texture,
     /// View of `scene_color_texture`.
@@ -348,6 +448,14 @@ pub struct State {
     pub ssr_color_texture: wgpu::Texture,
     /// View of `ssr_color_texture`.
     pub ssr_color_view: wgpu::TextureView,
+    /// Full-resolution minimum-depth pyramid used by realistic water SSR.
+    pub ssr_hiz_texture: wgpu::Texture,
+    /// Full-mip view sampled by the water fragment shader.
+    pub ssr_hiz_view: wgpu::TextureView,
+    /// Single-mip views used as compute storage outputs and inputs.
+    pub ssr_hiz_mips: Vec<wgpu::TextureView>,
+    /// Full-resolution dimensions of the SSR Hi-Z base level.
+    pub ssr_hiz_size: [u32; 2],
     /// Sampler used when reading SSR textures in the water and composite passes.
     pub ssr_sampler: wgpu::Sampler,
     /// The 16-layer `Texture2DArray` holding all block textures.
@@ -362,14 +470,14 @@ pub struct State {
     /// Kept alive by the bind group; annotated `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub texture_sampler: wgpu::Sampler,
-    /// Neutral flow-map texture used by the water shader.
+    /// Baked wave layers sampled by the realistic water shader.
     /// Owned by `State` so the texture stays alive as long as the view.
     #[allow(dead_code)]
-    pub flow_map_texture: wgpu::Texture,
-    /// View of the neutral flow-map texture.
-    pub flow_map_view: wgpu::TextureView,
-    /// Sampler used when reading the flow-map texture in the water shader.
-    pub flow_sampler: wgpu::Sampler,
+    pub wave_texture: wgpu::Texture,
+    /// 2-D array view of `wave_texture`.
+    pub wave_view: wgpu::TextureView,
+    /// Repeating, mipmapped sampler for `wave_view`.
+    pub wave_sampler: wgpu::Sampler,
 
     // -------------------------------------------------------------------------
     // Hi-Z (hierarchical depth) occlusion culling
@@ -444,6 +552,7 @@ pub struct State {
     pub frame_profile: FrameProfile,
     /// Timestamp-query results from a previously completed GPU frame.
     pub gpu_frame_profile: Option<GpuFrameProfile>,
+    pub gpu_profile_log: GpuProfileLog,
     /// `None` if the selected adapter does not expose timestamp queries.
     pub gpu_timestamp_profiler: Option<GpuTimestampProfiler>,
     /// Time at which the dynamic debug text was last shaped.  The overlay is
@@ -499,8 +608,16 @@ pub struct State {
     pub water_indirect_manager: IndirectManager,
 
     // -------------------------------------------------------------------------
-    /// Active water reflection mode (`0 = off`, `1 = SSSR`).
-    pub reflection_mode: u32,
+    /// Graphics options chosen in the main menu (persisted).
+    pub graphics: super::graphics::GraphicsOptions,
+    /// Automated CPU benchmark (`MINERUST_BENCH`), if running.
+    pub bench: Option<super::bench::Bench>,
+    /// Voxel occupancy window used to ray-march sun shadows.
+    pub shadow_grid: minerust::render::shadow_grid::ShadowGrid,
+    /// Sun position along its daily arc (radians, π/2 = noon).
+    pub sun_angle: f32,
+    /// -1/0/+1 while the player holds the time-of-day keys.
+    pub sun_scrub: f32,
 
     // -------------------------------------------------------------------------
     // HUD: coordinate display
@@ -569,6 +686,10 @@ pub struct State {
     pub menu_singleplayer_button_buffer: glyphon::Buffer,
     /// Render presentation mode toggle shown in the main menu.
     pub menu_render_mode_button_buffer: glyphon::Buffer,
+    /// Water quality toggle shown in the main menu.
+    pub menu_water_button_buffer: glyphon::Buffer,
+    /// Anti-aliasing toggle shown in the main menu.
+    pub menu_aa_button_buffer: glyphon::Buffer,
     /// Server-address input text shown after clicking "multiplayer".
     pub menu_server_address_input_buffer: glyphon::Buffer,
 
@@ -667,4 +788,52 @@ pub struct WorldWriteOps {
     /// Block coordinates whose owning subchunk (and its neighbors) should be
     /// marked dirty for re-meshing.
     pub mark_dirty: Vec<(i32, i32, i32)>,
+}
+
+#[cfg(test)]
+mod depth_resolve_tests {
+    #[test]
+    fn depth_resolve_variants_validate_for_every_sample_count() {
+        for samples in [1, 2, 4] {
+            let source = super::depth_resolve_source(samples);
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{samples}x: {e:?}"));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{samples}x: {e:?}"));
+            assert!(source.contains(&format!("SAMPLE_COUNT: i32 = {samples};")));
+        }
+    }
+
+    #[test]
+    fn ssr_hiz_variants_validate_for_every_sample_count() {
+        for samples in [1, 2, 4] {
+            let source = super::ssr_hiz_source(samples);
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{samples}x: {e:?}"));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{samples}x: {e:?}"));
+            assert!(source.contains(&format!("SAMPLE_COUNT: i32 = {samples};")));
+        }
+    }
+
+    #[test]
+    fn water_shader_parses_and_validates() {
+        let source = include_str!("../shaders/water.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
 }

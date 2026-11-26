@@ -24,6 +24,123 @@ struct Uniforms {
 @group(0) @binding(1) var texture_atlas: texture_2d_array<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 
+// ── Voxel sun shadows ─────────────────────────────────────────────────────── //
+// One bit per block for a 16×16-chunk toroidal window around the camera
+// (see src/render/shadow_grid.rs). A pixel is in shadow when a ray from it
+// towards the sun hits a filled cell. Sun rays always climb, so the ray
+// walks block *columns* (a 2-D DDA): inside a column only y changes and the
+// whole run of cells is one masked word test. A max-height pyramid (column,
+// 4×4 tile, chunk) lets the ray cross any tile it is already above in one
+// step.
+struct ShadowGrid {
+    /// x: enabled, y: trace distance, z: highest occluder (exclusive).
+    params: vec4<f32>,
+    /// Per slot: chunk x, chunk z, max y (exclusive), unused.
+    slots: array<vec4<i32>, 256>,
+};
+/// Per slot: occupancy bits (8 words per column, bit = y), then 256 column
+/// heights, then 16 tile heights.
+@group(0) @binding(3) var<storage, read> shadow_bits: array<u32>;
+@group(0) @binding(4) var<storage, read> shadow_grid: ShadowGrid;
+
+const SHADOW_SLOT_WORDS: u32 = 2320u;
+const SHADOW_BIT_WORDS: u32 = 2048u;
+const SHADOW_COLUMN_WORDS: u32 = 8u;
+const SHADOW_COLUMNS: u32 = 256u;
+const SHADOW_MAX_ITERATIONS: i32 = 128;
+const SHADOW_STEP_EPSILON: f32 = 1e-3;
+
+/// Ray parameter where the ray leaves the horizontal `size`-aligned square
+/// containing `p`.
+fn shadow_box_exit(p: vec3<f32>, origin: vec3<f32>, inv_dir: vec3<f32>, positive: vec3<bool>,
+                   moving: vec3<bool>, size: f32) -> f32 {
+    let bound = floor(p.xz / size) * size + select(vec2<f32>(0.0), vec2<f32>(size), positive.xz);
+    let t = select(vec2<f32>(1e30), (bound - origin.xz) * inv_dir.xz, moving.xz);
+    return min(t.x, t.y);
+}
+
+/// `true` if any of cells `y0..=y1` of the column starting at word `base` is
+/// filled.
+fn shadow_run_hit(base: u32, y0: u32, y1: u32) -> bool {
+    var y = y0;
+    loop {
+        let word = y >> 5u;
+        let last = min(y1, word * 32u + 31u);
+        let count = (last & 31u) - (y & 31u) + 1u;
+        let mask = select((1u << count) - 1u, 0xffffffffu, count == 32u) << (y & 31u);
+        if (shadow_bits[base + word] & mask) != 0u {
+            return true;
+        }
+        if last >= y1 {
+            return false;
+        }
+        y = last + 1u;
+    }
+    return false;
+}
+
+/// 1 when `pos` (on a face with normal `normal`) sees the sun, 0 in shadow.
+/// `sun` must point upwards.
+fn trace_sun(pos: vec3<f32>, normal: vec3<f32>, sun: vec3<f32>, max_t: f32) -> f32 {
+    // Start in the open cell in front of the face.
+    let origin = pos + normal * 0.01;
+    let positive = sun > vec3<f32>(0.0);
+    let moving = abs(sun) > vec3<f32>(1e-5);
+    let inv_dir = 1.0 / select(vec3<f32>(1.0), sun, moving);
+    let top = shadow_grid.params.z;
+
+    var t = 0.0;
+    var slot_index = -1;
+    var slot = vec4<i32>(0);
+    var slot_valid = false;
+    for (var i = 0; i < SHADOW_MAX_ITERATIONS; i++) {
+        let p = origin + sun * t;
+        // Above every occluder in the grid: nothing left to hit.
+        if p.y >= top || t > max_t {
+            return 1.0;
+        }
+        let column = vec2<i32>(floor(p.xz));
+        let chunk = column >> vec2<u32>(4u);
+        let index = (chunk.x & 15) + (chunk.y & 15) * 16;
+        if index != slot_index {
+            slot_index = index;
+            slot = shadow_grid.slots[index];
+            slot_valid = slot.x == chunk.x && slot.y == chunk.y;
+        }
+        // Left the loaded window: nothing known to block the sun.
+        if !slot_valid {
+            return 1.0;
+        }
+        // Above the whole chunk: cross it in one step.
+        if p.y >= f32(slot.z) {
+            t = shadow_box_exit(p, origin, inv_dir, positive, moving, 16.0) + SHADOW_STEP_EPSILON;
+            continue;
+        }
+        let base = u32(index) * SHADOW_SLOT_WORDS;
+        let local = column & vec2<i32>(15);
+        let tile = u32((local.y >> 2u) * 4 + (local.x >> 2u));
+        // Above this 4×4 tile.
+        if p.y >= f32(shadow_bits[base + SHADOW_BIT_WORDS + SHADOW_COLUMNS + tile]) {
+            t = shadow_box_exit(p, origin, inv_dir, positive, moving, 4.0) + SHADOW_STEP_EPSILON;
+            continue;
+        }
+        let column_id = u32(local.y * 16 + local.x);
+        // Low 16 bits: height (the rest holds materials for water reflections).
+        let height = shadow_bits[base + SHADOW_BIT_WORDS + column_id] & 0xffffu;
+        let t_out = shadow_box_exit(p, origin, inv_dir, positive, moving, 1.0);
+        if p.y < f32(height) {
+            // The vertical run of cells crossed inside this column.
+            let y0 = u32(floor(max(p.y, 0.0)));
+            let y1 = max(min(u32(floor(origin.y + sun.y * (t_out - 1e-4))), height - 1u), y0);
+            if shadow_run_hit(base + column_id * SHADOW_COLUMN_WORDS, y0, y1) {
+                return 0.0;
+            }
+        }
+        t = t_out + SHADOW_STEP_EPSILON;
+    }
+    return 1.0;
+}
+
 fn fast_global_illumination(
     normal:          vec3<f32>,
     sun_dir:         vec3<f32>,
@@ -78,125 +195,22 @@ fn fast_global_illumination(
 }
 
 struct PackedQuad { origin_and_face: u32, size_material_ao: u32, light: u32, }
-struct SubchunkMeta { aabb_min: vec4<f32>, aabb_max: vec4<f32>, terrain_draw_data: vec4<u32>, water_draw_data: vec4<u32>, }
+struct SubchunkMeta {
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    terrain_draw_data: vec4<u32>,
+    water_draw_data: vec4<u32>,
+    terrain_far_draw_data: vec4<u32>,
+    terrain_lod_draw_data: vec4<u32>,
+    terrain_groups_a: vec4<u32>,
+    terrain_groups_b: vec4<u32>,
+    terrain_far_groups_a: vec4<u32>,
+    terrain_far_groups_b: vec4<u32>,
+    terrain_lod_groups_a: vec4<u32>,
+    terrain_lod_groups_b: vec4<u32>,
+}
 @group(1) @binding(0) var<storage, read> quads: array<PackedQuad>;
 @group(1) @binding(1) var<storage, read> subchunks: array<SubchunkMeta>;
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) world_pos: vec3<f32>,
-    @location(1) normal:    vec3<f32>,
-    @location(2) color:     vec3<f32>,
-    @location(3) uv:        vec2<f32>,
-    @location(4) tex_index: f32,
-    @location(5) ambient_occlusion: f32,
-    @location(6) @interpolate(flat) tint: u32,
-    /// Interpolated world-space sky light, 0 (none) .. 1 (open sky).
-    @location(7) sky_light: f32,
-};
-
-struct DepthVertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-};
-
-// Retained for dynamic/player models, which still use the shared Vertex buffer.
-struct LegacyVertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) packed: u32,
-};
-
-@vertex
-fn vs_legacy(model: LegacyVertexInput) -> VertexOutput {
-    let n_idx = model.packed & 0x7u;
-    let t_idx = (model.packed >> 3u) & 0xffu;
-    let uv_idx = (model.packed >> 11u) & 0x3u;
-    let ao_raw = (model.packed >> 21u) & 0x3u;
-    let width = f32(((model.packed >> 13u) & 0xfu) + 1u);
-    let height = f32(((model.packed >> 17u) & 0xfu) + 1u);
-    let color = vec3<f32>(
-        f32((model.packed >> 23u) & 0x7u) / 7.0,
-        f32((model.packed >> 26u) & 0x7u) / 7.0,
-        f32((model.packed >> 29u) & 0x7u) / 7.0,
-    );
-    let normals = array<vec3<f32>, 6>(
-        vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 0.),
-        vec3(0., 1., 0.), vec3(0., 0., -1.), vec3(0., 0., 1.),
-    );
-    let uvs = array<vec2<f32>, 4>(vec2(0., 0.), vec2(0., 1.), vec2(1., 1.), vec2(1., 0.));
-    var out: VertexOutput;
-    out.clip_position = uniforms.view_proj * vec4(model.position, 1.0);
-    out.world_pos = model.position;
-    out.normal = normals[n_idx % 6u];
-    out.color = color;
-    out.uv = uvs[uv_idx] * vec2(width, height);
-    out.tex_index = f32(t_idx);
-    out.ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
-    out.tint = 0u;
-    // Dynamic models (players, dropped items) sit next to the camera, so
-    // the camera-area estimate is a fair stand-in for their sky light.
-    out.sky_light = clamp(uniforms.sky_visibility, 0.0, 1.0);
-    return out;
-}
-
-fn pulled_vertex(vertex_id: u32, subchunk_id: u32) -> VertexOutput {
-    let quad = quads[vertex_id / 6u];
-    let corner_id = vertex_id % 6u;
-    let diagonal = (quad.origin_and_face >> 30u) & 0x1u;
-    let regular = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u)[corner_id];
-    let alternate = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u)[corner_id];
-    let corner = select(regular, alternate, diagonal == 1u);
-    let n_idx = (quad.origin_and_face >> 18u) & 0x7u;
-    let t_idx = (quad.size_material_ao >> 12u) & 0xffu;
-    let width = f32(quad.size_material_ao & 0x3fu) * 0.5;
-    let height = f32((quad.size_material_ao >> 6u) & 0x3fu) * 0.5;
-    let ao_raw = (quad.size_material_ao >> (20u + corner * 2u)) & 0x3u;
-    let color_bits = (quad.origin_and_face >> 21u) & 0x1ffu;
-    let r = f32(color_bits & 0x7u) / 7.0;
-    let g = f32((color_bits >> 3u) & 0x7u) / 7.0;
-    let b = f32((color_bits >> 6u) & 0x7u) / 7.0;
-    let local_origin = vec3<f32>(
-        f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu),
-    ) * 0.5;
-
-    let normals = array<vec3<f32>, 6>(
-        vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
-        vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0),
-    );
-
-    let edge_u = array<vec3<f32>, 6>(vec3(0.,0.,1.), vec3(0.,0.,-1.), vec3(0.,0.,-1.), vec3(0.,0.,1.), vec3(-1.,0.,0.), vec3(1.,0.,0.))[n_idx];
-    let edge_v = array<vec3<f32>, 6>(vec3(0.,1.,0.), vec3(0.,1.,0.), vec3(1.,0.,0.), vec3(1.,0.,0.), vec3(0.,1.,0.), vec3(0.,1.,0.))[n_idx];
-    let position_corners = array<vec2<f32>, 4>(vec2(0.,0.), vec2(1.,0.), vec2(1.,1.), vec2(0.,1.));
-    let texture_corners = array<vec2<f32>, 4>(vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
-    let local_position = local_origin + edge_u * (position_corners[corner].x * width) + edge_v * (position_corners[corner].y * height);
-    let world_position = subchunks[subchunk_id].aabb_min.xyz + local_position;
-
-    var out: VertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(world_position, 1.0);
-    out.world_pos     = world_position;
-    out.normal        = normals[n_idx % 6u];
-    out.color         = vec3<f32>(r, g, b);
-
-    out.uv = texture_corners[corner] * vec2(width, height);
-
-    out.tex_index = f32(t_idx);
-    out.ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
-    out.tint = quad.size_material_ao >> 28u;
-    out.sky_light = f32((quad.light >> (corner * 4u)) & 0xfu) / 15.0;
-    return out;
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
-    return pulled_vertex(vertex_id, subchunk_id);
-}
-
-@vertex
-fn vs_depth(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> DepthVertexOutput {
-    var out: DepthVertexOutput;
-    out.clip_position = pulled_vertex(vertex_id, subchunk_id).clip_position;
-    return out;
-}
 
 // ── Climate tint ──────────────────────────────────────────────────────────── //
 // Grass target colours (sRGB) indexed by `tint - 1`; rows frozen → hot,
@@ -223,32 +237,6 @@ fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-/// Recolours grass and leaves texels to the column's climate colour while
-/// keeping the texture's per-texel brightness detail.
-fn apply_climate_tint(color: vec3<f32>, tex_index: u32, tint: u32) -> vec3<f32> {
-    if tint == 0u || tint > 15u {
-        return color;
-    }
-    var tint_target = srgb_to_linear(GRASS_TINTS[tint - 1u]);
-    var base_luma = GRASS_TOP_LUMA;
-    if tex_index == 8u {
-        tint_target = srgb_to_linear(GRASS_TINTS[tint - 1u] * LEAVES_TINT_SCALE);
-        base_luma = LEAVES_LUMA;
-    } else if tex_index == 1u {
-        // Only the green fringe of the grass side; the dirt stays untouched.
-        let greenness = color.g - max(color.r, color.b);
-        if greenness < 0.04 {
-            return color;
-        }
-        base_luma = GRASS_SIDE_LUMA;
-    } else if tex_index != 0u {
-        return color;
-    }
-    // An average texel maps exactly onto the target colour; brighter and
-    // darker texels keep their relative contrast.
-    return tint_target * (luminance(color) / base_luma);
-}
-
 // ── Aerial perspective ────────────────────────────────────────────────────── //
 // Distant terrain fades towards the horizon sky colour. A gentle exponential
 // term gives depth at mid range; a steeper ramp near `fog_far` hides the edge
@@ -267,7 +255,11 @@ fn horizon_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     return color;
 }
 
-fn aerial_perspective(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+/// Haze colour and amount for a point, evaluated per vertex.
+fn aerial_fog(world_pos: vec3<f32>) -> vec4<f32> {
+    if uniforms.is_underwater > 0.5 {
+        return vec4<f32>(0.0);
+    }
     let to_frag = world_pos - uniforms.camera_pos;
     let dist = length(to_frag.xz);
     let fog_far = max(uniforms.fog_far, 64.0);
@@ -275,36 +267,59 @@ fn aerial_perspective(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     let edge = smoothstep(fog_far * 0.55, fog_far * 0.96, dist);
     let amount = max(aerial, edge) * mix(0.25, 1.0, clamp(uniforms.sky_visibility, 0.0, 1.0));
     let haze = horizon_color(to_frag / max(length(to_frag), 1e-3), uniforms.sun_dir);
-    return mix(color, haze, amount);
+    return vec4<f32>(haze, amount);
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) uv:        vec2<f32>,
+    @location(2) @interpolate(flat) tex_index: u32,
+    /// Climate tint palette index (0 = untinted).
+    @location(3) @interpolate(flat) tint: u32,
+    /// Linear climate colour and the base luminance it replaces.
+    @location(4) @interpolate(flat) tint_color: vec4<f32>,
+    /// Complete lighting (sky light, AO, sun, local tint), per vertex.
+    @location(5) light: vec3<f32>,
+    /// Aerial perspective: haze colour (rgb) and amount (a), per vertex.
+    @location(6) fog: vec4<f32>,
+    /// Direct sunlight reaching an unshadowed surface (rgb) and the cheap
+    /// sky-light estimate of its visibility (a), used beyond shadow range.
+    @location(7) sun: vec4<f32>,
+    /// Face direction (index into NORMALS).
+    @location(8) @interpolate(flat) normal_index: u32,
+};
+
+/// Indirect light and unshadowed direct sunlight of one vertex.
+struct VertexLight {
+    ambient: vec3<f32>,
+    sun: vec4<f32>,
+};
+
+struct DepthVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+};
+
+/// Lighting for a vertex. Every input is constant per face or varies
+/// smoothly across it, so evaluating once per vertex (instead of per
+/// pixel) is visually identical and removes the costly `pow`/`exp`/
+/// `normalize` work from the fragment shader.
+fn vertex_lighting(normal: vec3<f32>, color: vec3<f32>, ambient_occlusion: f32, sky_level: f32) -> VertexLight {
     let sun_dir = uniforms.sun_dir;
     let day_factor = clamp(sun_dir.y, 0.0, 1.0);
     let twilight_factor = smoothstep(-0.1, 0.15, sun_dir.y) * smoothstep(0.4, 0.0, sun_dir.y);
-    let normal = in.normal;
-
-    let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index + 0.5));
-    if tex.a < 0.5 { discard; }
-    let albedo = apply_climate_tint(tex.rgb, u32(in.tex_index + 0.5), in.tint);
 
     // Light levels fall off exponentially, like perceived brightness: one
     // block into a cave is noticeably dimmer, ten blocks in is dark.
-    let sky_level = clamp(in.sky_light, 0.0, 1.0);
-    let sky_exposure = pow(0.80, (1.0 - sky_level) * 15.0);
-    let indirect_light = fast_global_illumination(
-        normal,
-        sun_dir,
-        day_factor,
-        twilight_factor,
-        sky_exposure,
-    );
+    let sky_exposure = pow(0.80, (1.0 - clamp(sky_level, 0.0, 1.0)) * 15.0);
+    let indirect_light = fast_global_illumination(normal, sun_dir, day_factor, twilight_factor, sky_exposure);
 
     let sun_color = mix(vec3<f32>(1.0, 0.78, 0.52), vec3<f32>(1.0, 0.96, 0.86), day_factor);
     // Direct sunlight only reaches surfaces that are (nearly) open to the sky.
     let sun_exposure = smoothstep(0.35, 0.95, sky_exposure);
-    let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * day_factor * sun_exposure;
+    // Direct sun is shadowed per pixel; `sun_exposure` is only the fallback
+    // estimate beyond the traced range.
+    let sun_diff  = max(dot(normal, sun_dir), 0.0) * 0.62 * day_factor;
     let fill_dir  = normalize(vec3<f32>(-sun_dir.x, 0.5, -sun_dir.z));
     let fill_diff = max(dot(normal, fill_dir), 0.0) * 0.045 * day_factor * sun_exposure;
 
@@ -314,39 +329,238 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     else                        { face_shade = 0.8; }
 
     let face_contrast = mix(0.82, 1.0, face_shade);
-    let ambient_occlusion = in.ambient_occlusion;
-    let total_light =
+    let ambient_light =
         (indirect_light * ambient_occlusion
-            + sun_color * sun_diff
             + vec3<f32>(0.58, 0.68, 0.82) * fill_diff * mix(0.70, 1.0, ambient_occlusion))
         * face_contrast;
+    let sun_light = sun_color * sun_diff * face_contrast;
+    let total_light = ambient_light + sun_light * sun_exposure;
     let light_luma = dot(total_light, vec3<f32>(0.299, 0.587, 0.114));
-    let tint_luma = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
+    let tint_luma = dot(color, vec3<f32>(0.299, 0.587, 0.114));
     let dark_tint_neutralize = smoothstep(0.16, 0.035, light_luma) * 0.65;
-    let local_tint = mix(in.color, vec3<f32>(tint_luma), vec3<f32>(dark_tint_neutralize));
-    var lit = albedo * total_light * local_tint;
+    let local_tint = mix(color, vec3<f32>(tint_luma), vec3<f32>(dark_tint_neutralize));
+    var grade = local_tint;
 
     let sunset_factor = 1.0 - abs(sun_dir.y);
     if sunset_factor > 0.3 && sun_dir.y > -0.2 {
-        lit *= mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.85, 0.7), sunset_factor * 0.5);
+        grade *= mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.85, 0.7), sunset_factor * 0.5);
+    }
+    return VertexLight(ambient_light * grade, vec4<f32>(sun_light * grade, sun_exposure));
+}
+
+/// Linear climate target colour (rgb) and base luminance (a) for a layer.
+fn climate_tint_color(tex_index: u32, tint: u32) -> vec4<f32> {
+    if tint == 0u || tint > 15u {
+        return vec4<f32>(0.0);
+    }
+    if tex_index == 8u {
+        return vec4<f32>(srgb_to_linear(GRASS_TINTS[tint - 1u] * LEAVES_TINT_SCALE), LEAVES_LUMA);
+    }
+    let base = select(GRASS_TOP_LUMA, GRASS_SIDE_LUMA, tex_index == 1u);
+    return vec4<f32>(srgb_to_linear(GRASS_TINTS[tint - 1u]), base);
+}
+
+// Retained for dynamic/player models, which still use the shared Vertex buffer.
+struct LegacyVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) packed: u32,
+};
+
+const NORMALS = array<vec3<f32>, 6>(
+    vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+    vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0),
+);
+
+@vertex
+fn vs_legacy(model: LegacyVertexInput) -> VertexOutput {
+    let n_idx = model.packed & 0x7u;
+    let t_idx = (model.packed >> 3u) & 0xffu;
+    let uv_idx = (model.packed >> 11u) & 0x3u;
+    let ao_raw = (model.packed >> 21u) & 0x3u;
+    let width = f32(((model.packed >> 13u) & 0xfu) + 1u);
+    let height = f32(((model.packed >> 17u) & 0xfu) + 1u);
+    let color = vec3<f32>(
+        f32((model.packed >> 23u) & 0x7u) / 7.0,
+        f32((model.packed >> 26u) & 0x7u) / 7.0,
+        f32((model.packed >> 29u) & 0x7u) / 7.0,
+    );
+    let uvs = array<vec2<f32>, 4>(vec2(0., 0.), vec2(0., 1.), vec2(1., 1.), vec2(1., 0.));
+    var out: VertexOutput;
+    out.clip_position = uniforms.view_proj * vec4(model.position, 1.0);
+    out.world_pos = model.position;
+    out.uv = uvs[uv_idx] * vec2(width, height);
+    out.tex_index = t_idx;
+    out.tint = 0u;
+    out.tint_color = vec4<f32>(0.0);
+    // Dynamic models (players, dropped items) sit next to the camera, so
+    // the camera-area estimate is a fair stand-in for their sky light.
+    let lighting = vertex_lighting(
+        NORMALS[n_idx % 6u],
+        color,
+        mix(0.52, 1.0, f32(ao_raw) / 3.0),
+        clamp(uniforms.sky_visibility, 0.0, 1.0),
+    );
+    out.light = lighting.ambient;
+    out.sun = lighting.sun;
+    out.normal_index = n_idx % 6u;
+    out.fog = aerial_fog(model.position);
+    return out;
+}
+
+fn pulled_vertex(vertex_id: u32, draw_instance_id: u32) -> VertexOutput {
+    let subchunk_id = draw_instance_id;
+    // Indexed: 4 unique vertices per quad, triangulated by the shared index
+    // pattern (0,1,2)(0,2,3). Rotating the corners by one turns that into
+    // the other diagonal (1,2,3)(1,3,0), so AO-driven diagonal flips need no
+    // second index pattern.
+    let quad = quads[vertex_id / 4u];
+    let diagonal = (quad.origin_and_face >> 30u) & 0x1u;
+    let corner = (vertex_id + diagonal) % 4u;
+    let n_idx = (quad.origin_and_face >> 18u) & 0x7u;
+    let t_idx = (quad.size_material_ao >> 12u) & 0xffu;
+    let width = f32(quad.size_material_ao & 0x3fu) * 0.5;
+    let height = f32((quad.size_material_ao >> 6u) & 0x3fu) * 0.5;
+    let ao_raw = (quad.size_material_ao >> (20u + corner * 2u)) & 0x3u;
+    let color_bits = (quad.origin_and_face >> 21u) & 0x1ffu;
+    let color = vec3<f32>(
+        f32(color_bits & 0x7u),
+        f32((color_bits >> 3u) & 0x7u),
+        f32((color_bits >> 6u) & 0x7u),
+    ) / 7.0;
+    let local_origin = vec3<f32>(
+        f32(quad.origin_and_face & 0x3fu), f32((quad.origin_and_face >> 6u) & 0x3fu), f32((quad.origin_and_face >> 12u) & 0x3fu),
+    ) * 0.5;
+
+    let edge_u = array<vec3<f32>, 6>(vec3(0.,0.,1.), vec3(0.,0.,-1.), vec3(0.,0.,-1.), vec3(0.,0.,1.), vec3(-1.,0.,0.), vec3(1.,0.,0.))[n_idx];
+    let edge_v = array<vec3<f32>, 6>(vec3(0.,1.,0.), vec3(0.,1.,0.), vec3(1.,0.,0.), vec3(1.,0.,0.), vec3(0.,1.,0.), vec3(0.,1.,0.))[n_idx];
+    let position_corners = array<vec2<f32>, 4>(vec2(0.,0.), vec2(1.,0.), vec2(1.,1.), vec2(0.,1.));
+    let texture_corners = array<vec2<f32>, 4>(vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
+    let local_position = local_origin + edge_u * (position_corners[corner].x * width) + edge_v * (position_corners[corner].y * height);
+    let world_position = subchunks[subchunk_id].aabb_min.xyz + local_position;
+
+    var out: VertexOutput;
+    out.clip_position = uniforms.view_proj * vec4<f32>(world_position, 1.0);
+    out.world_pos     = world_position;
+    out.uv = texture_corners[corner] * vec2(width, height);
+    out.tex_index = t_idx;
+    out.tint = quad.size_material_ao >> 28u;
+    out.tint_color = climate_tint_color(t_idx, out.tint);
+    let normal = NORMALS[n_idx % 6u];
+    let ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
+    let sky_level = f32((quad.light >> (corner * 4u)) & 0xfu) / 15.0;
+    let lighting = vertex_lighting(normal, color, ambient_occlusion, sky_level);
+    out.light = lighting.ambient;
+    out.sun = lighting.sun;
+    out.normal_index = n_idx % 6u;
+    out.fog = aerial_fog(world_position);
+    return out;
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) subchunk_id: u32) -> VertexOutput {
+    return pulled_vertex(vertex_id, subchunk_id);
+}
+
+/// Recolours grass and leaves texels to the column's climate colour while
+/// keeping the texture's per-texel brightness detail.
+fn apply_climate_tint(color: vec3<f32>, in: VertexOutput) -> vec3<f32> {
+    if in.tint == 0u || in.tint_color.a == 0.0 {
+        return color;
+    }
+    if in.tex_index == 1u && color.g - max(color.r, color.b) < 0.04 {
+        // Only the green fringe of the grass side; the dirt stays untouched.
+        return color;
+    }
+    if in.tex_index != 0u && in.tex_index != 1u && in.tex_index != 8u {
+        return color;
+    }
+    // An average texel maps exactly onto the target colour; brighter and
+    // darker texels keep their relative contrast.
+    return in.tint_color.rgb * (luminance(color) / in.tint_color.a);
+}
+
+/// Sun shadow ray from a point on the pixel's face.
+fn shadow_ray(in: VertexOutput, pos: vec3<f32>) -> f32 {
+    return trace_sun(pos, NORMALS[in.normal_index], uniforms.sun_dir, 256.0);
+}
+
+/// Everything after the texture fetch: the sun shadow ray (only for
+/// surfaces facing the sun), the tint, the lighting multiply and fog.
+fn shade(in: VertexOutput, texel: vec3<f32>) -> vec4<f32> {
+    // Screen-space footprint of the pixel on its face, taken in uniform
+    // control flow (needed for the edge anti-aliasing below).
+    let footprint_x = dpdx(in.world_pos);
+    let footprint_y = dpdy(in.world_pos);
+
+    // Surfaces facing away from the sun (or lit so faintly that the
+    // difference is invisible) and fully fogged pixels skip the ray.
+    let wants_sun = max(in.sun.r, max(in.sun.g, in.sun.b)) > 0.01 && in.fog.a < 0.98;
+    let params = shadow_grid.params;
+    let dist = length(in.world_pos - uniforms.camera_pos);
+    let traced_here = wants_sun && params.x > 0.5 && uniforms.sun_dir.y > 0.0 && dist < params.y;
+
+    var traced = 1.0;
+    if traced_here {
+        traced = shadow_ray(in, in.world_pos);
+    }
+    // Shadow edges are exact, so one ray per pixel leaves hard stair-steps
+    // that MSAA (geometry edges only) cannot smooth. Where the shadow
+    // changes inside this 2×2 pixel quad, supersample the pixel with four
+    // more rays on a rotated grid; everywhere else one ray is enough.
+    let edge = fwidth(traced);
+    if traced_here && edge > 0.0 {
+        let o1 = footprint_x * 0.125 + footprint_y * 0.375;
+        let o2 = footprint_x * -0.375 + footprint_y * 0.125;
+        traced = (traced
+            + shadow_ray(in, in.world_pos + o1)
+            + shadow_ray(in, in.world_pos - o1)
+            + shadow_ray(in, in.world_pos + o2)
+            + shadow_ray(in, in.world_pos - o2)) * 0.2;
     }
 
-    let dist = length(in.world_pos.xz - uniforms.camera_pos.xz);
-    let is_underwater = uniforms.is_underwater > 0.5;
-
-    var final_color = lit;
-    if !is_underwater {
-        final_color = aerial_perspective(final_color, in.world_pos);
+    var light = in.light;
+    if wants_sun {
+        // Exact voxel shadows near the camera, fading into the sky-light
+        // estimate at the edge of the traced range.
+        var visibility = in.sun.a;
+        if traced_here {
+            visibility = mix(traced, in.sun.a, smoothstep(params.y * 0.8, params.y, dist));
+        }
+        light += in.sun.rgb * visibility;
     }
+    // Self-lit materials stay visible in dark caves: magma glows, amethyst
+    // gives off a faint shimmer.
+    if in.tex_index == 37u {
+        light = max(light, vec3<f32>(1.25, 1.1, 1.0));
+    } else if in.tex_index == 39u {
+        light = max(light, vec3<f32>(0.42, 0.36, 0.5));
+    }
+    var color = apply_climate_tint(texel, in) * light;
+    color = mix(color, in.fog.rgb, in.fog.a);
 
-    if is_underwater {
-        final_color *= vec3<f32>(0.4, 0.7, 1.0);
+    if uniforms.is_underwater > 0.5 {
+        let dist = length(in.world_pos.xz - uniforms.camera_pos.xz);
+        color *= vec3<f32>(0.4, 0.7, 1.0);
         let caustic = sin(in.world_pos.x * 0.5 + uniforms.time * 2.0)
                     * sin(in.world_pos.z * 0.5 + uniforms.time * 1.5) * 0.1 + 0.9;
-        final_color *= caustic;
-        final_color = mix(final_color, vec3<f32>(0.05, 0.15, 0.3),
-                          clamp(dist / 24.0, 0.0, 1.0) * 0.5);
+        color *= caustic;
+        color = mix(color, vec3<f32>(0.05, 0.15, 0.3), clamp(dist / 24.0, 0.0, 1.0) * 0.5);
     }
+    return vec4<f32>(color, 1.0);
+}
 
-    return vec4<f32>(final_color, 1.0);
+/// Fully opaque blocks: no `discard`, so early depth testing stays on.
+@fragment
+fn fs_opaque(in: VertexOutput) -> @location(0) vec4<f32> {
+    let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index));
+    return shade(in, tex.rgb);
+}
+
+/// Alpha-tested blocks (leaves, dead bushes) and dynamic models.
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let tex = textureSample(texture_atlas, texture_sampler, fract(in.uv), i32(in.tex_index));
+    if tex.a < 0.5 { discard; }
+    return shade(in, tex.rgb);
 }

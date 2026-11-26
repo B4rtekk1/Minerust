@@ -38,7 +38,7 @@ pub const MEDIUM_WATER: u8 = 3;
 
 pub fn medium(block: BlockType) -> u8 {
     match block {
-        BlockType::Leaves | BlockType::Ice => MEDIUM_FOLIAGE,
+        BlockType::Leaves | BlockType::CherryLeaves | BlockType::Ice => MEDIUM_FOLIAGE,
         BlockType::Water => MEDIUM_WATER,
         b if b.is_solid_opaque() => MEDIUM_OPAQUE,
         _ => MEDIUM_AIR,

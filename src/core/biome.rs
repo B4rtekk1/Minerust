@@ -46,6 +46,16 @@ pub enum Biome {
     Lake,
     /// Small land mass surrounded by ocean.
     Island,
+    /// Hot, bone-dry mesas striped with terracotta bands.
+    Badlands,
+    /// Rare fungal islands covered in mycelium and huge mushrooms.
+    MushroomFields,
+    /// Gentle highland slopes with pink cherry trees.
+    CherryGrove,
+    /// Bright woodland of tall white birches.
+    BirchForest,
+    /// Ancient, mossy taiga with giant two-block-wide spruces and podzol.
+    OldGrowthTaiga,
 }
 
 impl Biome {
@@ -73,6 +83,9 @@ impl Biome {
             Biome::Mountains => 0.006,
             Biome::Island => 0.025,
             Biome::Tundra => 0.002,
+            Biome::CherryGrove => 0.030,
+            Biome::BirchForest => 0.055,
+            Biome::OldGrowthTaiga => 0.060,
             _ => 0.0,
         }
     }
@@ -106,6 +119,11 @@ impl Biome {
             Biome::Savanna => (0.75, -0.6),
             Biome::Desert => (0.9, -0.9),
             Biome::Jungle => (0.8, 0.85),
+            Biome::Badlands => (0.95, -0.95),
+            Biome::MushroomFields => (0.3, 0.6),
+            Biome::CherryGrove => (0.15, 0.25),
+            Biome::BirchForest => (0.15, 0.35),
+            Biome::OldGrowthTaiga => (-0.35, 0.55),
         }
     }
 }

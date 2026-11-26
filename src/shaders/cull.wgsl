@@ -3,12 +3,32 @@ struct SubchunkMeta {
     aabb_max: vec4<f32>,
     terrain_draw_data: vec4<u32>,
     water_draw_data: vec4<u32>,
+    terrain_far_draw_data: vec4<u32>,
+    terrain_lod_draw_data: vec4<u32>,
+    // Quads per terrain draw group: face directions −X, +X, −Y, +Y | −Z, +Z,
+    // cutout (alpha-tested), unused. Groups are stored contiguously.
+    terrain_groups_a: vec4<u32>,
+    terrain_groups_b: vec4<u32>,
+    terrain_far_groups_a: vec4<u32>,
+    terrain_far_groups_b: vec4<u32>,
+    terrain_lod_groups_a: vec4<u32>,
+    terrain_lod_groups_b: vec4<u32>,
 }
 
 struct DrawIndirect {
     vertex_count: u32,
     instance_count: u32,
     first_vertex: u32,
+    first_instance: u32,
+}
+
+/// Terrain is drawn indexed: 4 pulled vertices + 6 indices per quad, from a
+/// shared static index pattern (`base_vertex` selects the first quad).
+struct DrawIndexedIndirect {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
     first_instance: u32,
 }
 
@@ -27,8 +47,9 @@ var<uniform> cull_uniforms: CullUniforms;
 @group(0) @binding(1)
 var<storage, read> subchunks: array<SubchunkMeta>;
 
+/// Final terrain draws, sorted front to back by `sort_draws`.
 @group(0) @binding(2)
-var<storage, read_write> terrain_draw_commands: array<DrawIndirect>;
+var<storage, read_write> terrain_draw_commands: array<DrawIndexedIndirect>;
 
 @group(0) @binding(3)
 var<storage, read_write> terrain_visible_count: atomic<u32>;
@@ -44,6 +65,67 @@ var hiz_texture: texture_2d<f32>;
 
 @group(0) @binding(7)
 var hiz_sampler: sampler;
+
+@group(0) @binding(8)
+var<storage, read_write> cutout_draw_commands: array<DrawIndexedIndirect>;
+
+@group(0) @binding(9)
+var<storage, read_write> cutout_visible_count: atomic<u32>;
+
+/// Visible terrain draws in arrival order, before sorting.
+@group(0) @binding(10)
+var<storage, read_write> terrain_unsorted: array<DrawIndexedIndirect>;
+
+/// Distance bucket of each entry in `terrain_unsorted`.
+@group(0) @binding(11)
+var<storage, read_write> terrain_buckets: array<u32>;
+
+/// [0, 8): draws per distance bucket; [8, 16): scatter cursors.
+@group(0) @binding(12)
+var<storage, read_write> sort_counters: array<atomic<u32>, 16>;
+
+const SORT_BUCKETS: u32 = 8u;
+
+/// Coarse front-to-back order: bucket 0 holds subchunks within 8 blocks of
+/// the eye, and each further bucket doubles the range (16, 32, … 512+).
+/// Drawing near geometry first lets early-Z reject what lies behind it.
+fn distance_bucket(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> u32 {
+    let cam = cull_uniforms.camera_pos;
+    let outside = max(aabb_min - cam, max(cam - aabb_max, vec3<f32>(0.0)));
+    let d = length(outside);
+    return u32(clamp(floor(log2(max(d, 1.0) / 8.0) + 1.0), 0.0, f32(SORT_BUCKETS - 1u)));
+}
+
+/// Whether any face of direction `dir` inside the AABB can face the camera.
+/// A face with normal −X lies on some plane x ≤ aabb_max.x and is visible
+/// only from x below it, so the test is conservative per subchunk.
+/// `camera_pos` must be the eye position; the small margin keeps faces that
+/// are exactly level with the eye (and float rounding) on the safe side.
+const DIRECTION_MARGIN: f32 = 0.05;
+
+fn direction_visible(dir: u32, aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    let cam = cull_uniforms.camera_pos;
+    let m = DIRECTION_MARGIN;
+    switch dir {
+        case 0u: { return cam.x < aabb_max.x + m; }
+        case 1u: { return cam.x > aabb_min.x - m; }
+        case 2u: { return cam.y < aabb_max.y + m; }
+        case 3u: { return cam.y > aabb_min.y - m; }
+        case 4u: { return cam.z < aabb_max.z + m; }
+        default: { return cam.z > aabb_min.z - m; }
+    }
+}
+
+fn indexed_draw(quads: u32, first_quad: u32, instance_id: u32) -> DrawIndexedIndirect {
+    return DrawIndexedIndirect(quads * 6u, 1u, 0u, i32(first_quad * 4u), instance_id);
+}
+
+fn emit_terrain(quads: u32, first_quad: u32, instance_id: u32, bucket: u32) {
+    let slot = atomicAdd(&terrain_visible_count, 1u);
+    terrain_unsorted[slot] = indexed_draw(quads, first_quad, instance_id);
+    terrain_buckets[slot] = bucket;
+    atomicAdd(&sort_counters[bucket], 1u);
+}
 
 const FRUSTUM_CULL_MARGIN: f32 = 2.0;
 
@@ -137,6 +219,19 @@ fn is_occlusion_visible(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
     return nearest_z <= occluder_z + 0.0001;
 }
 
+/// Beyond this horizontal distance (blocks) water waves are no longer
+/// displaced (`vs_water` fades them out between 64 and 160 blocks).
+const WATER_DETAIL_DISTANCE: f32 = 160.0;
+/// Distance at which AO/light-tolerant terrain replaces the detailed mesh.
+const TERRAIN_FAR_DISTANCE: f32 = 160.0;
+
+/// Horizontal distance from the camera to the nearest point of a box.
+fn horizontal_distance_to_box(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> f32 {
+    let p = cull_uniforms.camera_pos.xz;
+    let nearest = clamp(p, aabb_min.xz, aabb_max.xz);
+    return length(p - nearest);
+}
+
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
@@ -147,7 +242,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let subchunk = subchunks[idx];
 
-    if subchunk.terrain_draw_data.w == 0u && subchunk.water_draw_data.w == 0u {
+    if subchunk.terrain_draw_data.w == 0u
+        && subchunk.terrain_far_draw_data.w == 0u
+        && subchunk.terrain_lod_draw_data.w == 0u
+        && subchunk.water_draw_data.w == 0u {
         return;
     }
 
@@ -162,18 +260,73 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    if subchunk.terrain_draw_data.w != 0u {
-        let slot = atomicAdd(&terrain_visible_count, 1u);
-        terrain_draw_commands[slot].vertex_count   = subchunk.terrain_draw_data.x;
-        terrain_draw_commands[slot].instance_count = 1u;
-        terrain_draw_commands[slot].first_vertex   = subchunk.terrain_draw_data.y;
-        terrain_draw_commands[slot].first_instance = idx;
+    let terrain_distance = horizontal_distance_to_box(aabb_min, aabb_max);
+    var terrain_draw_data = subchunk.terrain_draw_data;
+    var terrain_groups_a = subchunk.terrain_groups_a;
+    var terrain_groups_b = subchunk.terrain_groups_b;
+    if terrain_distance >= TERRAIN_FAR_DISTANCE && subchunk.terrain_far_draw_data.w != 0u {
+        terrain_draw_data = subchunk.terrain_far_draw_data;
+        terrain_groups_a = subchunk.terrain_far_groups_a;
+        terrain_groups_b = subchunk.terrain_far_groups_b;
+    }
+
+    if terrain_draw_data.w != 0u {
+        // One draw per face direction that can face the camera: roughly half
+        // of all faces are skipped before vertex work and rasterization.
+        let groups = array<u32, 7>(
+            terrain_groups_a.x, terrain_groups_a.y,
+            terrain_groups_a.z, terrain_groups_a.w,
+            terrain_groups_b.x, terrain_groups_b.y,
+            terrain_groups_b.z,
+        );
+        let bucket = distance_bucket(aabb_min, aabb_max);
+        // `terrain_draw_data.y` is the first vertex of the 6-per-quad
+        // stream; terrain draws are indexed and address quads directly.
+        var first_quad = terrain_draw_data.y / 6u;
+        for (var dir = 0u; dir < 6u; dir++) {
+            let quads = groups[dir];
+            if quads != 0u && direction_visible(dir, aabb_min, aabb_max) {
+                emit_terrain(quads, first_quad, idx, bucket);
+            }
+            first_quad += quads;
+        }
+        if groups[6] != 0u {
+            let slot = atomicAdd(&cutout_visible_count, 1u);
+            cutout_draw_commands[slot] = indexed_draw(groups[6], first_quad, idx);
+        }
     }
     if subchunk.water_draw_data.w != 0u {
+        // Water is stored as near quads (1×1 surface tiles the waves
+        // displace) followed by a merged copy (`.z` vertices). Waves fade
+        // out by WATER_DETAIL_DISTANCE, so subchunks entirely beyond it draw
+        // the merged copy: identical, with a fraction of the vertices.
+        var vertex_count = subchunk.water_draw_data.x;
+        var first_vertex = subchunk.water_draw_data.y;
+        if subchunk.water_draw_data.z != 0u && terrain_distance > WATER_DETAIL_DISTANCE {
+            first_vertex += vertex_count;
+            vertex_count = subchunk.water_draw_data.z;
+        }
         let slot = atomicAdd(&water_visible_count, 1u);
-        water_draw_commands[slot].vertex_count   = subchunk.water_draw_data.x;
+        water_draw_commands[slot].vertex_count   = vertex_count;
         water_draw_commands[slot].instance_count = 1u;
-        water_draw_commands[slot].first_vertex   = subchunk.water_draw_data.y;
+        water_draw_commands[slot].first_vertex   = first_vertex;
         water_draw_commands[slot].first_instance = idx;
     }
+}
+
+/// Second pass: scatter the visible terrain draws into bucket order.
+/// Within a bucket the order is arbitrary; across buckets it is near → far.
+@compute @workgroup_size(128)
+fn sort_draws(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= atomicLoad(&terrain_visible_count) {
+        return;
+    }
+    let bucket = terrain_buckets[i];
+    var offset = 0u;
+    for (var b = 0u; b < bucket; b++) {
+        offset += atomicLoad(&sort_counters[b]);
+    }
+    let position = offset + atomicAdd(&sort_counters[SORT_BUCKETS + bucket], 1u);
+    terrain_draw_commands[position] = terrain_unsorted[i];
 }

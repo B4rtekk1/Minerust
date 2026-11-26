@@ -1,28 +1,23 @@
 use image::GenericImageView;
 use std::path::Path;
 
-use crate::constants::{ATLAS_SIZE, TEXTURE_SIZE};
+use crate::constants::{ATLAS_COLUMNS, TEXTURE_LAYERS, TEXTURE_SIZE};
 
-/// Loads a 4×4 grid texture atlas from disk and extracts its 16 tiles into a
+/// Loads the block texture atlas from disk and extracts its tiles into a
 /// flat, layer-ordered byte array suitable for upload as a `Texture2DArray`.
 ///
-/// The atlas image must be laid out as a 4-column, 4-row grid of equal-sized
-/// square tiles.  Tiles are read in row-major order (left-to-right,
-/// top-to-bottom) and concatenated so that layer `i` occupies bytes
-/// `[i * tile_w * tile_h * 4 .. (i+1) * tile_w * tile_h * 4]`.
-///
-/// # Arguments
-/// * `path` – Path to the atlas image file.  Any format supported by the
-///   `image` crate is accepted; the image is converted to RGBA8 internally.
+/// The atlas is a grid of square tiles, [`ATLAS_COLUMNS`] wide, holding
+/// [`TEXTURE_LAYERS`] tiles. Tiles are read in row-major order
+/// (left-to-right, top-to-bottom) and concatenated so that layer `i`
+/// occupies bytes `[i * tile² * 4 .. (i+1) * tile² * 4]`.
 ///
 /// # Returns
 /// A tuple `(data, tile_width, tile_height)` where `data` is the raw RGBA8
 /// pixel data in layer order.
 ///
 /// # Errors
-/// Returns a descriptive `String` if the file cannot be opened, or if the
-/// atlas dimensions are not divisible by 4, or if the resulting tiles are not
-/// square.
+/// Returns a descriptive `String` if the file cannot be opened or does not
+/// hold a full grid of [`TEXTURE_LAYERS`] square tiles.
 pub fn load_texture_atlas_from_file<P: AsRef<Path>>(
     path: P,
 ) -> Result<(Vec<u8>, u32, u32), String> {
@@ -30,16 +25,16 @@ pub fn load_texture_atlas_from_file<P: AsRef<Path>>(
     let rgba = img.to_rgba8();
     let (width, height) = img.dimensions();
 
-    // The atlas must divide evenly into a 4×4 grid.
-    if width % 4 != 0 || height % 4 != 0 {
+    let rows = TEXTURE_LAYERS.div_ceil(ATLAS_COLUMNS);
+    if width % ATLAS_COLUMNS != 0 || height % rows != 0 {
         return Err(format!(
-            "Texture atlas dimensions {}x{} not divisible by 4",
-            width, height
+            "Texture atlas {}x{} is not a {}x{} tile grid (re-run tools/generate_block_textures.py)",
+            width, height, ATLAS_COLUMNS, rows
         ));
     }
 
-    let tile_w = width / 4;
-    let tile_h = height / 4;
+    let tile_w = width / ATLAS_COLUMNS;
+    let tile_h = height / rows;
 
     if tile_w != tile_h {
         return Err(format!(
@@ -48,20 +43,27 @@ pub fn load_texture_atlas_from_file<P: AsRef<Path>>(
         ));
     }
 
-    // Pre-allocate for all 16 tiles × tile_w × tile_h × 4 bytes (RGBA).
-    let mut layers = Vec::with_capacity((width * height * 4) as usize);
+    let mut layers = Vec::with_capacity((tile_w * tile_h * 4 * TEXTURE_LAYERS) as usize);
 
     // Extract each tile in row-major order and append it as a contiguous layer.
-    for i in 0..16 {
-        let col = i % 4;
-        let row = i / 4;
+    for i in 0..TEXTURE_LAYERS {
+        let col = i % ATLAS_COLUMNS;
+        let row = i / ATLAS_COLUMNS;
         let start_x = col * tile_w;
         let start_y = row * tile_h;
 
+        // Only cutout materials (leaves, dead bushes) are alpha-tested.
+        // Stray transparent texels elsewhere would show through the opaque
+        // terrain pipeline (which skips `discard` for early depth testing),
+        // so seal them.
+        let cutout = crate::render::quad::is_cutout_material(i as u8);
         for y in 0..tile_h {
             for x in 0..tile_w {
-                let pixel = rgba.get_pixel(start_x + x, start_y + y);
-                layers.extend_from_slice(&pixel.0);
+                let mut pixel = rgba.get_pixel(start_x + x, start_y + y).0;
+                if !cutout && i != crate::constants::TEX_WATER as u32 {
+                    pixel[3] = 255;
+                }
+                layers.extend_from_slice(&pixel);
             }
         }
     }
@@ -69,7 +71,7 @@ pub fn load_texture_atlas_from_file<P: AsRef<Path>>(
     Ok((layers, tile_w, tile_h))
 }
 
-/// Procedurally generates a 16-layer RGBA8 texture array at runtime.
+/// Procedurally generates a [`TEXTURE_LAYERS`]-layer RGBA8 texture array at runtime.
 ///
 /// Each layer is a `TEXTURE_SIZE × TEXTURE_SIZE` tile whose appearance is
 /// driven by a fast integer hash function, avoiding any file I/O.  This is
@@ -99,7 +101,7 @@ pub fn load_texture_atlas_from_file<P: AsRef<Path>>(
 /// | 14    | Cactus        | Green with darker border                   |
 /// | 15    | Dead bush     | Sparse brown branches, mostly transparent  |
 pub fn generate_texture_atlas() -> Vec<u8> {
-    let total_pixels = (TEXTURE_SIZE * TEXTURE_SIZE * ATLAS_SIZE * ATLAS_SIZE) as usize;
+    let total_pixels = (TEXTURE_SIZE * TEXTURE_SIZE * TEXTURE_LAYERS) as usize;
     let mut data = vec![0u8; total_pixels * 4];
 
     /// Writes one RGBA pixel into `data` at the given layer and pixel coordinates.
@@ -134,7 +136,7 @@ pub fn generate_texture_atlas() -> Vec<u8> {
         ((n ^ (n >> 16)) & 0xFF) as u8
     };
 
-    for tex_idx in 0..16u32 {
+    for tex_idx in 0..TEXTURE_LAYERS {
         for y in 0..TEXTURE_SIZE {
             for x in 0..TEXTURE_SIZE {
                 let (r, g, b, a) = match tex_idx {
@@ -327,8 +329,13 @@ pub fn generate_texture_atlas() -> Vec<u8> {
                         }
                     }
 
-                    // Fallback: bright magenta signals an unhandled texture index.
-                    _ => (255, 0, 255, 255),
+                    // Newer layers: a noisy fill of the block's base colour.
+                    _ => {
+                        let [r, g, b] = fallback_layer_color(tex_idx);
+                        let noise = hash(x / 16, y / 16, tex_idx) as i32 - 128;
+                        let shade = |c: u8| (c as i32 + noise / 6).clamp(0, 255) as u8;
+                        (shade(r), shade(g), shade(b), 255)
+                    }
                 };
                 set_pixel(&mut data, tex_idx, x, y, r, g, b, a);
             }
@@ -336,4 +343,38 @@ pub fn generate_texture_atlas() -> Vec<u8> {
     }
 
     data
+}
+
+/// Base colour of the procedural fallback for layers added after the
+/// original sixteen (only used when `assets/textures.png` is missing).
+fn fallback_layer_color(layer: u32) -> [u8; 3] {
+    match layer {
+        16 => [90, 90, 92],    // coal ore
+        17 => [150, 130, 115], // iron ore
+        18 => [110, 100, 60],  // gold ore
+        19 => [70, 120, 120],  // diamond ore
+        20 => [64, 64, 72],    // deepslate
+        21 => [190, 100, 40],  // red sand
+        22 => [158, 94, 66],   // terracotta
+        23 => [146, 62, 46],   // red terracotta
+        24 => [212, 180, 163], // white terracotta
+        25 => [94, 64, 28],    // podzol top
+        26 => [110, 76, 46],   // podzol side
+        27 => [84, 108, 40],   // moss
+        28 => [100, 116, 80],  // mossy stone
+        29 => [112, 98, 110],  // mycelium top
+        30 => [116, 90, 76],   // mycelium side
+        31 => [206, 200, 188], // mushroom stem
+        32 => [196, 44, 42],   // red mushroom
+        33 => [146, 110, 80],  // brown mushroom
+        34 => [214, 196, 140], // sandstone
+        35 => [224, 222, 214], // birch log
+        36 => [236, 168, 196], // cherry leaves
+        37 => [200, 80, 20],   // magma
+        38 => [134, 106, 90],  // dripstone
+        39 => [130, 96, 190],  // amethyst
+        40 => [214, 216, 212], // calcite
+        41 => [60, 38, 48],    // cherry log
+        _ => [128, 128, 128],
+    }
 }

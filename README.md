@@ -273,6 +273,8 @@ The dedicated server does not create a game window.
 | `C` | Toggle debug/performance overlay |
 | `F4` | Toggle Hi-Z occlusion culling |
 | `F5` | Save world |
+| `F7` | Toggle ray-marched voxel sun shadows |
+| `[` / `]` (hold) | Move the sun backwards / forwards through the day |
 | `F9` | Load world |
 | `F11` | Toggle borderless fullscreen |
 

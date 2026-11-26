@@ -1,5 +1,10 @@
+// The renderer rewrites the depth type and SAMPLE_COUNT for the active
+// anti-aliasing mode (2× MSAA, or a plain `texture_depth_2d` with one
+// "sample" when anti-aliasing is off: then the loop reads mip level 0).
 @group(0) @binding(0)
 var msaa_depth: texture_depth_multisampled_2d;
+
+const SAMPLE_COUNT: i32 = 4;
 
 // This is the former Hi-Z mip 1 (half the surface dimensions), not a
 // full-resolution intermediate. Water only samples opaque scene color.
@@ -8,11 +13,11 @@ var hiz_seed: texture_storage_2d<r32float, write>;
 
 fn resolve_max_depth(coords: vec2<i32>, src_max: vec2<i32>) -> f32 {
     let pixel = clamp(coords, vec2<i32>(0), src_max);
-    let s0 = textureLoad(msaa_depth, pixel, 0);
-    let s1 = textureLoad(msaa_depth, pixel, 1);
-    let s2 = textureLoad(msaa_depth, pixel, 2);
-    let s3 = textureLoad(msaa_depth, pixel, 3);
-    return max(max(s0, s1), max(s2, s3));
+    var d = 0.0;
+    for (var s = 0; s < SAMPLE_COUNT; s++) {
+        d = max(d, textureLoad(msaa_depth, pixel, s));
+    }
+    return d;
 }
 
 @compute @workgroup_size(16, 16)

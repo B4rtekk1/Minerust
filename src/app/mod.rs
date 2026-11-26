@@ -1,4 +1,6 @@
+mod bench;
 mod game;
+mod graphics;
 mod init;
 mod input;
 mod performance;
