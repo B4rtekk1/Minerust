@@ -1,10 +1,10 @@
 use minerust::camera::check_intersection;
-use minerust::{CHUNK_SIZE, World};
+use minerust::{CHUNK_SIZE, DEFAULT_WORLD_FILE, SUBCHUNK_HEIGHT, World, load_world, save_world};
 use winit::event::MouseButton;
 use winit::window::CursorGrabMode;
 
 use crate::logger::{LogLevel, log};
-use crate::ui::menu::{MenuField, MenuHit, MenuLayout};
+use crate::ui::menu::{MenuAction, MenuContext, MenuField, MenuLayout, MenuScreen};
 
 use super::state::State;
 
@@ -76,49 +76,232 @@ impl State {
             self.hotbar_dirty = true;
         }
     }
-    /// Translates a raw mouse-click position into a menu action.
-    ///
-    /// Called whenever the player clicks while the game is in
-    /// [`GameState::Menu`].  A [`MenuLayout`] is constructed from the current
-    /// surface dimensions so that hit regions scale correctly at any
-    /// resolution, then a point-in-rect hit test determines which (if any)
-    /// interactive element was clicked.
-    ///
-    /// # Behavior per hit result
-    /// | `MenuHit` variant       | Effect                                                  |
-    /// |-------------------------|---------------------------------------------------------|
-    /// | `NewWorld`              | Transitions directly to `GameState::Playing`.           |
-    /// | `Multiplayer`           | Shows and focuses the server-address input box.         |
-    /// | `None` (missed all UI)  | Clears the active field so keyboard input is ignored.   |
-    ///
-    /// # Parameters
-    /// - `x` – Horizontal cursor position in physical pixels (origin = top-left).
-    /// - `y` – Vertical cursor position in physical pixels.
     pub fn handle_menu_click(&mut self, x: f32, y: f32) {
-        let layout = MenuLayout::new(self.config.width, self.config.height);
-
-        if self.menu_state.server_address_input_visible
-            && layout.server_address_input.contains(x, y)
-        {
-            self.menu_state.select_field(MenuField::ServerAddress);
+        if self.game_state == crate::ui::menu::GameState::Connecting {
             return;
         }
-
-        match layout.hit_test(x, y) {
-            Some(MenuHit::RenderMode) => self.toggle_present_mode(),
-            Some(MenuHit::AntiAliasing) => {
-                // Takes effect at the next start (pipelines are rebuilt).
-                self.graphics.anti_aliasing = self.graphics.anti_aliasing.next();
-                self.graphics.save();
+        let context = MenuContext {
+            has_world: self.has_entered_world,
+            save_available: std::path::Path::new(DEFAULT_WORLD_FILE).exists(),
+        };
+        let layout = MenuLayout::new(
+            self.config.width,
+            self.config.height,
+            self.menu_state.screen,
+            context,
+        );
+        if let Some(action) = layout.hit_test(x, y) {
+            if let Some((index, _)) = layout
+                .items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| item.rect.contains(x, y) && item.action == Some(action))
+            {
+                self.menu_state.selected_item = index;
             }
-            Some(MenuHit::WaterQuality) => {
+            self.activate_menu_action(action);
+        } else {
+            self.menu_state.select_field(MenuField::None);
+        }
+    }
+
+    pub fn activate_menu_action(&mut self, action: MenuAction) {
+        use crate::ui::menu::GameState;
+        if self.game_state == GameState::Connecting {
+            return;
+        }
+        match action {
+            MenuAction::Continue | MenuAction::Resume => self.resume_game(),
+            MenuAction::NewWorld => self.start_new_world(),
+            MenuAction::LoadWorld => {
+                self.load_world_from_disk();
+            }
+            MenuAction::SaveWorld => {
+                self.save_world_to_disk();
+            }
+            MenuAction::OpenMultiplayer => {
+                self.menu_state.open_screen(MenuScreen::Multiplayer);
+                self.menu_state.select_field(MenuField::ServerAddress);
+            }
+            MenuAction::OpenSettings => self.menu_state.open_screen(MenuScreen::Settings),
+            MenuAction::OpenControls => self.menu_state.open_screen(MenuScreen::Controls),
+            MenuAction::Back => self.menu_state.back(self.has_entered_world),
+            MenuAction::MainMenu => {
+                self.menu_state.open_screen(MenuScreen::Main);
+                self.game_state = GameState::Menu;
+                self.release_game_cursor();
+            }
+            MenuAction::Connect => self.connect_to_server(),
+            MenuAction::Quit => self.menu_state.quit_requested = true,
+            MenuAction::ToggleRenderMode => self.toggle_present_mode(),
+            MenuAction::ToggleWater => {
                 self.graphics.water = self.graphics.water.toggled();
                 self.graphics.save();
             }
-            Some(MenuHit::NewWorld) => self.start_new_world(),
-            Some(MenuHit::Multiplayer) => self.menu_state.show_server_address_input(),
-            None => self.menu_state.select_field(MenuField::None),
+            MenuAction::CycleAntiAliasing => {
+                self.graphics.anti_aliasing = self.graphics.anti_aliasing.next();
+                self.graphics.save();
+            }
+            MenuAction::ToggleShadows => {
+                self.graphics.shadows = !self.graphics.shadows;
+                self.graphics.save();
+            }
+            MenuAction::FocusUsername => self.menu_state.select_field(MenuField::Username),
+            MenuAction::FocusServerAddress => {
+                self.menu_state.select_field(MenuField::ServerAddress)
+            }
         }
+    }
+
+    fn release_game_cursor(&mut self) {
+        self.mouse_captured = false;
+        self.input = Default::default();
+        self.digging = Default::default();
+        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+    }
+
+    fn resume_game(&mut self) {
+        use crate::ui::menu::GameState;
+        if !self.has_entered_world {
+            return;
+        }
+        self.game_state = GameState::Playing;
+        self.mouse_captured = true;
+        let _ = self
+            .window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked));
+        self.window.set_cursor_visible(false);
+    }
+
+    pub fn save_world_to_disk(&mut self) -> bool {
+        let world = self.world.read();
+        let saved = minerust::SavedWorld::from_world_with_generator_version(
+            &world.chunks,
+            world.seed,
+            (
+                self.camera.position.x,
+                self.camera.position.y,
+                self.camera.position.z,
+            ),
+            (self.camera.yaw, self.camera.pitch),
+            &self.inventory,
+            world.generator_version,
+        );
+        match save_world(DEFAULT_WORLD_FILE, &saved) {
+            Ok(()) => {
+                log(
+                    LogLevel::Info,
+                    &format!("World saved to {}", DEFAULT_WORLD_FILE),
+                );
+                self.menu_state.set_status("World saved successfully");
+                self.menu_state.clear_error();
+                true
+            }
+            Err(error) => {
+                log(LogLevel::Error, &format!("Failed to save world: {}", error));
+                self.menu_state
+                    .set_error(&format!("Save failed: {}", error));
+                false
+            }
+        }
+    }
+
+    pub fn load_world_from_disk(&mut self) -> bool {
+        let saved = match load_world(DEFAULT_WORLD_FILE) {
+            Ok(saved) => saved,
+            Err(error) => {
+                log(LogLevel::Error, &format!("Error loading world: {}", error));
+                self.menu_state
+                    .set_error(&format!("Load failed: {}", error));
+                return false;
+            }
+        };
+
+        log(
+            LogLevel::Info,
+            &format!("Regenerating world with seed {}...", saved.seed),
+        );
+        {
+            let mut world = self.world.write();
+            *world = World::new_with_seed_and_version(saved.seed, saved.generator_version);
+        }
+        self.indirect_manager.clear();
+        self.water_indirect_manager.clear();
+        self.camera.position.x = saved.player_x;
+        self.camera.position.y = saved.player_y;
+        self.camera.position.z = saved.player_z;
+        self.camera.yaw = saved.player_yaw;
+        self.camera.pitch = saved.player_pitch;
+        self.inventory = saved.inventory.into_inventory(minerust::item_registry());
+        super::state::ensure_test_lamp(&mut self.inventory);
+        self.inventory_ui = Default::default();
+        self.hotbar_dirty = true;
+
+        {
+            let mut world = self.world.write();
+            for chunk_data in &saved.chunks {
+                if let Some(chunk) = world.chunks.get_mut(&(chunk_data.cx, chunk_data.cz)) {
+                    for (&sy, block_data) in &chunk_data.subchunks {
+                        if let Some(subchunk) = chunk.subchunks.get_mut(sy as usize) {
+                            let mut n = 0;
+                            for lx in 0..CHUNK_SIZE as usize {
+                                for ly in 0..SUBCHUNK_HEIGHT as usize {
+                                    for lz in 0..CHUNK_SIZE as usize {
+                                        if let Some(&block) = block_data.get(n) {
+                                            subchunk.set_block_raw(
+                                                lx as i32, ly as i32, lz as i32, block,
+                                            );
+                                            n += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            subchunk.is_empty = false;
+                            subchunk.mark_mesh_dirty();
+                        }
+                    }
+                    chunk.player_modified = true;
+                    chunk.rebuild_metadata();
+                }
+            }
+            for chunk in world.chunks.values_mut() {
+                for subchunk in &mut chunk.subchunks {
+                    subchunk.mark_mesh_dirty();
+                }
+            }
+        }
+
+        self.chunk_loader =
+            minerust::ChunkLoader::new_with_version(saved.seed, saved.generator_version);
+        self.mesh_loader =
+            minerust::MeshLoader::new(self.world.clone(), minerust::get_mesh_worker_count());
+        self.chunks_rendered = 0;
+        self.subchunks_rendered = 0;
+        self.hiz_valid = false;
+        self.visible_chunk_columns.clear();
+        self.visible_chunk_cache_center = (i32::MIN, i32::MIN);
+        self.visible_chunk_columns_dirty = true;
+        self.enqueue_all_dirty_meshes();
+        self.has_entered_world = true;
+        self.game_state = crate::ui::menu::GameState::Playing;
+        self.menu_state.clear_error();
+        self.menu_state.set_status("World loaded");
+        self.mouse_captured = true;
+        let _ = self
+            .window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked));
+        self.window.set_cursor_visible(false);
+        log(
+            LogLevel::Info,
+            &format!(
+                "World loaded from {} (seed: {})",
+                DEFAULT_WORLD_FILE, saved.seed
+            ),
+        );
+        true
     }
 
     /// Switches between automatic low-latency and display-synced presentation.

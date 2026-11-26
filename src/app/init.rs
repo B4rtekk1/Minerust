@@ -1261,19 +1261,11 @@ impl State {
         /// FPS counter displayed in the top-left corner.
         let fps_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(40.0, 48.0));
 
-        // --- Main-menu text buffers ---
-        let menu_connect_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
-        let menu_singleplayer_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(36.0, 44.0));
-        let menu_render_mode_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
-        let menu_water_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
-        let menu_aa_button_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(28.0, 36.0));
-        let menu_server_address_input_buffer =
-            glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
+        // --- Menu text buffers ---
+        let menu_title_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(42.0, 50.0));
+        let menu_text_buffers = (0..10)
+            .map(|_| glyphon::Buffer::new(&mut font_system, Metrics::new(24.0, 32.0)))
+            .collect();
 
         // Hotbar slot name (e.g., "Stone Sword") displayed above the hotbar.
         let hotbar_label_buffer = glyphon::Buffer::new(&mut font_system, Metrics::new(22.0, 28.0));
@@ -1392,6 +1384,86 @@ impl State {
             ],
         });
         // ------------------------------------------------------------------ //
+        // God rays: quarter-resolution volumetric light ray march
+        // ------------------------------------------------------------------ //
+        let god_rays_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("God Rays Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/god_rays.wgsl").into()),
+        });
+        let storage_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let god_rays_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("God Rays Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    storage_entry(2),
+                    storage_entry(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let god_rays_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("God Rays Pipeline Layout"),
+                bind_group_layouts: &[Some(&god_rays_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let god_rays_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("God Rays Pipeline"),
+            layout: Some(&god_rays_pipeline_layout),
+            cache: None,
+            module: &god_rays_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+        });
+        let (god_rays_texture, god_rays_view, god_rays_size) =
+            super::resize::create_god_rays_target(&device, &config);
+        let god_rays_bind_group = super::resize::create_god_rays_bind_group(
+            &device,
+            &god_rays_bind_group_layout,
+            &uniform_buffer,
+            &ssr_hiz_view,
+            &shadow_grid,
+            &god_rays_view,
+        );
+
+        // ------------------------------------------------------------------ //
         // Composite pipeline (post-processing blit)
         // ------------------------------------------------------------------ //
 
@@ -1458,6 +1530,28 @@ impl State {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Quarter-resolution ray-marched god rays (bilateral upsampled).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Full-resolution depth for bilateral god-rays upsampling.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1484,6 +1578,14 @@ impl State {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&composite_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&god_rays_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&ssr_hiz_view),
+                },
             ],
         });
         let menu_composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1501,6 +1603,14 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&composite_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&god_rays_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&ssr_hiz_view),
                 },
             ],
         });
@@ -1856,12 +1966,8 @@ impl State {
             fps_buffer,
             show_debug_overlay: false,
             occlusion_culling_enabled: true,
-            menu_connect_button_buffer,
-            menu_singleplayer_button_buffer,
-            menu_render_mode_button_buffer,
-            menu_water_button_buffer,
-            menu_aa_button_buffer,
-            menu_server_address_input_buffer,
+            menu_title_buffer,
+            menu_text_buffers,
             hotbar_label_buffer,
             hotbar_label_width: 0.0,
             inventory_count_buffers: Vec::new(),
@@ -1888,6 +1994,11 @@ impl State {
             depth_resolve_bind_group,
             ssr_hiz_resolve_pipeline,
             ssr_hiz_resolve_bind_group,
+            god_rays_texture,
+            god_rays_view,
+            god_rays_size,
+            god_rays_pipeline,
+            god_rays_bind_group,
             supports_indirect_count,
             inventory_ui: Default::default(),
             hotbar_vertex_buffer: None,

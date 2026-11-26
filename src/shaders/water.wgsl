@@ -9,8 +9,8 @@ const SSR_SATURATION:      f32 = 1.45;
 const SSR_BRIGHTNESS:      f32 = 1.18;
 // Reflection rays are traced for water within this distance of the camera
 // and up to this length; further water reflects only the sky.
-const REFLECTION_TRACE_DISTANCE: f32 = 128.0;
-const REFLECTION_RAY_LENGTH:     f32 = 96.0;
+const REFLECTION_TRACE_DISTANCE: f32 = 192.0;
+const REFLECTION_RAY_LENGTH:     f32 = 128.0;
 const WATER_LEVEL_OFFSET:  f32 = 0.15;
 
 
@@ -60,8 +60,12 @@ const GRID_SLOT_WORDS: u32 = 2320u;
 const GRID_BIT_WORDS: u32 = 2048u;
 const GRID_COLUMN_WORDS: u32 = 8u;
 const GRID_COLUMNS: u32 = 256u;
-const GRID_MAX_ITERATIONS: i32 = 96;
+const GRID_MAX_ITERATIONS: i32 = 128;
 const GRID_STEP_EPSILON: f32 = 1e-3;
+const SDF_DIM: i32 = 64;
+const SDF_OFFSET: u32 = 593920u;
+const SDF_HEADER_WORDS: u32 = 4u;
+const SDF_DISTANCE_OFFSET: u32 = SDF_OFFSET + SDF_HEADER_WORDS;
 
 struct ReflectionHit {
     found: bool,
@@ -83,6 +87,43 @@ fn grid_box_exit(p: vec3<f32>, origin: vec3<f32>, inv_dir: vec3<f32>, positive: 
         return vec4<f32>(t.x, select(1.0, -1.0, positive.x), 0.0, 0.0);
     }
     return vec4<f32>(t.y, 0.0, 0.0, select(1.0, -1.0, positive.z));
+}
+
+fn grid_sdf_distance(p: vec3<f32>, sdf_valid: bool, sdf_origin: vec2<i32>) -> u32 {
+    if !sdf_valid {
+        return 0u;
+    }
+    let brick = vec3<i32>(floor(p / vec3<f32>(4.0)));
+    let local = brick.xz - sdf_origin;
+    if brick.y < 0 || brick.y >= SDF_DIM || any(local < vec2<i32>(0)) || any(local >= vec2<i32>(SDF_DIM)) {
+        return 0u;
+    }
+    let index = u32(local.x) + 64u * (u32(local.y) + 64u * u32(brick.y));
+    return shadow_bits[SDF_DISTANCE_OFFSET + index];
+}
+
+fn grid_sdf_box_exit(origin: vec3<f32>, inv_dir: vec3<f32>, positive: vec3<bool>, moving: vec3<bool>,
+                     brick: vec3<i32>, radius: i32) -> vec4<f32> {
+    let radius_f = f32(radius);
+    let lower = (vec3<f32>(brick) - vec3<f32>(radius_f)) * 4.0;
+    let upper = (vec3<f32>(brick) + vec3<f32>(radius_f + 1.0)) * 4.0;
+    let bound = select(lower, upper, positive);
+    let hit = (bound - origin) * inv_dir;
+    var exit_t = 1e30;
+    var normal = vec3<f32>(0.0);
+    if moving.x && hit.x < exit_t {
+        exit_t = hit.x;
+        normal = vec3<f32>(select(1.0, -1.0, positive.x), 0.0, 0.0);
+    }
+    if moving.y && hit.y < exit_t {
+        exit_t = hit.y;
+        normal = vec3<f32>(0.0, select(1.0, -1.0, positive.y), 0.0);
+    }
+    if moving.z && hit.z < exit_t {
+        exit_t = hit.z;
+        normal = vec3<f32>(0.0, 0.0, select(1.0, -1.0, positive.z));
+    }
+    return vec4<f32>(exit_t, normal);
 }
 
 /// Lowest filled cell among `y0..=y1` of the column starting at word
@@ -118,6 +159,8 @@ fn trace_reflection(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> Reflection
     let moving = abs(dir) > vec3<f32>(1e-5);
     let inv_dir = 1.0 / select(vec3<f32>(1.0), dir, moving);
     let top = shadow_grid.params.z;
+    let sdf_valid = shadow_bits[SDF_OFFSET + 2u] != 0u;
+    let sdf_origin = vec2<i32>(bitcast<i32>(shadow_bits[SDF_OFFSET]), bitcast<i32>(shadow_bits[SDF_OFFSET + 1u]));
 
     var t = 0.0;
     var entry_normal = vec3<f32>(0.0, -1.0, 0.0);
@@ -140,6 +183,16 @@ fn trace_reflection(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> Reflection
         }
         if !slot_valid {
             return result;
+        }
+        let sdf_distance = grid_sdf_distance(p, sdf_valid, sdf_origin);
+        if sdf_distance > 0u {
+            let brick = vec3<i32>(floor(p / vec3<f32>(4.0)));
+            let radius = i32(sdf_distance) - 1;
+            let sdf_exit = grid_sdf_box_exit(origin, inv_dir, positive, moving, brick, radius);
+            t = max(t, sdf_exit.x) + GRID_STEP_EPSILON;
+            entry_normal = sdf_exit.yzw;
+            entered_side = abs(entry_normal.y) < 0.5;
+            continue;
         }
         var exit: vec4<f32>;
         let base = u32(index) * GRID_SLOT_WORDS;
@@ -197,7 +250,7 @@ fn reflection_hit_color(hit: ReflectionHit, origin: vec3<f32>, dir: vec3<f32>, s
             let scene_world = scene_h.xyz / scene_h.w;
             let hit_distance = length(pos - uniforms.camera_pos);
             let scene_distance = length(scene_world - uniforms.camera_pos);
-            if abs(scene_distance - hit_distance) < 0.75 + hit_distance * 0.02 {
+            if abs(scene_distance - hit_distance) < 1.0 + hit_distance * 0.03 {
                 return textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb;
             }
         }
@@ -542,8 +595,8 @@ fn realistic_water(in: VertexOutput) -> vec4<f32> {
         let origin = in.world_pos + normal * 0.04;
         let hit = trace_reflection(origin, refl_dir, REFLECTION_RAY_LENGTH);
         if hit.found {
-            let fade = (1.0 - smoothstep(REFLECTION_RAY_LENGTH * 0.7, REFLECTION_RAY_LENGTH, hit.t))
-                * (1.0 - smoothstep(REFLECTION_TRACE_DISTANCE * 0.75, REFLECTION_TRACE_DISTANCE, dist));
+            let fade = (1.0 - smoothstep(REFLECTION_RAY_LENGTH * 0.8, REFLECTION_RAY_LENGTH, hit.t))
+                * (1.0 - smoothstep(REFLECTION_TRACE_DISTANCE * 0.8, REFLECTION_TRACE_DISTANCE, dist));
             ssr = vec4<f32>(reflection_hit_color(hit, origin, refl_dir, sun_dir, day), fade);
         }
     }

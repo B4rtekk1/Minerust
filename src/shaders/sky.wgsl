@@ -32,6 +32,10 @@ const MIE_G:                f32 = 0.78;   // asymetria fazy Mie
 const STAR_DENSITY:         f32 = 420.0;  // gęstość pola gwiazd
 const MOON_DISK_THRESHOLD:  f32 = 0.9985; // próg kąta dysku księżyca
 const MOON_DISK_HALF_ANGLE: f32 = 0.0045; // połowa kąta dysku księżyca [rad]
+const PLANET_RADIUS:        f32 = 6400.0;
+const ATMOSPHERE_HEIGHT:    f32 = 120.0;
+const BETA_RAYLEIGH:         vec3<f32> = vec3<f32>(0.006, 0.014, 0.034);
+const BETA_MIE:              vec3<f32> = vec3<f32>(0.012, 0.012, 0.012);
 
 // ---------------------------------------------------------------------------
 // Struktury
@@ -129,51 +133,92 @@ fn mie_phase(cos_theta: f32, g: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Gradient atmosferyczny
+// Single-scattering atmosphere (spherical planet and atmosphere)
 // ---------------------------------------------------------------------------
-fn atmospheric_gradient(view_dir: vec3<f32>, ap: AtmosParams) -> vec3<f32> {
-    let h = clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0);
-
-    let zenith_day   = vec3<f32>(0.18, 0.44, 0.88);
-    let horizon_day  = vec3<f32>(0.66, 0.82, 0.98);
-    let zenith_night = vec3<f32>(0.002, 0.005, 0.015);
-    let horizon_night= vec3<f32>(0.010, 0.014, 0.034);
-    let dusk_low     = vec3<f32>(0.96, 0.40, 0.18);
-    let dusk_high    = vec3<f32>(0.24, 0.10, 0.28);
-
-    var sky = mix(horizon_day,   zenith_day,   pow(h, 0.78)) * ap.day;
-    sky    += mix(horizon_night, zenith_night, pow(h, 0.72)) * ap.night;
-    sky    += mix(dusk_low,      dusk_high,    pow(h, 1.1))  * ap.dusk * 0.52;
-
-    let horizon_band = 1.0 - smoothstep(0.0, 0.32, abs(view_dir.y));
-    sky += vec3<f32>(0.16, 0.22, 0.30) * horizon_band * (0.55 * ap.day + 0.12 * ap.dusk);
-
-    return sky;
+fn ray_sphere(origin: vec3<f32>, direction: vec3<f32>, radius: f32) -> vec2<f32> {
+    let b = dot(origin, direction);
+    let c = dot(origin, origin) - radius * radius;
+    let discriminant = b * b - c;
+    if discriminant < 0.0 {
+        return vec2<f32>(-1.0);
+    }
+    let root = sqrt(discriminant);
+    return vec2<f32>(-b - root, -b + root);
 }
 
-// ---------------------------------------------------------------------------
-// Rozpraszanie atmosferyczne
-// ---------------------------------------------------------------------------
+fn atmosphere_density(altitude: f32) -> vec2<f32> {
+    return vec2<f32>(exp(-altitude / 30.0), exp(-altitude / 11.0));
+}
+
 fn atmospheric_scatter(view_dir: vec3<f32>, ap: AtmosParams) -> vec3<f32> {
-    let cos_theta = dot(view_dir, ap.sun_dir);
-    let mu        = clamp(cos_theta, -1.0, 1.0);
-    let rayleigh  = rayleigh_phase(mu);
-    let mie       = mie_phase(mu, MIE_G);
+    let camera_altitude = max(uniforms.camera_pos.y - uniforms._water_level, 0.0);
+    let origin = vec3<f32>(0.0, PLANET_RADIUS + camera_altitude, 0.0);
+    let atmosphere_hit = ray_sphere(origin, view_dir, PLANET_RADIUS + ATMOSPHERE_HEIGHT);
+    if atmosphere_hit.y <= 0.0 {
+        return vec3<f32>(0.0);
+    }
 
-    let view_height = clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0);
-    let altitude    = pow(view_height, 0.6);
-    let horizon     = 1.0 - smoothstep(0.0, 0.42, abs(view_dir.y));
+    let ground_hit = ray_sphere(origin, view_dir, PLANET_RADIUS);
+    var view_length = atmosphere_hit.y;
+    if ground_hit.y > 0.0 && (ground_hit.x > 0.01 || dot(origin, view_dir) < 0.0) {
+        view_length = min(view_length, max(ground_hit.x, 0.0));
+    }
+    view_length = max(view_length, 0.0);
 
-    let rayleigh_color = vec3<f32>(0.14, 0.28, 0.62) * rayleigh;
-    let mie_color      = vec3<f32>(1.0, 0.72, 0.42)  * mie;
-    let dusk_tint      = mix(vec3<f32>(1.0, 0.40, 0.16), vec3<f32>(0.60, 0.28, 0.50), altitude);
+    let use_moon = ap.sun_h < -0.04;
+    let light_dir = select(ap.sun_dir, ap.moon_dir, use_moon);
+    let sun_visibility = smoothstep(-0.08, 0.02, ap.sun_h);
+    let light_energy = select(1.65 * sun_visibility, 0.12 * uniforms.moon_intensity, use_moon);
+    let cos_theta = clamp(dot(view_dir, light_dir), -1.0, 1.0);
+    let rayleigh = rayleigh_phase(cos_theta);
+    let mie = mie_phase(cos_theta, MIE_G);
+    let step_length = view_length / 10.0;
+    var optical_depth = vec2<f32>(0.0);
+    var radiance = vec3<f32>(0.0);
 
-    var scatter  = rayleigh_color * (0.45 * ap.day + 0.12 * ap.dusk);
-    scatter     += mie_color      * (0.30 * ap.day + 0.45 * ap.dusk) * horizon;
-    scatter     += dusk_tint      * ap.dusk * horizon * 0.20;
-    scatter     += vec3<f32>(0.010, 0.012, 0.020) * ap.night * altitude;
+    for (var i = 0; i < 10; i++) {
+        let distance = (f32(i) + 0.5) * step_length;
+        let point = origin + view_dir * distance;
+        let altitude = max(length(point) - PLANET_RADIUS, 0.0);
+        let density = atmosphere_density(altitude);
 
-    return scatter;
+        let light_ground_hit = ray_sphere(point, light_dir, PLANET_RADIUS);
+        var light_transmittance = vec3<f32>(0.0);
+        let light_blocked = light_ground_hit.y > 0.0
+            && (light_ground_hit.x > 0.01 || dot(point, light_dir) < 0.0);
+        if !light_blocked {
+            let light_atmosphere_hit = ray_sphere(point, light_dir, PLANET_RADIUS + ATMOSPHERE_HEIGHT);
+            let light_step = max(light_atmosphere_hit.y, 0.0) / 3.0;
+            var light_depth = vec2<f32>(0.0);
+            for (var j = 0; j < 3; j++) {
+                let light_point = point + light_dir * ((f32(j) + 0.5) * light_step);
+                light_depth += atmosphere_density(max(length(light_point) - PLANET_RADIUS, 0.0)) * light_step;
+            }
+            light_transmittance = exp(-(BETA_RAYLEIGH * light_depth.x + BETA_MIE * light_depth.y));
+        }
+
+        let extinction = exp(-(BETA_RAYLEIGH * optical_depth.x + BETA_MIE * optical_depth.y));
+        let scattered = BETA_RAYLEIGH * (density.x * rayleigh)
+            + BETA_MIE * (density.y * mie);
+        radiance += extinction * light_transmittance * scattered * step_length * light_energy;
+        optical_depth += density * step_length;
+    }
+
+    // Exposure and a soft filmic curve keep the sunlit atmosphere in the
+    // display range without flattening its blue-to-warm colour separation.
+    let exposure = select(1.15, 1.0, use_moon);
+    return vec3<f32>(1.0) - exp(-radiance * exposure);
+}
+
+fn horizon_fog_color(view_dir: vec3<f32>, ap: AtmosParams) -> vec3<f32> {
+    let color = vec3<f32>(0.70, 0.84, 0.98) * ap.day
+        + vec3<f32>(0.010, 0.014, 0.034) * ap.night
+        + vec3<f32>(0.96, 0.52, 0.30) * ap.dusk * 0.55;
+    let flat_sun = normalize(vec3<f32>(ap.sun_dir.x, 0.0, ap.sun_dir.z) + vec3<f32>(1e-4));
+    let flat_view = normalize(vec3<f32>(view_dir.x, 0.0, view_dir.z) + vec3<f32>(1e-4));
+    let forward = max(dot(flat_view, flat_sun), 0.0);
+    return color + vec3<f32>(1.0, 0.72, 0.42) * pow(forward, 6.0)
+        * (0.10 * ap.day + 0.35 * ap.dusk);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,11 +274,14 @@ fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
     let drift = vec2<f32>(time * 0.008, time * 0.003);
     let n       = fbm(p + drift * 0.18);
     let n2      = fbm(p * 1.8 - drift * 0.8);
+    let sun_offset = vec2<f32>(ap.sun_dir.x, ap.sun_dir.y) * 0.38;
+    let sunward_noise = fbm(p * 1.8 - drift * 0.8 + sun_offset);
 
     let rain = clamp(uniforms.rain_factor, 0.0, 1.0);
     let cov_thresh = mix(0.72, 0.48, rain);
     let coverage = smoothstep(cov_thresh, cov_thresh + 0.28, n * 0.70 + n2 * 0.30);
     let wisps    = smoothstep(0.52, 0.78, fbm(p * 2.9 + drift * 1.3));
+    let shadowing = smoothstep(0.42, 0.72, n2 - max(sunward_noise - n2, 0.0) * 0.9);
     let layer    = coverage * band * band;
     if layer <= 0.001 { return vec3<f32>(0.0); }
 
@@ -244,14 +292,19 @@ fn cloud_layer(view_dir: vec3<f32>, ap: AtmosParams, time: f32) -> vec3<f32> {
     let cloud_night  = vec3<f32>(0.06, 0.08, 0.14);
     let cloud_storm  = vec3<f32>(0.22, 0.26, 0.31);
     let dusk_tint    = mix(vec3<f32>(1.0, 0.64, 0.42), vec3<f32>(0.78, 0.36, 0.48), lat);
+    let silver_edge  = smoothstep(0.52, 0.72, n2) * (1.0 - coverage * 0.45);
+    let silver_lining = vec3<f32>(1.0, 0.88, 0.68) * silver_edge
+        * pow(max(dot(view_dir, ap.sun_dir), 0.0), 5.0) * (0.25 + 0.55 * ap.day + 0.25 * ap.dusk);
 
     var tint  = mix(cloud_dim, cloud_day, ap.day);
     tint      = mix(tint, cloud_night, ap.night * 0.85);
     tint      = mix(tint, dusk_tint,  ap.dusk * 0.75);
     tint      = mix(tint, cloud_storm, rain * 0.88);
     tint     += horizon_warm * (1.0 - smoothstep(0.0, 0.20, abs(view_dir.y))) * ap.dusk * 0.16;
+    tint      = mix(tint * 0.58, tint, shadowing);
+    tint     += dusk_tint * (1.0 - shadowing) * ap.dusk * 0.20;
 
-    return tint * layer * cloud_vis
+    return (tint + silver_lining) * layer * cloud_vis
         * (0.24 + 0.34 * ap.day + sun_light * 0.20) * mix(1.0, 1.32, rain)
         * (0.82 + wisps * 0.18);
 }
@@ -285,6 +338,19 @@ fn star_field(view_dir: vec3<f32>, time: f32, night_factor: f32) -> vec3<f32> {
     let tint      = mix(warm_star, cool_star, hash11(h * 91.7));
 
     return tint * brightness * 1.25;
+}
+
+fn milky_way(view_dir: vec3<f32>, night_factor: f32) -> vec3<f32> {
+    if night_factor < 0.01 { return vec3<f32>(0.0); }
+
+    let galactic_pole = normalize(vec3<f32>(-0.31, 0.86, 0.40));
+    let band = exp(-abs(dot(view_dir, galactic_pole)) * 20.0);
+    let longitude = atan2(view_dir.z, view_dir.x) / TAU + 0.5;
+    let latitude = atan2(view_dir.y, length(view_dir.xz)) / PI + 0.5;
+    let dust = fbm(vec2<f32>(longitude * 32.0, latitude * 18.0));
+    let structure = smoothstep(0.28, 0.74, dust) * (0.55 + 0.45 * (1.0 - dust));
+    let horizon = smoothstep(-0.02, 0.14, view_dir.y);
+    return vec3<f32>(0.30, 0.39, 0.62) * band * structure * horizon * night_factor * 0.20;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,18 +547,21 @@ fn fs_sky(in: VertexOutput) -> @location(0) vec4<f32> {
     let celestial_visibility = open_sky * mix(1.0, 0.08, rain);
     let night_sky = ap.night * celestial_visibility;
 
-    var sky = atmospheric_gradient(view_dir, ap);
-    sky    += atmospheric_scatter(view_dir, ap);
-    sky    += horizon_haze(view_dir, ap);
+    var sky = atmospheric_scatter(view_dir, ap);
+    let horizon_airglow = exp(-abs(view_dir.y) * 16.0) * ap.night * 0.035;
+    sky += vec3<f32>(0.12, 0.18, 0.32) * horizon_airglow;
     // Overcast weather keeps a brighter horizon and a darker zenith, matching
     // the terrain fog while retaining enough contrast to read cloud layers.
     let overcast_h = pow(clamp(view_dir.y * 0.5 + 0.5, 0.0, 1.0), 0.72);
     let overcast = mix(vec3<f32>(0.43, 0.47, 0.51), vec3<f32>(0.15, 0.18, 0.23), overcast_h);
     sky = mix(sky, overcast, rain * 0.74);
+    let horizon_match = 1.0 - smoothstep(0.0, 0.045, abs(view_dir.y));
+    sky = mix(sky, horizon_fog_color(view_dir, ap), horizon_match * 0.82);
 
     sky    += sun_glow(view_dir, ap) * celestial_visibility;
     sky    += cloud_layer(view_dir, ap, uniforms.time) * open_sky;
     sky    += star_field(view_dir, uniforms.time, night_sky);
+    sky    += milky_way(view_dir, night_sky);
     sky    += shooting_stars(view_dir, uniforms.time, night_sky);
     sky    += aurora(view_dir, uniforms.time, night_sky);
     sky    += moon_disk(view_dir, ap) * celestial_visibility;
@@ -504,7 +573,7 @@ fn fs_sky(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     sky *= vec3<f32>(0.98, 0.99, 1.02);
-    sky  = clamp(sky, vec3<f32>(0.0), vec3<f32>(1.8));
+    sky  = clamp(sky, vec3<f32>(0.0), vec3<f32>(1.0));
 
     return vec4<f32>(sky, 1.0);
 }

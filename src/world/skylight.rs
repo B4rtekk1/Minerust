@@ -31,6 +31,7 @@ pub const MAX_SKY_LIGHT: u8 = 15;
 pub const SPREAD_COST: u8 = 2;
 /// Light lost per block when block light spreads through the world.
 pub const BLOCK_SPREAD_COST: u8 = 2;
+const BLOCK_LIGHT_RADIUS: usize = (MAX_SKY_LIGHT as usize / BLOCK_SPREAD_COST as usize) + 1;
 
 /// How a cell transports light.
 pub const MEDIUM_OPAQUE: u8 = 0;
@@ -139,41 +140,167 @@ pub fn solve(media: &[u8], sky_height: &[i16], region_bottom: i32) -> Vec<u8> {
 
 /// Solves block light from emitted levels over one padded region.
 ///
-/// Opaque source cells are allowed to emit into neighbouring open cells, but
-/// light cannot enter or pass through other opaque cells.
+/// Opaque source cells emit through each exposed face, and each emission is
+/// restricted to the half-space in front of that face. Light cannot enter or
+/// pass through other opaque cells.
 pub fn solve_block(media: &[u8], sources: &[u8]) -> Vec<u8> {
     debug_assert_eq!(media.len(), LIGHT_LEN);
     debug_assert_eq!(sources.len(), LIGHT_LEN);
     let mut light = vec![0u8; LIGHT_LEN];
-    let mut queue = Vec::new();
     for (index, &source) in sources.iter().enumerate() {
         if source > 0 {
-            light[index] = source.min(MAX_SKY_LIGHT);
-            queue.push(index as u32);
+            light[index] = light[index].max(source.min(MAX_SKY_LIGHT));
         }
+    }
+
+    let directions = [
+        (-1, 0, 0),
+        (1, 0, 0),
+        (0, -1, 0),
+        (0, 1, 0),
+        (0, 0, -1),
+        (0, 0, 1),
+    ];
+    for (index, &source) in sources.iter().enumerate() {
+        if source == 0 {
+            continue;
+        }
+        let source_position = position(index);
+        for direction in directions {
+            spread_block_face(
+                media,
+                &mut light,
+                source_position,
+                direction,
+                source.min(MAX_SKY_LIGHT),
+            );
+        }
+    }
+    light
+}
+
+fn spread_block_face(
+    media: &[u8],
+    light: &mut [u8],
+    source: (usize, usize, usize),
+    direction: (i32, i32, i32),
+    source_level: u8,
+) {
+    let Some((start_x, start_y, start_z)) = offset_position(source, direction) else {
+        return;
+    };
+    let start = light_index(start_x, start_y, start_z);
+    if media[start] == MEDIUM_OPAQUE {
+        return;
+    }
+
+    let first_level = source_level.saturating_sub(BLOCK_SPREAD_COST);
+    if first_level == 0 {
+        return;
+    }
+
+    let local_side = BLOCK_LIGHT_RADIUS * 2 + 1;
+    let mut local_light = vec![0u8; local_side * local_side * local_side];
+    let mut queue = Vec::new();
+    let mut touched = Vec::new();
+    let start_local = block_local_index((start_x, start_y, start_z), source, local_side);
+    local_light[start_local] = first_level;
+    touched.push((start, start_local));
+    if first_level > BLOCK_SPREAD_COST {
+        queue.push((start, first_level));
     }
 
     let mut head = 0;
     while head < queue.len() {
-        let index = queue[head] as usize;
+        let (index, level) = queue[head];
         head += 1;
-        let level = light[index];
         if level <= BLOCK_SPREAD_COST {
             continue;
         }
+        let next = level.saturating_sub(BLOCK_SPREAD_COST);
         let (x, y, z) = position(index);
         for neighbour in neighbours(x, y, z) {
-            if media[neighbour] == MEDIUM_OPAQUE {
+            let neighbour_position = position(neighbour);
+            if !in_face_half_space(neighbour_position, source, direction)
+                || !within_block_radius(neighbour_position, source)
+                || media[neighbour] == MEDIUM_OPAQUE
+            {
                 continue;
             }
-            let next = level.saturating_sub(BLOCK_SPREAD_COST);
-            if next > light[neighbour] {
-                light[neighbour] = next;
-                queue.push(neighbour as u32);
+
+            let local = block_local_index(neighbour_position, source, local_side);
+            if next > local_light[local] {
+                if local_light[local] == 0 {
+                    touched.push((neighbour, local));
+                }
+                local_light[local] = next;
+                if next > BLOCK_SPREAD_COST {
+                    queue.push((neighbour, next));
+                }
             }
         }
     }
-    light
+
+    for (index, local) in touched {
+        light[index] = light[index].max(local_light[local]);
+    }
+}
+
+#[inline]
+fn offset_position(
+    (x, y, z): (usize, usize, usize),
+    (dx, dy, dz): (i32, i32, i32),
+) -> Option<(usize, usize, usize)> {
+    let (x, y, z) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+    (x >= 0
+        && x < LIGHT_SIZE as i32
+        && y >= 0
+        && y < LIGHT_HEIGHT as i32
+        && z >= 0
+        && z < LIGHT_SIZE as i32)
+        .then_some((x as usize, y as usize, z as usize))
+}
+
+#[inline]
+fn in_face_half_space(
+    (x, y, z): (usize, usize, usize),
+    (source_x, source_y, source_z): (usize, usize, usize),
+    direction: (i32, i32, i32),
+) -> bool {
+    match direction {
+        (-1, 0, 0) => x < source_x,
+        (1, 0, 0) => x > source_x,
+        (0, -1, 0) => y < source_y,
+        (0, 1, 0) => y > source_y,
+        (0, 0, -1) => z < source_z,
+        (0, 0, 1) => z > source_z,
+        _ => false,
+    }
+}
+
+#[inline]
+fn within_block_radius(
+    (x, y, z): (usize, usize, usize),
+    (source_x, source_y, source_z): (usize, usize, usize),
+) -> bool {
+    x.abs_diff(source_x) <= BLOCK_LIGHT_RADIUS
+        && y.abs_diff(source_y) <= BLOCK_LIGHT_RADIUS
+        && z.abs_diff(source_z) <= BLOCK_LIGHT_RADIUS
+}
+
+#[inline]
+fn block_local_index(
+    (x, y, z): (usize, usize, usize),
+    (source_x, source_y, source_z): (usize, usize, usize),
+    local_side: usize,
+) -> usize {
+    let radius = BLOCK_LIGHT_RADIUS as isize;
+    let (x, y, z) = (
+        x as isize - source_x as isize + radius,
+        y as isize - source_y as isize + radius,
+        z as isize - source_z as isize + radius,
+    );
+    (x as usize * local_side + y as usize) * local_side + z as usize
 }
 
 #[inline]
@@ -302,5 +429,38 @@ mod tests {
         assert_eq!(light[light_index(9, 8, 16)], 1);
         assert_eq!(light[light_index(8, 8, 16)], 0);
         assert_eq!(light[light_index(21, 8, 16)], 0);
+    }
+
+    #[test]
+    fn enclosed_block_light_source_lights_nothing() {
+        let source = light_index(16, 8, 16);
+        let media = vec![MEDIUM_OPAQUE; LIGHT_LEN];
+        let mut sources = vec![0u8; LIGHT_LEN];
+        sources[source] = MAX_SKY_LIGHT;
+
+        let light = solve_block(&media, &sources);
+        for (index, &level) in light.iter().enumerate() {
+            assert_eq!(level, if index == source { MAX_SKY_LIGHT } else { 0 });
+        }
+    }
+
+    #[test]
+    fn block_light_only_leaves_through_exposed_faces() {
+        let source = light_index(16, 8, 16);
+        let media = region(|x, y, z| {
+            if y <= 8 && (10..=20).contains(&x) && (10..=20).contains(&z) {
+                MEDIUM_OPAQUE
+            } else {
+                MEDIUM_AIR
+            }
+        });
+        let mut sources = vec![0u8; LIGHT_LEN];
+        sources[source] = MAX_SKY_LIGHT;
+
+        let light = solve_block(&media, &sources);
+        assert_eq!(light[light_index(16, 9, 16)], 13);
+        assert_eq!(light[light_index(17, 9, 16)], 11);
+        assert_eq!(light[light_index(21, 8, 16)], 0);
+        assert_eq!(light[light_index(21, 7, 16)], 0);
     }
 }

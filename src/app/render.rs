@@ -13,7 +13,10 @@ use minerust::{
 
 use crate::logger::{LogLevel, log};
 use crate::multiplayer::player::queue_remote_players_labels;
-use crate::ui::menu::{GameState, MenuField, MenuHit, MenuLayout};
+use crate::ui::menu::{
+    GameState, MenuAction, MenuContext, MenuField, MenuLayout, MenuScreen, MenuItemKind,
+    build_menu_geometry,
+};
 use super::graphics::WaterQuality;
 
 use super::init::frustum_planes_to_array;
@@ -43,72 +46,6 @@ fn visible_outline_faces(world: &World, bx: i32, by: i32, bz: i32) -> [bool; 6] 
         block.should_render_face_against(world.get_block(bx, by, bz + 1)),
         block.should_render_face_against(world.get_block(bx, by, bz - 1)),
     ]
-}
-
-fn append_ui_quad(
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-    color: [f32; 4],
-) {
-    let base = vertices.len() as u32;
-    let normal = Vertex::pack_normal([0.0, 0.0, 1.0]);
-
-    for (i, (x, y)) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-        .into_iter()
-        .enumerate()
-    {
-        vertices.push(Vertex {
-            position: [x, y, 0.0],
-            packed: Vertex::pack_ui(normal, color, 0, i as u8),
-        });
-    }
-
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-}
-
-fn build_menu_input_box(
-    rect: crate::ui::menu::Rect,
-    screen_width: f32,
-    screen_height: f32,
-    focused: bool,
-    selected: bool,
-) -> (Vec<Vertex>, Vec<u32>) {
-    let x0 = rect.x / screen_width * 2.0 - 1.0;
-    let x1 = (rect.x + rect.w) / screen_width * 2.0 - 1.0;
-    let y0 = 1.0 - (rect.y + rect.h) / screen_height * 2.0;
-    let y1 = 1.0 - rect.y / screen_height * 2.0;
-
-    let border_x = 4.0 / screen_width;
-    let border_y = 4.0 / screen_height;
-    let border_color = if focused {
-        [0.78, 0.92, 1.0, 0.95]
-    } else {
-        [0.38, 0.50, 0.58, 0.85]
-    };
-    let inner_color = if selected {
-        [0.20, 0.38, 0.60, 0.86]
-    } else {
-        [0.10, 0.14, 0.18, 0.78]
-    };
-
-    let mut vertices = Vec::with_capacity(8);
-    let mut indices = Vec::with_capacity(12);
-    append_ui_quad(&mut vertices, &mut indices, x0, y0, x1, y1, border_color);
-    append_ui_quad(
-        &mut vertices,
-        &mut indices,
-        x0 + border_x,
-        y0 + border_y,
-        x1 - border_x,
-        y1 - border_y,
-        inner_color,
-    );
-
-    (vertices, indices)
 }
 
 // Keep all HUD query slots current even when a GPU stage is disabled.
@@ -413,6 +350,7 @@ impl State {
                 self.graphics.water == WaterQuality::Realistic,
             );
             drop(world);
+            self.shadow_grid.encode_distance_field(&self.queue, &mut encoder);
         }
         self.frame_profile.shadow_grid_ms = section_start.elapsed().as_secs_f32() * 1000.0;
 
@@ -677,9 +615,9 @@ impl State {
 
         self.copy_single_sample_color(&mut encoder, &self.ssr_color_view);
 
-        if render_world_scene && self.graphics.water == WaterQuality::Realistic {
+        if render_world_scene {
             let mut ssr_resolve_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("SSR Hi-Z Resolve Pass"),
+                label: Some("Scene Depth Resolve Pass"),
                 timestamp_writes: None,
             });
             ssr_resolve_pass.set_pipeline(&self.ssr_hiz_resolve_pipeline);
@@ -689,10 +627,24 @@ impl State {
                 self.ssr_hiz_size[1].div_ceil(16),
                 1,
             );
-            // Water reflections are ray-marched through the voxel grid and
-            // only read this full-resolution depth to reuse the lit scene
-            // for visible hits, so no depth mip pyramid is built.
+            // Water reflections reuse this depth for visible hits and the
+            // god-rays pass reconstructs world positions from it.
             drop(ssr_resolve_pass);
+
+            // Quarter-resolution ray-marched light shafts, upsampled and
+            // added by the composite pass.
+            let mut god_rays_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("God Rays Pass"),
+                timestamp_writes: None,
+            });
+            god_rays_pass.set_pipeline(&self.god_rays_pipeline);
+            god_rays_pass.set_bind_group(0, &self.god_rays_bind_group, &[]);
+            god_rays_pass.dispatch_workgroups(
+                self.god_rays_size[0].div_ceil(8),
+                self.god_rays_size[1].div_ceil(8),
+                1,
+            );
+            drop(god_rays_pass);
         }
 
         // ── Depth resolve + Hi-Z generation ───────────────────────────────── //
@@ -944,36 +896,33 @@ impl State {
             ui_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
 
             if menu_visible {
-                if self.menu_state.server_address_input_visible {
-                    let layout = MenuLayout::new(self.config.width, self.config.height);
-                    let focused = self.menu_state.selected_field == MenuField::ServerAddress;
-                    let selected = focused && self.menu_state.selected_all;
-                    let (vertices, indices) = build_menu_input_box(
-                        layout.server_address_input,
-                        self.config.width as f32,
-                        self.config.height as f32,
-                        focused,
-                        selected,
-                    );
-                    let input_vb =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Menu Server Address Input VB"),
-                                contents: bytemuck::cast_slice(&vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
-                    let input_ib =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Menu Server Address Input IB"),
-                                contents: bytemuck::cast_slice(&indices),
-                                usage: wgpu::BufferUsages::INDEX,
-                            });
-
-                    ui_pass.set_vertex_buffer(0, input_vb.slice(..));
-                    ui_pass.set_index_buffer(input_ib.slice(..), wgpu::IndexFormat::Uint32);
-                    ui_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
-                }
+                let context = MenuContext {
+                    has_world: self.has_entered_world,
+                    save_available: std::path::Path::new(minerust::DEFAULT_WORLD_FILE).exists(),
+                };
+                let layout = MenuLayout::new(self.config.width, self.config.height, self.menu_state.screen, context);
+                let hovered = self.cursor_position.and_then(|(x, y)| layout.hit_test(x, y));
+                let selected = self.menu_state.selected_action(&layout);
+                let (vertices, indices) = build_menu_geometry(
+                    self.config.width,
+                    self.config.height,
+                    &layout,
+                    hovered.or(selected),
+                    self.menu_state.selected_field,
+                );
+                let menu_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Menu Geometry VB"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let menu_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Menu Geometry IB"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                ui_pass.set_vertex_buffer(0, menu_vb.slice(..));
+                ui_pass.set_index_buffer(menu_ib.slice(..), wgpu::IndexFormat::Uint32);
+                ui_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
             } else {
                 // --- Inventory overlay ---
                 if self.inventory_open {
@@ -1368,114 +1317,66 @@ impl State {
             }
 
             if menu_visible {
-                let layout = MenuLayout::new(self.config.width, self.config.height);
-                let hovered = self
-                    .cursor_position
-                    .and_then(|(x, y)| layout.hit_test(x, y));
-                let new_world_hovered = matches!(hovered, Some(MenuHit::NewWorld));
-                let multiplayer_hovered = matches!(hovered, Some(MenuHit::Multiplayer));
-                let render_mode_hovered = matches!(hovered, Some(MenuHit::RenderMode));
-                let water_hovered = matches!(hovered, Some(MenuHit::WaterQuality));
-                let aa_hovered = matches!(hovered, Some(MenuHit::AntiAliasing));
-                let hover_text_color = Color::rgb(255, 255, 255);
-                let menu_text_top_offset = 3.0;
-                let menu_text_bounds = TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
+                let context = MenuContext {
+                    has_world: self.has_entered_world,
+                    save_available: std::path::Path::new(minerust::DEFAULT_WORLD_FILE).exists(),
                 };
-                let new_world_color = if new_world_hovered {
-                    hover_text_color
-                } else {
-                    Color::rgb(238, 241, 236)
+                let no_save_message = !context.save_available
+                    && matches!(self.menu_state.screen, MenuScreen::Main | MenuScreen::Pause);
+                let layout = MenuLayout::new(self.config.width, self.config.height, self.menu_state.screen, context);
+                let hovered = self.cursor_position.and_then(|(x, y)| layout.hit_test(x, y));
+                let selected = self.menu_state.selected_action(&layout);
+                let active = hovered.or(selected);
+                let bounds = TextBounds {
+                    left: layout.panel.x as i32,
+                    top: layout.panel.y as i32,
+                    right: (layout.panel.x + layout.panel.w) as i32,
+                    bottom: (layout.panel.y + layout.panel.h) as i32,
                 };
-                let multiplayer_color = if multiplayer_hovered {
-                    hover_text_color
-                } else {
-                    Color::rgb(211, 226, 238)
-                };
-                let render_mode_color = if render_mode_hovered {
-                    hover_text_color
-                } else {
-                    Color::rgb(184, 205, 220)
-                };
-
+                let scale = layout.scale;
+                let title_width = self.menu_title_buffer.layout_runs().next().map(|run| run.line_w).unwrap_or(0.0) * scale;
                 text_areas.push(TextArea {
-                    buffer: &self.menu_aa_button_buffer,
-                    left: layout.anti_aliasing_text.x,
-                    top: layout.anti_aliasing_text.y + menu_text_top_offset,
-                    scale: 1.0,
-                    bounds: menu_text_bounds,
-                    default_color: if aa_hovered {
-                        hover_text_color
-                    } else {
-                        Color::rgb(184, 205, 220)
-                    },
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_water_button_buffer,
-                    left: layout.water_text.x,
-                    top: layout.water_text.y + menu_text_top_offset,
-                    scale: 1.0,
-                    bounds: menu_text_bounds,
-                    default_color: if water_hovered {
-                        hover_text_color
-                    } else {
-                        Color::rgb(184, 205, 220)
-                    },
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_render_mode_button_buffer,
-                    left: layout.render_mode_text.x,
-                    top: layout.render_mode_text.y + menu_text_top_offset,
-                    scale: 1.0,
-                    bounds: menu_text_bounds,
-                    default_color: render_mode_color,
+                    buffer: &self.menu_title_buffer,
+                    left: layout.title.x + (layout.title.w - title_width) * 0.5,
+                    top: layout.title.y + (layout.title.h - 50.0 * scale) * 0.5,
+                    scale,
+                    bounds,
+                    default_color: Color::rgb(238, 246, 248),
                     custom_glyphs: &[],
                 });
 
-                text_areas.push(TextArea {
-                    buffer: &self.menu_singleplayer_button_buffer,
-                    left: layout.new_world_text.x,
-                    top: layout.new_world_text.y + menu_text_top_offset,
-                    scale: 1.0,
-                    bounds: menu_text_bounds,
-                    default_color: new_world_color,
-                    custom_glyphs: &[],
-                });
-                text_areas.push(TextArea {
-                    buffer: &self.menu_connect_button_buffer,
-                    left: layout.multiplayer_text.x,
-                    top: layout.multiplayer_text.y + menu_text_top_offset,
-                    scale: 1.0,
-                    bounds: menu_text_bounds,
-                    default_color: multiplayer_color,
-                    custom_glyphs: &[],
-                });
-                if self.menu_state.server_address_input_visible {
-                    let input = layout.server_address_input;
-                    let input_focused = self.menu_state.selected_field == MenuField::ServerAddress;
-                    let input_text_color = if input_focused {
+                for (index, item) in layout.items.iter().enumerate() {
+                    let Some(buffer) = self.menu_text_buffers.get(index) else { continue; };
+                    let line_width = buffer.layout_runs().next().map(|run| run.line_w).unwrap_or(0.0) * scale;
+                    let color = if !item.enabled {
+                        Color::rgb(115, 124, 132)
+                    } else if active == item.action || (item.kind == MenuItemKind::TextField && self.menu_state.is_editing()) {
                         Color::rgb(255, 255, 255)
+                    } else if item.kind == MenuItemKind::Text {
+                        Color::rgb(176, 195, 205)
                     } else {
-                        Color::rgb(215, 230, 238)
+                        Color::rgb(211, 224, 230)
                     };
-
                     text_areas.push(TextArea {
-                        buffer: &self.menu_server_address_input_buffer,
-                        left: input.x + 12.0,
-                        top: input.y + 8.0,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: input.x as i32,
-                            top: input.y as i32,
-                            right: (input.x + input.w) as i32,
-                            bottom: (input.y + input.h) as i32,
-                        },
-                        default_color: input_text_color,
+                        buffer,
+                        left: item.rect.x + (item.rect.w - line_width) * 0.5,
+                        top: item.rect.y + (item.rect.h - 32.0 * scale) * 0.5,
+                        scale,
+                        bounds,
+                        default_color: color,
+                        custom_glyphs: &[],
+                    });
+                }
+                if (self.menu_state.error_message.is_some() || self.menu_state.status_message.is_some() || no_save_message)
+                    && let Some(buffer) = self.menu_text_buffers.get(layout.items.len())
+                {
+                    text_areas.push(TextArea {
+                        buffer,
+                        left: layout.message.x,
+                        top: layout.message.y,
+                        scale: scale * 0.82,
+                        bounds,
+                        default_color: if self.menu_state.error_message.is_some() || no_save_message { Color::rgb(255, 150, 128) } else { Color::rgb(145, 210, 180) },
                         custom_glyphs: &[],
                     });
                 }
@@ -1683,102 +1584,64 @@ impl State {
     }
 
     pub fn prepare_menu_text(&mut self) {
-        let layout = MenuLayout::new(self.config.width, self.config.height);
-
-        self.menu_connect_button_buffer.set_text(
-            "MULTIPLAYER",
-            &self.ui_font.attrs(),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_connect_button_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.menu_connect_button_buffer.set_size(
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_singleplayer_button_buffer.set_text(
-            "NEW WORLD",
-            &self.ui_font.attrs(),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_singleplayer_button_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.menu_singleplayer_button_buffer.set_size(
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        let render_mode_text = match self.config.present_mode {
-            wgpu::PresentMode::Fifo => "RENDER MODE: VSYNC",
-            _ => "RENDER MODE: AUTO",
+        let context = MenuContext {
+            has_world: self.has_entered_world,
+            save_available: std::path::Path::new(minerust::DEFAULT_WORLD_FILE).exists(),
         };
-        self.menu_render_mode_button_buffer.set_text(
-            render_mode_text,
-            &self.ui_font.attrs(),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_render_mode_button_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.menu_render_mode_button_buffer.set_size(
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        self.menu_water_button_buffer.set_text(
-            self.graphics.water.menu_label(),
-            &self.ui_font.attrs(),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_water_button_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.menu_water_button_buffer.set_size(
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-
-        let aa = self.graphics.anti_aliasing;
-        let aa_text = if aa.sample_count() == self.msaa_samples {
-            aa.menu_label().to_string()
-        } else {
-            format!("{} (RESTART)", aa.menu_label())
+        let layout = MenuLayout::new(self.config.width, self.config.height, self.menu_state.screen, context);
+        let scale = layout.scale;
+        let title = match self.menu_state.screen {
+            MenuScreen::Main => "MINERUST",
+            MenuScreen::Pause => "PAUSED",
+            MenuScreen::Multiplayer => "MULTIPLAYER",
+            MenuScreen::Settings => "SETTINGS",
+            MenuScreen::Controls => "CONTROLS",
         };
-        self.menu_aa_button_buffer.set_text(
-            &aa_text,
-            &self.ui_font.attrs(),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_aa_button_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.menu_aa_button_buffer.set_size(
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
+        self.menu_title_buffer.set_text(title, &self.ui_font.attrs(), Shaping::Advanced, None);
+        self.menu_title_buffer.set_size(Some(layout.title.w / scale), Some(layout.title.h / scale));
+        self.menu_title_buffer.shape_until_scroll(&mut self.font_system, false);
 
-        let show_cursor = self.menu_state.selected_field == MenuField::ServerAddress
-            && !self.menu_state.selected_all;
-        let server_address_text = if show_cursor {
-            format!("{}_", self.menu_state.server_address)
-        } else {
-            self.menu_state.server_address.clone()
-        };
-        self.menu_server_address_input_buffer.set_text(
-            &server_address_text,
-            &self.ui_font.attrs(),
-            Shaping::Advanced,
-            None,
-        );
-        self.menu_server_address_input_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.menu_server_address_input_buffer.set_size(
-            Some((layout.server_address_input.w - 24.0).max(32.0)),
-            Some(layout.server_address_input.h),
-        );
+        for (buffer, item) in self.menu_text_buffers.iter_mut().zip(&layout.items) {
+            let text = match item.action {
+                Some(MenuAction::FocusServerAddress) => {
+                    let cursor = self.menu_state.selected_field == MenuField::ServerAddress && !self.menu_state.selected_all;
+                    format!("SERVER ADDRESS   {}{}", self.menu_state.server_address, if cursor { "_" } else { "" })
+                }
+                Some(MenuAction::FocusUsername) => {
+                    let cursor = self.menu_state.selected_field == MenuField::Username && !self.menu_state.selected_all;
+                    format!("USERNAME   {}{}", self.menu_state.username, if cursor { "_" } else { "" })
+                }
+                Some(MenuAction::ToggleRenderMode) => match self.config.present_mode {
+                    wgpu::PresentMode::Fifo => "RENDER MODE: VSYNC".to_string(),
+                    _ => "RENDER MODE: AUTO".to_string(),
+                },
+                Some(MenuAction::ToggleWater) => self.graphics.water.menu_label().to_string(),
+                Some(MenuAction::CycleAntiAliasing) => {
+                    let aa = self.graphics.anti_aliasing;
+                    if aa.sample_count() == self.msaa_samples { aa.menu_label().to_string() }
+                    else { format!("{} (RESTART)", aa.menu_label()) }
+                }
+                Some(MenuAction::ToggleShadows) => format!("SUN SHADOWS: {}", if self.graphics.shadows { "ON" } else { "OFF" }),
+                _ => item.label.clone(),
+            };
+            buffer.set_text(&text, &self.ui_font.attrs(), Shaping::Advanced, None);
+            buffer.set_size(Some(item.rect.w / scale), Some(item.rect.h / scale));
+            buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        let message = self.menu_state.error_message.as_deref()
+            .or(self.menu_state.status_message.as_deref())
+            .or_else(|| {
+                (!context.save_available && matches!(self.menu_state.screen, MenuScreen::Main | MenuScreen::Pause))
+                    .then_some("No saved world found")
+            });
+        if let Some(message) = message {
+            if let Some(buffer) = self.menu_text_buffers.get_mut(layout.items.len()) {
+                buffer.set_text(message, &self.ui_font.attrs(), Shaping::Advanced, None);
+                buffer.set_size(Some(layout.message.w / scale), Some(layout.message.h / scale));
+                buffer.shape_until_scroll(&mut self.font_system, false);
+            }
+        }
     }
 
     /// Menu blur is applied in the composite shader; menu labels are drawn in the text pass.

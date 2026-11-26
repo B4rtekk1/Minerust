@@ -475,6 +475,13 @@ pub struct State {
     pub ssr_hiz_mips: Vec<wgpu::TextureView>,
     /// Full-resolution dimensions of the SSR Hi-Z base level.
     pub ssr_hiz_size: [u32; 2],
+    /// Quarter-resolution ray-marched god rays read by the composite pass.
+    #[allow(dead_code)]
+    pub god_rays_texture: wgpu::Texture,
+    pub god_rays_view: wgpu::TextureView,
+    pub god_rays_size: [u32; 2],
+    pub god_rays_pipeline: wgpu::ComputePipeline,
+    pub god_rays_bind_group: wgpu::BindGroup,
     /// Sampler used when reading SSR textures in the water and composite passes.
     pub ssr_sampler: wgpu::Sampler,
     /// The 16-layer `Texture2DArray` holding all block textures.
@@ -698,19 +705,9 @@ pub struct State {
     /// Enables the Hi-Z test in GPU culling; F4 toggles this for diagnostics.
     pub occlusion_culling_enabled: bool,
 
-    // Main-menu text buffers.
-    /// "multiplayer" menu label.
-    pub menu_connect_button_buffer: glyphon::Buffer,
-    /// "new world" menu label.
-    pub menu_singleplayer_button_buffer: glyphon::Buffer,
-    /// Render presentation mode toggle shown in the main menu.
-    pub menu_render_mode_button_buffer: glyphon::Buffer,
-    /// Water quality toggle shown in the main menu.
-    pub menu_water_button_buffer: glyphon::Buffer,
-    /// Anti-aliasing toggle shown in the main menu.
-    pub menu_aa_button_buffer: glyphon::Buffer,
-    /// Server-address input text shown after clicking "multiplayer".
-    pub menu_server_address_input_buffer: glyphon::Buffer,
+    // Menu title and one text buffer per visible menu item.
+    pub menu_title_buffer: glyphon::Buffer,
+    pub menu_text_buffers: Vec<glyphon::Buffer>,
 
     // In-game HUD text buffers.
     /// Item name label shown above the hotbar when the slot changes.
@@ -846,6 +843,54 @@ mod depth_resolve_tests {
     #[test]
     fn water_shader_parses_and_validates() {
         let source = include_str!("../shaders/water.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{e:?}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn sky_shader_parses_and_validates() {
+        let source = include_str!("../shaders/sky.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{e:?}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn god_rays_shader_parses_and_validates() {
+        let source = include_str!("../shaders/god_rays.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{e:?}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn voxel_sdf_shader_parses_and_validates() {
+        let source = include_str!("../shaders/voxel_sdf.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{e:?}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn composite_shader_parses_and_validates() {
+        let source = include_str!("../shaders/composite.wgsl");
         let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{e:?}"));
         wgpu::naga::valid::Validator::new(
             wgpu::naga::valid::ValidationFlags::all(),

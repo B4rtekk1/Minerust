@@ -65,6 +65,66 @@ pub(super) fn create_ssr_hiz_targets(
     (texture, view, mips, size)
 }
 
+/// Quarter-resolution (per axis) target of the ray-marched god-rays pass.
+pub(super) fn create_god_rays_target(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+) -> (wgpu::Texture, wgpu::TextureView, [u32; 2]) {
+    let size = [config.width.div_ceil(4).max(1), config.height.div_ceil(4).max(1)];
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("God Rays Texture"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view, size)
+}
+
+pub(super) fn create_god_rays_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buffer: &wgpu::Buffer,
+    depth_view: &wgpu::TextureView,
+    shadow_grid: &minerust::render::shadow_grid::ShadowGrid,
+    output_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("God Rays Bind Group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: shadow_grid.bits_buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: shadow_grid.header_buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(output_view),
+            },
+        ],
+    })
+}
+
 impl State {
     /// Responds to a window resize event by rebuilding every GPU resource
     /// whose dimensions are tied to the surface size.
@@ -229,6 +289,19 @@ impl State {
         self.ssr_hiz_mips = mips;
         self.ssr_hiz_size = size;
         self.ssr_hiz_resolve_bind_group = resolve_bind_group;
+
+        let (texture, view, size) = create_god_rays_target(&self.device, &self.config);
+        self.god_rays_bind_group = create_god_rays_bind_group(
+            &self.device,
+            &self.god_rays_pipeline.get_bind_group_layout(0),
+            &self.uniform_buffer,
+            &self.ssr_hiz_view,
+            &self.shadow_grid,
+            &view,
+        );
+        self.god_rays_texture = texture;
+        self.god_rays_view = view;
+        self.god_rays_size = size;
     }
 
     fn rebuild_composite_bind_groups(&mut self) {
@@ -258,6 +331,14 @@ impl State {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.god_rays_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.ssr_hiz_view),
+                },
             ],
         });
         self.menu_composite_bind_group =
@@ -276,6 +357,14 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.god_rays_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.ssr_hiz_view),
                     },
                 ],
             });

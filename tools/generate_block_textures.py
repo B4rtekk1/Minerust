@@ -24,7 +24,7 @@ from PIL import Image
 PIXELS = 16
 TILE = 256
 COLUMNS = 8
-LAYERS = 48
+LAYERS = 56
 ORIGINAL = 16
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -289,8 +289,113 @@ def build(original):
                          weights=[3, 5, 3, 1])
     tex[41] = remap(wood_side, [(40, 24, 32), (56, 34, 44), (74, 46, 56), (92, 58, 66)])
 
+    lamp = blank((62, 42, 24, 255))
+    for y in range(2, 14):
+        for x in range(2, 14):
+            lamp[y][x] = [126, 78, 28, 255]
+    for y in range(4, 12):
+        for x in range(4, 12):
+            lamp[y][x] = [255, 190, 62, 255]
+    for y in range(5, 11):
+        for x in range(5, 11):
+            lamp[y][x] = [255, 232, 132, 255]
+    for y, x in ((3, 3), (3, 12), (12, 3), (12, 12)):
+        lamp[y][x] = [216, 150, 54, 255]
+    tex[42] = lamp
+
+    rng = random.Random(43)
+    glowstone = noise_fill(rng, [(174, 92, 26), (214, 138, 36), (246, 190, 62), (255, 226, 114)],
+                           weights=[1, 4, 4, 2])
+    for cx, cy in ((3, 4), (11, 3), (8, 11), (4, 12)):
+        cluster(glowstone, rng, cx, cy, [(255, 232, 136), (255, 246, 188)], 3)
+    tex[43] = glowstone
+
+    rng = random.Random(44)
+    shroomlight = noise_fill(rng, [(176, 62, 28), (214, 92, 38), (244, 142, 58), (255, 194, 106)],
+                             weights=[1, 4, 4, 2])
+    for x in range(PIXELS):
+        if x % 4 == 1:
+            for y in range(PIXELS):
+                if (x + y) % 3 != 0:
+                    shroomlight[y][x] = [255, 218, 142, 255]
+    tex[44] = shroomlight
+
+    rng = random.Random(45)
+    glow_crystal = blank()
+    for y in range(PIXELS):
+        for x in range(PIXELS):
+            facet = ((x + y // 2) // 3 + (x - y + 16) // 5) % 4
+            colors = [(72, 54, 126), (112, 82, 178), (158, 124, 224), (210, 184, 255)]
+            color = colors[facet]
+            if rng.random() < 0.1:
+                color = (232, 224, 255)
+            glow_crystal[y][x] = list(color) + [255]
+    tex[45] = glow_crystal
+
+    rng = random.Random(46)
+    cobblestone = noise_fill(rng, [(82, 82, 86), (112, 112, 116), (140, 140, 144), (162, 162, 164)],
+                             weights=[2, 5, 4, 1])
+    for y in (4, 10):
+        for x in range(PIXELS):
+            if rng.random() < 0.75:
+                cobblestone[y][x] = [66, 66, 70, 255]
+    tex[46] = cobblestone
+
+    rng = random.Random(47)
+    planks = noise_fill(rng, [(112, 68, 34), (142, 88, 42), (166, 108, 54), (188, 130, 70)],
+                        weights=[1, 4, 4, 1])
+    for y in (0, 7, 15):
+        for x in range(PIXELS):
+            planks[y][x] = [90, 54, 30, 255]
+    for y, x in ((3, 5), (11, 12)):
+        for dx in range(2):
+            planks[y][x + dx] = [94, 56, 30, 255]
+    tex[47] = planks
+
+    rng = random.Random(48)
+    bricks = noise_fill(rng, [(142, 54, 42), (168, 70, 52), (192, 88, 64)], weights=[2, 5, 2])
+    for y in (0, 7, 15):
+        for x in range(PIXELS):
+            bricks[y][x] = [94, 58, 52, 255]
+    for y in range(1, PIXELS):
+        offset = 4 if y < 7 or y > 8 else 0
+        for x in (offset, offset + 8):
+            if x < PIXELS:
+                bricks[y][x] = [94, 58, 52, 255]
+    tex[48] = bricks
+
+    rng = random.Random(49)
+    tex[49] = noise_fill(rng, [(88, 92, 84), (112, 116, 108), (136, 140, 130), (158, 160, 148)],
+                         weights=[2, 5, 4, 1])
+
+    rng = random.Random(50)
+    basalt_side = noise_fill(rng, [(36, 36, 42), (50, 50, 56), (64, 64, 70), (78, 78, 84)],
+                             weights=[2, 5, 3, 1])
+    for x in range(PIXELS):
+        if x % 5 == 2:
+            for y in range(PIXELS):
+                basalt_side[y][x] = [30, 30, 36, 255]
+    tex[50] = basalt_side
+
+    rng = random.Random(51)
+    basalt_top = noise_fill(rng, [(40, 40, 46), (56, 56, 62), (72, 72, 78), (88, 88, 94)],
+                            weights=[2, 5, 3, 1])
+    for x in range(PIXELS):
+        if x in (2, 13):
+            for y in range(PIXELS):
+                if rng.random() < 0.75:
+                    basalt_top[y][x] = [32, 32, 38, 255]
+    tex[51] = basalt_top
+
+    rng = random.Random(52)
+    obsidian = noise_fill(rng, [(18, 14, 34), (28, 22, 52), (40, 30, 72), (54, 42, 90)],
+                          weights=[2, 5, 3, 1])
+    for y, x in ((2, 5), (6, 11), (12, 3), (9, 14)):
+        obsidian[y][x] = [104, 78, 150, 255]
+    tex[52] = obsidian
+
     # Spare layers stay usable but obvious: plain stone.
-    for i in range(42, LAYERS):
+    for i in range(53, LAYERS):
         tex[i] = stone
     return tex
 

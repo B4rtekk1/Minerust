@@ -49,6 +49,10 @@ const SHADOW_COLUMN_WORDS: u32 = 8u;
 const SHADOW_COLUMNS: u32 = 256u;
 const SHADOW_MAX_ITERATIONS: i32 = 128;
 const SHADOW_STEP_EPSILON: f32 = 1e-3;
+const SDF_DIM: i32 = 64;
+const SDF_OFFSET: u32 = 593920u;
+const SDF_HEADER_WORDS: u32 = 4u;
+const SDF_DISTANCE_OFFSET: u32 = SDF_OFFSET + SDF_HEADER_WORDS;
 
 /// Ray parameter where the ray leaves the horizontal `size`-aligned square
 /// containing `p`.
@@ -57,6 +61,30 @@ fn shadow_box_exit(p: vec3<f32>, origin: vec3<f32>, inv_dir: vec3<f32>, positive
     let bound = floor(p.xz / size) * size + select(vec2<f32>(0.0), vec2<f32>(size), positive.xz);
     let t = select(vec2<f32>(1e30), (bound - origin.xz) * inv_dir.xz, moving.xz);
     return min(t.x, t.y);
+}
+
+fn shadow_sdf_distance(p: vec3<f32>, sdf_valid: bool, sdf_origin: vec2<i32>) -> u32 {
+    if !sdf_valid {
+        return 0u;
+    }
+    let brick = vec3<i32>(floor(p / vec3<f32>(4.0)));
+    let local = brick.xz - sdf_origin;
+    if brick.y < 0 || brick.y >= SDF_DIM || any(local < vec2<i32>(0)) || any(local >= vec2<i32>(SDF_DIM)) {
+        return 0u;
+    }
+    let index = u32(local.x) + 64u * (u32(local.y) + 64u * u32(brick.y));
+    return shadow_bits[SDF_DISTANCE_OFFSET + index];
+}
+
+fn shadow_sdf_box_exit(origin: vec3<f32>, inv_dir: vec3<f32>, positive: vec3<bool>, moving: vec3<bool>,
+                       brick: vec3<i32>, radius: i32) -> f32 {
+    let radius_f = f32(radius);
+    let lower = (vec3<f32>(brick) - vec3<f32>(radius_f)) * 4.0;
+    let upper = (vec3<f32>(brick) + vec3<f32>(radius_f + 1.0)) * 4.0;
+    let bound = select(lower, upper, positive);
+    let hit = (bound - origin) * inv_dir;
+    let t = select(vec3<f32>(1e30), hit, moving);
+    return min(min(t.x, t.y), t.z);
 }
 
 /// `true` if any of cells `y0..=y1` of the column starting at word `base` is
@@ -88,6 +116,8 @@ fn trace_sun(pos: vec3<f32>, normal: vec3<f32>, sun: vec3<f32>, max_t: f32) -> f
     let moving = abs(sun) > vec3<f32>(1e-5);
     let inv_dir = 1.0 / select(vec3<f32>(1.0), sun, moving);
     let top = shadow_grid.params.z;
+    let sdf_valid = shadow_bits[SDF_OFFSET + 2u] != 0u;
+    let sdf_origin = vec2<i32>(bitcast<i32>(shadow_bits[SDF_OFFSET]), bitcast<i32>(shadow_bits[SDF_OFFSET + 1u]));
 
     var t = 0.0;
     var slot_index = -1;
@@ -110,6 +140,14 @@ fn trace_sun(pos: vec3<f32>, normal: vec3<f32>, sun: vec3<f32>, max_t: f32) -> f
         // Left the loaded window: nothing known to block the sun.
         if !slot_valid {
             return 1.0;
+        }
+        let sdf_distance = shadow_sdf_distance(p, sdf_valid, sdf_origin);
+        if sdf_distance > 0u {
+            let brick = vec3<i32>(floor(p / vec3<f32>(4.0)));
+            let radius = i32(sdf_distance) - 1;
+            t = max(t, shadow_sdf_box_exit(origin, inv_dir, positive, moving, brick, radius))
+                + SHADOW_STEP_EPSILON;
+            continue;
         }
         // Above the whole chunk: cross it in one step.
         if p.y >= f32(slot.z) {

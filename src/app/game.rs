@@ -11,12 +11,8 @@ use winit::{
     window::{CursorGrabMode, Fullscreen, Window},
 };
 
-use minerust::{
-    CHUNK_SIZE, DEFAULT_WORLD_FILE, SUBCHUNK_HEIGHT, SavedWorld, World, load_world, save_world,
-};
-
 use crate::logger::{LogLevel, log};
-use crate::ui::menu::GameState;
+use crate::ui::menu::{GameState, MenuAction, MenuContext, MenuLayout, MenuScreen};
 
 use super::performance::process_cpu_time_ms;
 use super::render::RenderError;
@@ -523,7 +519,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                 } => {
                     state.last_input_time = Instant::now();
                     let pressed = key_state == ElementState::Pressed;
-                    let menu_control_shortcut = state.game_state == GameState::Menu
+                    let menu_control_shortcut = state.game_state != GameState::Playing
                         && pressed
                         && state.modifiers.control_key();
                     let menu_edit_shortcut = menu_control_shortcut
@@ -564,23 +560,57 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                         state.menu_state.handle_paste(&text);
                                     }
                                 }
+                                KeyCode::ArrowDown | KeyCode::Tab => {
+                                    let layout = MenuLayout::new(
+                                        state.config.width,
+                                        state.config.height,
+                                        state.menu_state.screen,
+                                        MenuContext {
+                                            has_world: state.has_entered_world,
+                                            save_available: std::path::Path::new(minerust::DEFAULT_WORLD_FILE).exists(),
+                                        },
+                                    );
+                                    state.menu_state.move_selection(1, &layout);
+                                }
+                                KeyCode::ArrowUp => {
+                                    let layout = MenuLayout::new(
+                                        state.config.width,
+                                        state.config.height,
+                                        state.menu_state.screen,
+                                        MenuContext {
+                                            has_world: state.has_entered_world,
+                                            save_available: std::path::Path::new(minerust::DEFAULT_WORLD_FILE).exists(),
+                                        },
+                                    );
+                                    state.menu_state.move_selection(-1, &layout);
+                                }
                                 KeyCode::Enter => {
-                                    state.connect_to_server();
+                                    let action = if state.menu_state.screen == MenuScreen::Multiplayer {
+                                        Some(MenuAction::Connect)
+                                    } else {
+                                        let layout = MenuLayout::new(
+                                            state.config.width,
+                                            state.config.height,
+                                            state.menu_state.screen,
+                                            MenuContext {
+                                                has_world: state.has_entered_world,
+                                                save_available: std::path::Path::new(minerust::DEFAULT_WORLD_FILE).exists(),
+                                            },
+                                        );
+                                        state.menu_state.selected_action(&layout)
+                                    };
+                                    if let Some(action) = action {
+                                        state.activate_menu_action(action);
+                                    }
+                                    if state.menu_state.quit_requested { elwt.exit(); }
                                 }
                                 KeyCode::Escape => {
                                     if state.has_entered_world {
-                                        // Dismiss the menu and return to the game
-                                        // without disconnecting, and immediately
-                                        // recapture the cursor for gameplay.
-                                        state.game_state = GameState::Playing;
-                                        state.mouse_captured = true;
-                                        let _ = state
-                                            .window
-                                            .set_cursor_grab(CursorGrabMode::Confined)
-                                            .or_else(|_| {
-                                                state.window.set_cursor_grab(CursorGrabMode::Locked)
-                                            });
-                                        state.window.set_cursor_visible(false);
+                                        if state.menu_state.screen == MenuScreen::Pause {
+                                            state.activate_menu_action(MenuAction::Resume);
+                                        } else {
+                                            state.activate_menu_action(MenuAction::Back);
+                                        }
                                     }
                                 }
                                 KeyCode::Backspace => {
@@ -601,7 +631,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 _ => {}
                             }
                         }
-                    } else {
+                    } else if state.game_state == GameState::Playing {
                         // ---- In-game key bindings ----------------------------
                         match key {
                             // Movement – held state polled each frame by `update`.
@@ -627,9 +657,8 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             KeyCode::Escape if pressed => {
-                                // Escape always returns to the menu from gameplay.
-                                // Release the cursor at the same time so the UI is
-                                // immediately interactive.
+                                // Pause without disconnecting the active world.
+                                state.menu_state.open_screen(MenuScreen::Pause);
                                 state.game_state = GameState::Menu;
                                 state.mouse_captured = false;
                                 state.input = Default::default();
@@ -705,152 +734,13 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
 
                             // ---- F5: Save world to disk ---------------------
                             KeyCode::F5 if pressed => {
-                                let world = state.world.read();
-                                // `SavedWorld::from_world` serializes only the
-                                // chunks that contain player-modified blocks, so
-                                // procedurally-generated terrain can be
-                                // regenerated from the seed on the next load.
-                                let saved = SavedWorld::from_world_with_generator_version(
-                                    &world.chunks,
-                                    world.seed,
-                                    (
-                                        state.camera.position.x,
-                                        state.camera.position.y,
-                                        state.camera.position.z,
-                                    ),
-                                    (state.camera.yaw, state.camera.pitch),
-                                    &state.inventory,
-                                    world.generator_version,
-                                );
-                                if let Err(e) = save_world(DEFAULT_WORLD_FILE, &saved) {
-                                    log(LogLevel::Error, &format!("Failed to save world: {}", e));
-                                } else {
-                                    log(
-                                        LogLevel::Info,
-                                        &format!("World saved to {}", DEFAULT_WORLD_FILE),
-                                    );
-                                }
+                                state.save_world_to_disk();
                             }
 
                             // ---- F9: Load world from disk -------------------
-                            KeyCode::F9 if pressed => match load_world(DEFAULT_WORLD_FILE) {
-                                Ok(saved) => {
-                                    log(
-                                        LogLevel::Info,
-                                        &format!("Regenerating world with seed {}...", saved.seed),
-                                    );
-
-                                    // Reinitialize the world from the saved seed
-                                    // so procedurally-generated terrain is
-                                    // recreated, then overwrite individual blocks
-                                    // with the serialized player edits below.
-                                    {
-                                        let mut world = state.world.write();
-                                        *world = World::new_with_seed_and_version(
-                                            saved.seed,
-                                            saved.generator_version,
-                                        );
-                                    }
-
-                                    // Clear the indirect draw managers so they
-                                    // don't hold stale GPU buffer references from
-                                    // the previous world.
-                                    state.indirect_manager.clear();
-                                    state.water_indirect_manager.clear();
-
-                                    // Restore camera transform.
-                                    state.camera.position.x = saved.player_x;
-                                    state.camera.position.y = saved.player_y;
-                                    state.camera.position.z = saved.player_z;
-                                    state.camera.yaw = saved.player_yaw;
-                                    state.camera.pitch = saved.player_pitch;
-                                    state.inventory =
-                                        saved.inventory.into_inventory(minerust::item_registry());
-                                    super::state::ensure_test_lamp(&mut state.inventory);
-                                    state.inventory_ui = Default::default();
-                                    state.hotbar_dirty = true;
-
-                                    // Overwrite sub-chunk block data with the
-                                    // serialized player edits.  Block data is
-                                    // stored flat (x-major, then y, then z) in
-                                    // the save file and must be unpacked in the
-                                    // same order here.
-                                    {
-                                        let mut world = state.world.write();
-                                        for chunk_data in &saved.chunks {
-                                            let cx = chunk_data.cx;
-                                            let cz = chunk_data.cz;
-                                            if let Some(chunk) = world.chunks.get_mut(&(cx, cz)) {
-                                                for (&sy, block_data) in &chunk_data.subchunks {
-                                                    if (sy as usize) < chunk.subchunks.len() {
-                                                        let subchunk =
-                                                            &mut chunk.subchunks[sy as usize];
-                                                        // Fill blocks in x→y→z order to match
-                                                        // the serialization order in save_world.
-                                                        let mut n = 0;
-                                                        for lx in 0..CHUNK_SIZE as usize {
-                                                            for ly in 0..SUBCHUNK_HEIGHT as usize {
-                                                                for lz in 0..CHUNK_SIZE as usize {
-                                                                    if n < block_data.len() {
-                                                                        subchunk.set_block_raw(
-                                                                            lx as i32,
-                                                                            ly as i32,
-                                                                            lz as i32,
-                                                                            block_data[n],
-                                                                        );
-                                                                        n += 1;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        subchunk.is_empty = false;
-                                                        subchunk.mark_mesh_dirty();
-                                                    }
-                                                }
-                                                chunk.player_modified = true;
-                                                chunk.rebuild_metadata();
-                                            }
-                                        }
-                                    }
-
-                                    // Mark every sub-chunk dirty so the mesh
-                                    // loader rebuilds all GPU geometry on the
-                                    // next few frames (not just the edited ones).
-                                    {
-                                        let mut world = state.world.write();
-                                        for chunk in world.chunks.values_mut() {
-                                            for subchunk in &mut chunk.subchunks {
-                                                subchunk.mark_mesh_dirty();
-                                            }
-                                        }
-                                    }
-                                    // Discard previous-world jobs and recreate generators
-                                    // with the restored seed before streaming resumes.
-                                    state.chunk_loader = minerust::ChunkLoader::new_with_version(
-                                        saved.seed,
-                                        saved.generator_version,
-                                    );
-                                    state.mesh_loader = minerust::MeshLoader::new(
-                                        state.world.clone(),
-                                        minerust::get_mesh_worker_count(),
-                                    );
-                                    state.chunks_rendered = 0;
-                                    state.subchunks_rendered = 0;
-                                    state.hiz_valid = false;
-                                    state.visible_chunk_columns.clear();
-                                    state.visible_chunk_cache_center = (i32::MIN, i32::MIN);
-                                    state.visible_chunk_columns_dirty = true;
-                                    state.enqueue_all_dirty_meshes();
-                                    log(
-                                        LogLevel::Info,
-                                        &format!(
-                                            "World loaded from {} (seed: {})",
-                                            DEFAULT_WORLD_FILE, saved.seed
-                                        ),
-                                    );
-                                }
-                                Err(e) => log(LogLevel::Error, &format!("Error loading: {}", e)),
-                            },
+                            KeyCode::F9 if pressed => {
+                                state.load_world_from_disk();
+                            }
 
                             // ---- Hotbar slot selection (1–9) ----------------
                             // Setting `hotbar_dirty` triggers a mesh rebuild of
@@ -957,13 +847,16 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                     state.last_input_time = Instant::now();
                     let pressed = btn_state == ElementState::Pressed;
 
-                    if state.game_state == GameState::Menu {
-                        // In the menu, only left-click is handled; it is forwarded
-                        // to the hit-test system which maps the cursor position to
-                        // a `MenuHit` variant.
-                        if pressed && button == winit::event::MouseButton::Left {
+                    if state.game_state != GameState::Playing {
+                        if state.game_state == GameState::Menu
+                            && pressed
+                            && button == winit::event::MouseButton::Left
+                        {
                             if let Some((x, y)) = state.cursor_position {
                                 state.handle_menu_click(x, y);
+                                if state.menu_state.quit_requested {
+                                    elwt.exit();
+                                }
                             }
                         }
                     } else if state.inventory_open {
