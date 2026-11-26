@@ -1770,7 +1770,11 @@ impl State {
             digging: DiggingState::default(),
             placement: super::state::BlockPlacementState::default(),
             inventory_open: false,
-            inventory: minerust::Inventory::default(),
+            inventory: {
+                let mut inventory = minerust::Inventory::default();
+                super::state::ensure_test_lamp(&mut inventory);
+                inventory
+            },
             item_entities: Vec::new(),
             next_entity_id: 1,
             window,

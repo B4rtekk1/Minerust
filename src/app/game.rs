@@ -370,8 +370,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
         // Start the window in borderless fullscreen on the current monitor.
         .with_fullscreen(Some(Fullscreen::Borderless(None)));
 
-    let window = match event_loop.create_window(window_attributes)
-    {
+    let window = match event_loop.create_window(window_attributes) {
         Ok(w) => w,
         Err(e) => {
             log(LogLevel::Error, &format!("Failed to create window: {}", e));
@@ -658,9 +657,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             // The profiler is intentionally opt-in: it can
                             // perturb frame timings while its text is shaped.
                             KeyCode::KeyC
-                                if pressed
-                                    && !repeat
-                                    && state.game_state == GameState::Playing =>
+                                if pressed && !repeat && state.game_state == GameState::Playing =>
                             {
                                 state.show_debug_overlay = !state.show_debug_overlay;
                                 let state_name = if state.show_debug_overlay {
@@ -679,7 +676,11 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 log(LogLevel::Info, &format!("Sun shadows: {}", state_name));
                             }
                             KeyCode::BracketLeft | KeyCode::BracketRight => {
-                                let direction = if key == KeyCode::BracketLeft { -1.0 } else { 1.0 };
+                                let direction = if key == KeyCode::BracketLeft {
+                                    -1.0
+                                } else {
+                                    1.0
+                                };
                                 if pressed {
                                     state.sun_scrub = direction;
                                 } else if state.sun_scrub == direction {
@@ -687,10 +688,19 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            KeyCode::F4 if pressed && !repeat && state.game_state == GameState::Playing => {
+                            KeyCode::F4
+                                if pressed && !repeat && state.game_state == GameState::Playing =>
+                            {
                                 state.occlusion_culling_enabled = !state.occlusion_culling_enabled;
-                                let state_name = if state.occlusion_culling_enabled { "On" } else { "Off" };
-                                log(LogLevel::Info, &format!("Hi-Z occlusion culling: {}", state_name));
+                                let state_name = if state.occlusion_culling_enabled {
+                                    "On"
+                                } else {
+                                    "Off"
+                                };
+                                log(
+                                    LogLevel::Info,
+                                    &format!("Hi-Z occlusion culling: {}", state_name),
+                                );
                             }
 
                             // ---- F5: Save world to disk ---------------------
@@ -754,7 +764,9 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     state.camera.position.z = saved.player_z;
                                     state.camera.yaw = saved.player_yaw;
                                     state.camera.pitch = saved.player_pitch;
-                                    state.inventory = saved.inventory.into_inventory(minerust::item_registry());
+                                    state.inventory =
+                                        saved.inventory.into_inventory(minerust::item_registry());
+                                    super::state::ensure_test_lamp(&mut state.inventory);
                                     state.inventory_ui = Default::default();
                                     state.hotbar_dirty = true;
 
@@ -881,15 +893,23 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             // Q drops one selected item; Ctrl+Q drops the whole stack.
                             KeyCode::KeyQ if pressed && state.game_state != GameState::Menu => {
-                                let slot = minerust::PlayerSlot::Hotbar(state.inventory.selected_hotbar);
+                                let slot =
+                                    minerust::PlayerSlot::Hotbar(state.inventory.selected_hotbar);
                                 let action = if state.modifiers.control_key() {
                                     minerust::InventoryAction::DropStack(slot)
                                 } else {
                                     minerust::InventoryAction::DropOne(slot)
                                 };
-                                let result = state.inventory.apply_action(&mut state.inventory_ui, action, minerust::item_registry());
+                                let result = state.inventory.apply_action(
+                                    &mut state.inventory_ui,
+                                    action,
+                                    minerust::item_registry(),
+                                );
                                 if let Some(stack) = result.dropped {
-                                    state.spawn_item_stack(stack, state.camera.position + glam::Vec3::new(0.0, -0.4, 0.0));
+                                    state.spawn_item_stack(
+                                        stack,
+                                        state.camera.position + glam::Vec3::new(0.0, -0.4, 0.0),
+                                    );
                                     state.hotbar_dirty = true;
                                 }
                             }
@@ -914,7 +934,8 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                         let slots = minerust::player::inventory::HOTBAR_SLOT_COUNT as i32;
                         // `rem_euclid` wraps correctly for negative values
                         // (scrolling backward past slot 0 lands on the last slot).
-                        let new_slot = (state.inventory.selected_hotbar as i32 - scroll.signum() as i32)
+                        let new_slot = (state.inventory.selected_hotbar as i32
+                            - scroll.signum() as i32)
                             .rem_euclid(slots) as usize;
                         if new_slot != state.inventory.selected_hotbar as usize {
                             state.inventory.select_hotbar(new_slot as u8);

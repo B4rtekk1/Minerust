@@ -98,11 +98,31 @@ pub enum BlockType {
     Calcite,
     /// Dark cherry wood trunk.
     CherryLog,
+    /// Simple test lamp that emits warm block light.
+    Lamp,
+    /// Golden mineral that glows in deep caves.
+    Glowstone,
+    /// Warm fungal growth found in lush caves.
+    Shroomlight,
+    /// Luminous crystal found in geodes and dripstone caves.
+    GlowCrystal,
+    /// Rough stone made from broken rock.
+    Cobblestone,
+    /// Cut wooden boards.
+    Planks,
+    /// Fired masonry blocks.
+    Bricks,
+    /// Soft volcanic stone found underground.
+    Tuff,
+    /// Dark volcanic rock with a distinct top face.
+    Basalt,
+    /// Dense, glassy volcanic rock.
+    Obsidian,
 }
 
 impl BlockType {
     /// Every block type, in id order (`ALL[id as usize] as u8 == id`).
-    pub const ALL: [BlockType; 42] = [
+    pub const ALL: [BlockType; 52] = [
         BlockType::Air,
         BlockType::Grass,
         BlockType::Dirt,
@@ -145,12 +165,25 @@ impl BlockType {
         BlockType::Amethyst,
         BlockType::Calcite,
         BlockType::CherryLog,
+        BlockType::Lamp,
+        BlockType::Glowstone,
+        BlockType::Shroomlight,
+        BlockType::GlowCrystal,
+        BlockType::Cobblestone,
+        BlockType::Planks,
+        BlockType::Bricks,
+        BlockType::Tuff,
+        BlockType::Basalt,
+        BlockType::Obsidian,
     ];
 
     /// Converts a numeric id (as sent over the network) back to a block.
     /// Unknown ids become [`BlockType::Air`].
     pub fn from_u8(id: u8) -> BlockType {
-        Self::ALL.get(id as usize).copied().unwrap_or(BlockType::Air)
+        Self::ALL
+            .get(id as usize)
+            .copied()
+            .unwrap_or(BlockType::Air)
     }
 
     /// `true` for any kind of tree foliage.
@@ -173,7 +206,14 @@ impl BlockType {
 
     /// `true` for the stone family that ores and cave decoration replace.
     pub fn is_stone_like(&self) -> bool {
-        matches!(self, BlockType::Stone | BlockType::Deepslate)
+        matches!(
+            self,
+            BlockType::Stone
+                | BlockType::Deepslate
+                | BlockType::Tuff
+                | BlockType::Basalt
+                | BlockType::Cobblestone
+        )
     }
 
     /// Returns the base RGB color used for vertex coloring and the minimap.
@@ -222,6 +262,16 @@ impl BlockType {
             BlockType::Amethyst => [0.51, 0.38, 0.75],
             BlockType::Calcite => [0.84, 0.85, 0.83],
             BlockType::CherryLog => [0.24, 0.15, 0.19],
+            BlockType::Lamp => [1.0, 0.72, 0.42],
+            BlockType::Glowstone => [1.0, 0.72, 0.28],
+            BlockType::Shroomlight => [1.0, 0.55, 0.29],
+            BlockType::GlowCrystal => [0.55, 0.38, 0.9],
+            BlockType::Cobblestone => [0.48, 0.48, 0.5],
+            BlockType::Planks => [0.62, 0.43, 0.25],
+            BlockType::Bricks => [0.62, 0.34, 0.29],
+            BlockType::Tuff => [0.4, 0.41, 0.39],
+            BlockType::Basalt => [0.24, 0.24, 0.27],
+            BlockType::Obsidian => [0.16, 0.12, 0.25],
         }
     }
 
@@ -353,7 +403,34 @@ impl BlockType {
             BlockType::Magma => 0.8,
             BlockType::Dripstone => 1.5,
             BlockType::Amethyst | BlockType::Calcite => 1.0,
+            BlockType::Lamp => 0.5,
+            BlockType::Glowstone => 0.6,
+            BlockType::Shroomlight => 0.4,
+            BlockType::GlowCrystal => 1.2,
+            BlockType::Cobblestone => 3.0,
+            BlockType::Planks => 1.5,
+            BlockType::Bricks => 2.0,
+            BlockType::Tuff => 1.5,
+            BlockType::Basalt => 2.5,
+            BlockType::Obsidian => 8.0,
         }
+    }
+
+    /// Returns this block's light emission level (`0..=15`).
+    pub fn light_emission(&self) -> u8 {
+        match self {
+            BlockType::Lamp => 15,
+            BlockType::Glowstone => 15,
+            BlockType::Shroomlight => 14,
+            BlockType::GlowCrystal => 11,
+            BlockType::Magma => 6,
+            _ => 0,
+        }
+    }
+
+    /// Returns `true` if this block emits block light.
+    pub fn is_emissive(&self) -> bool {
+        self.light_emission() > 0
     }
 
     /// Returns the texture atlas index for the **top** face.
@@ -402,6 +479,16 @@ impl BlockType {
             BlockType::Dripstone => TEX_DRIPSTONE,
             BlockType::Amethyst => TEX_AMETHYST,
             BlockType::Calcite => TEX_CALCITE,
+            BlockType::Lamp => TEX_LAMP,
+            BlockType::Glowstone => TEX_GLOWSTONE,
+            BlockType::Shroomlight => TEX_SHROOMLIGHT,
+            BlockType::GlowCrystal => TEX_GLOW_CRYSTAL,
+            BlockType::Cobblestone => TEX_COBBLESTONE,
+            BlockType::Planks => TEX_PLANKS,
+            BlockType::Bricks => TEX_BRICKS,
+            BlockType::Tuff => TEX_TUFF,
+            BlockType::Basalt => TEX_BASALT_TOP,
+            BlockType::Obsidian => TEX_OBSIDIAN,
         }
     }
 
@@ -418,6 +505,8 @@ impl BlockType {
             BlockType::Mycelium => TEX_MYCELIUM_SIDE,
             BlockType::BirchLog => TEX_BIRCH_LOG,
             BlockType::CherryLog => TEX_CHERRY_LOG,
+            BlockType::Lamp => TEX_LAMP,
+            BlockType::Basalt => TEX_BASALT_SIDE,
             _ => self.tex_top(),
         }
     }
@@ -505,6 +594,12 @@ impl BlockType {
             | BlockType::Cactus
             | BlockType::WoodStairs => 0.6,
             BlockType::Air => 1.0,
+            BlockType::Lamp => 0.7,
+            BlockType::Glowstone | BlockType::Shroomlight => 0.65,
+            BlockType::GlowCrystal => 0.3,
+            BlockType::Cobblestone | BlockType::Bricks | BlockType::Tuff | BlockType::Basalt => 0.75,
+            BlockType::Planks => 0.7,
+            BlockType::Obsidian => 0.2,
         }
     }
 
@@ -565,6 +660,16 @@ impl BlockType {
             BlockType::Amethyst => "Amethyst",
             BlockType::Calcite => "Calcite",
             BlockType::CherryLog => "Cherry Log",
+            BlockType::Lamp => "Lamp",
+            BlockType::Glowstone => "Glowstone",
+            BlockType::Shroomlight => "Shroomlight",
+            BlockType::GlowCrystal => "Glow Crystal",
+            BlockType::Cobblestone => "Cobblestone",
+            BlockType::Planks => "Planks",
+            BlockType::Bricks => "Bricks",
+            BlockType::Tuff => "Tuff",
+            BlockType::Basalt => "Basalt",
+            BlockType::Obsidian => "Obsidian",
         }
     }
 }
@@ -576,7 +681,10 @@ mod tests {
     #[test]
     fn ids_round_trip_through_all() {
         for (id, block) in BlockType::ALL.iter().enumerate() {
-            assert_eq!(*block as u8 as usize, id, "{block:?} is out of order in ALL");
+            assert_eq!(
+                *block as u8 as usize, id,
+                "{block:?} is out of order in ALL"
+            );
             assert_eq!(BlockType::from_u8(id as u8), *block);
         }
         assert_eq!(BlockType::from_u8(250), BlockType::Air);
@@ -587,7 +695,37 @@ mod tests {
         for block in BlockType::ALL {
             for face in 0..6 {
                 let tex = block.tex_for_face(face) as u32;
-                assert!(tex < TEXTURE_LAYERS, "{block:?} face {face} uses layer {tex}");
+                assert!(
+                    tex < TEXTURE_LAYERS,
+                    "{block:?} face {face} uses layer {tex}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn emissive_blocks_emit_block_light() {
+        for (block, level) in [
+            (BlockType::Lamp, 15),
+            (BlockType::Glowstone, 15),
+            (BlockType::Shroomlight, 14),
+            (BlockType::GlowCrystal, 11),
+            (BlockType::Magma, 6),
+        ] {
+            assert_eq!(block.light_emission(), level);
+            assert!(block.is_emissive());
+        }
+        for block in BlockType::ALL {
+            assert_eq!(block.is_emissive(), block.light_emission() > 0);
+            if !matches!(
+                block,
+                BlockType::Lamp
+                    | BlockType::Glowstone
+                    | BlockType::Shroomlight
+                    | BlockType::GlowCrystal
+                    | BlockType::Magma
+            ) {
+                assert_eq!(block.light_emission(), 0, "{block:?} should not emit light");
             }
         }
     }

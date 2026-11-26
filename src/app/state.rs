@@ -9,17 +9,34 @@ use winit::{keyboard::ModifiersState, window::Window};
 
 use crate::multiplayer::player::RemotePlayer;
 use crate::multiplayer::protocol::Packet;
-use crate::ui::menu::{GameState, MenuState};
 use crate::ui::font::Font;
+use crate::ui::menu::{GameState, MenuState};
 use minerust::SubchunkKey;
 use minerust::chunk_loader::ChunkLoader;
 use minerust::{Camera, DiggingState, IndirectManager, InputState, World};
 use rustc_hash::FxHashSet;
 
+pub(super) fn ensure_test_lamp(inventory: &mut minerust::Inventory) {
+    let registry = minerust::item_registry();
+    let lamp = registry
+        .item_for_block(minerust::BlockType::Lamp)
+        .expect("lamp block item must be registered");
+    if (0..minerust::player::inventory::INVENTORY_SLOT_COUNT)
+        .filter_map(|index| inventory.get_flat(index))
+        .any(|stack| stack.item == lamp)
+    {
+        return;
+    }
+    let stack = registry.new_stack(lamp, 64);
+    let _ = inventory.insert_hotbar_first(stack, registry);
+}
+
 /// Depth-resolve shader source specialised for `samples` per pixel.
 pub(super) fn depth_resolve_source(samples: u32) -> String {
-    let source = include_str!("../shaders/depth_resolve.wgsl")
-        .replace("const SAMPLE_COUNT: i32 = 4;", &format!("const SAMPLE_COUNT: i32 = {samples};"));
+    let source = include_str!("../shaders/depth_resolve.wgsl").replace(
+        "const SAMPLE_COUNT: i32 = 4;",
+        &format!("const SAMPLE_COUNT: i32 = {samples};"),
+    );
     if samples > 1 {
         source
     } else {
@@ -29,8 +46,10 @@ pub(super) fn depth_resolve_source(samples: u32) -> String {
 
 /// Hi-Z SSR shader source specialised for `samples` per pixel.
 pub(super) fn ssr_hiz_source(samples: u32) -> String {
-    let source = include_str!("../shaders/ssr_hiz.wgsl")
-        .replace("const SAMPLE_COUNT: i32 = 4;", &format!("const SAMPLE_COUNT: i32 = {samples};"));
+    let source = include_str!("../shaders/ssr_hiz.wgsl").replace(
+        "const SAMPLE_COUNT: i32 = 4;",
+        &format!("const SAMPLE_COUNT: i32 = {samples};"),
+    );
     if samples > 1 {
         source
     } else {
@@ -827,8 +846,7 @@ mod depth_resolve_tests {
     #[test]
     fn water_shader_parses_and_validates() {
         let source = include_str!("../shaders/water.wgsl");
-        let module = wgpu::naga::front::wgsl::parse_str(source)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{e:?}"));
         wgpu::naga::valid::Validator::new(
             wgpu::naga::valid::ValidationFlags::all(),
             wgpu::naga::valid::Capabilities::all(),

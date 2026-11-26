@@ -22,9 +22,10 @@ const _: () = {
     assert!(CHUNK_UNLOAD_DISTANCE >= GENERATION_DISTANCE);
 };
 
-/// Day-cycle speed (radians per second). Zero keeps the sun where the
-/// player leaves it; `[` and `]` move it by hand.
-pub const SUN_MOVEMENT_SPEED: f32 = 0.0;
+/// Duration of one full day/night cycle, in seconds.
+pub const DAY_LENGTH_SECONDS: f32 = 600.0;
+/// Day-cycle speed in radians per second.
+pub const SUN_MOVEMENT_SPEED: f32 = std::f32::consts::TAU / DAY_LENGTH_SECONDS;
 /// Sun position at start-up: mid-morning, so terrain casts visible shadows
 /// (π/2 would be noon).
 pub const SUN_START_ANGLE: f32 = 0.95;
@@ -76,6 +77,17 @@ pub const TEX_DRIPSTONE: f32 = 38.0;
 pub const TEX_AMETHYST: f32 = 39.0;
 pub const TEX_CALCITE: f32 = 40.0;
 pub const TEX_CHERRY_LOG: f32 = 41.0;
+pub const TEX_LAMP: f32 = 42.0;
+pub const TEX_GLOWSTONE: f32 = 43.0;
+pub const TEX_SHROOMLIGHT: f32 = 44.0;
+pub const TEX_GLOW_CRYSTAL: f32 = 45.0;
+pub const TEX_COBBLESTONE: f32 = 46.0;
+pub const TEX_PLANKS: f32 = 47.0;
+pub const TEX_BRICKS: f32 = 48.0;
+pub const TEX_TUFF: f32 = 49.0;
+pub const TEX_BASALT_SIDE: f32 = 50.0;
+pub const TEX_BASALT_TOP: f32 = 51.0;
+pub const TEX_OBSIDIAN: f32 = 52.0;
 /// Side of one square atlas tile (and texture-array layer) in texels.
 pub const TEXTURE_SIZE: u32 = 256;
 /// Tiles per row in `assets/textures.png`; tile `i` is at column
@@ -84,7 +96,7 @@ pub const ATLAS_COLUMNS: u32 = 8;
 /// Layers of the block texture array (the atlas holds exactly this many
 /// tiles; the last few are spare). Regenerate the atlas with
 /// `tools/generate_block_textures.py` when adding textures.
-pub const TEXTURE_LAYERS: u32 = 48;
+pub const TEXTURE_LAYERS: u32 = 56;
 
 /// Default presentation mode; selects Immediate, Mailbox, or Fifo by support.
 pub const DEFAULT_PRESENT_MODE: wgpu::PresentMode = wgpu::PresentMode::AutoNoVsync;

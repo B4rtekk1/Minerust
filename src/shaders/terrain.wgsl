@@ -408,6 +408,25 @@ fn vs_legacy(model: LegacyVertexInput) -> VertexOutput {
     return out;
 }
 
+fn emissive_glow(t_idx: u32) -> vec3<f32> {
+    if t_idx == 42u {
+        return vec3<f32>(1.0, 0.72, 0.42) * 0.8;
+    }
+    if t_idx == 43u {
+        return vec3<f32>(1.0, 0.68, 0.28) * 0.8;
+    }
+    if t_idx == 44u {
+        return vec3<f32>(1.0, 0.52, 0.28) * 0.75;
+    }
+    if t_idx == 45u {
+        return vec3<f32>(0.62, 0.4, 1.0) * 0.75;
+    }
+    if t_idx == 37u {
+        return vec3<f32>(1.0, 0.3, 0.08) * 0.25;
+    }
+    return vec3<f32>(0.0);
+}
+
 fn pulled_vertex(vertex_id: u32, draw_instance_id: u32) -> VertexOutput {
     let subchunk_id = draw_instance_id;
     // Indexed: 4 unique vertices per quad, triangulated by the shared index
@@ -449,8 +468,11 @@ fn pulled_vertex(vertex_id: u32, draw_instance_id: u32) -> VertexOutput {
     let normal = NORMALS[n_idx % 6u];
     let ambient_occlusion = mix(0.52, 1.0, f32(ao_raw) / 3.0);
     let sky_level = f32((quad.light >> (corner * 4u)) & 0xfu) / 15.0;
+    let block_light_level = f32((quad.light >> (16u + corner * 4u)) & 0xfu) / 15.0;
     let lighting = vertex_lighting(normal, color, ambient_occlusion, sky_level);
-    out.light = lighting.ambient;
+    let warm_block_light = vec3<f32>(1.0, 0.72, 0.42)
+        * pow(block_light_level, 1.35) * ambient_occlusion * 1.6;
+    out.light = lighting.ambient + warm_block_light + emissive_glow(t_idx);
     out.sun = lighting.sun;
     out.normal_index = n_idx % 6u;
     out.fog = aerial_fog(world_position);

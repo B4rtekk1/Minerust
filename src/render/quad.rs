@@ -12,7 +12,7 @@ pub struct PackedQuad {
     /// width(6), height(6), material(8), four 2-bit AO values(8),
     /// climate tint palette index(4).
     pub size_material_ao: u32,
-    /// Four 4-bit sky light levels, one per corner (corner 0 in the low bits).
+    /// Four 4-bit sky and block light levels, one per corner per channel.
     pub light: u32,
 }
 
@@ -30,16 +30,19 @@ impl PackedQuad {
         color: [u8; 3],
         ao: [u8; 4],
         light: [u8; 4],
+        block_light: [u8; 4],
         tint: u8,
     ) -> Self {
         // Split the quad along the diagonal whose corners are darker, so the
         // interpolated shading follows the occlusion instead of streaking.
         let shade = |i: usize| u16::from(ao[i]) * 5 + u16::from(light[i].min(15));
         let diagonal = u32::from(shade(0) + shade(2) > shade(1) + shade(3));
-        let packed_light = light
-            .iter()
-            .enumerate()
-            .fold(0u32, |bits, (i, &l)| bits | (u32::from(l.min(15)) << (i * 4)));
+        let packed_light = light.iter().enumerate().fold(0u32, |bits, (i, &l)| {
+            bits | (u32::from(l.min(15)) << (i * 4))
+        });
+        let packed_block_light = block_light.iter().enumerate().fold(0u32, |bits, (i, &l)| {
+            bits | (u32::from(l.min(15)) << (16 + i * 4))
+        });
         let ao = ao.iter().enumerate().fold(0u32, |bits, (i, value)| {
             bits | (u32::from((*value).min(3)) << (i * 2))
         });
@@ -59,7 +62,7 @@ impl PackedQuad {
                 | (u32::from(material) << 12)
                 | (ao << 20)
                 | (u32::from(tint & 0xf) << 28),
-            light: packed_light,
+            light: packed_light | packed_block_light,
         }
     }
 
@@ -181,6 +184,7 @@ pub fn emit_packed_quad(
     color: [u8; 3],
     ao: [u8; 4],
     light: [u8; 4],
+    block_light: [u8; 4],
     tint: u8,
 ) {
     let half = |value: f32, axis: usize| {
@@ -197,6 +201,7 @@ pub fn emit_packed_quad(
         color,
         ao,
         light,
+        block_light,
         tint,
     ));
 }
@@ -246,7 +251,18 @@ mod tests {
         ];
         let quad = PackedQuad::from_vertices(&vertices, &[0, 1, 3, 1, 2, 3], [0, 0, 0]);
         let legacy_default = PackedQuad::from_vertices(&vertices, &[0, 1, 2, 0, 2, 3], [0, 0, 0]);
-        let direct = PackedQuad::terrain([2, 5, 6], 3, 1, 2, 42, [7, 3, 0], [0, 1, 2, 3], [15; 4], 0);
+        let direct = PackedQuad::terrain(
+            [2, 5, 6],
+            3,
+            1,
+            2,
+            42,
+            [7, 3, 0],
+            [0, 1, 2, 3],
+            [15; 4],
+            [0; 4],
+            0,
+        );
         assert_eq!(legacy_default.origin_and_face, direct.origin_and_face);
         assert_eq!(legacy_default.size_material_ao, direct.size_material_ao);
         assert_eq!(quad.origin_and_face & 0x3ffff, 2 | (5 << 6) | (6 << 12));
@@ -266,25 +282,46 @@ mod tests {
     fn packed_quad_preserves_per_corner_ao_and_light() {
         let ao = [0, 1, 2, 3];
         let light = [1, 5, 10, 15];
-        let quad = PackedQuad::terrain([0; 3], 3, 2, 2, 0, [7; 3], ao, light, 0);
+        let block_light = [15, 11, 7, 3];
+        let quad = PackedQuad::terrain([0; 3], 3, 2, 2, 0, [7; 3], ao, light, block_light, 0);
 
         let unpacked_ao = std::array::from_fn(|corner| {
             ((quad.size_material_ao >> (20 + corner * 2)) & 0x3) as u8
         });
-        let unpacked_light = std::array::from_fn(|corner| {
-            ((quad.light >> (corner * 4)) & 0xf) as u8
-        });
+        let unpacked_light =
+            std::array::from_fn(|corner| ((quad.light >> (corner * 4)) & 0xf) as u8);
+        let unpacked_block_light =
+            std::array::from_fn(|corner| ((quad.light >> (16 + corner * 4)) & 0xf) as u8);
 
         assert_eq!(unpacked_ao, ao);
         assert_eq!(unpacked_light, light);
+        assert_eq!(unpacked_block_light, block_light);
     }
 
     #[test]
     fn terrain_quads_are_grouped_by_direction_with_cutout_last() {
         let quad = |face: u8, material: u8| {
-            PackedQuad::terrain([0, 0, 0], face, 2, 2, material, [7; 3], [3; 4], [15; 4], 0)
+            PackedQuad::terrain(
+                [0, 0, 0],
+                face,
+                2,
+                2,
+                material,
+                [7; 3],
+                [3; 4],
+                [15; 4],
+                [0; 4],
+                0,
+            )
         };
-        let input = [quad(3, 0), quad(8, 8), quad(0, 3), quad(3, 2), quad(5, 15), quad(1, 3)];
+        let input = [
+            quad(3, 0),
+            quad(8, 8),
+            quad(0, 3),
+            quad(3, 2),
+            quad(5, 15),
+            quad(1, 3),
+        ];
         let (grouped, counts) = group_terrain_quads(&input);
         assert_eq!(counts, [1, 1, 0, 2, 0, 0, 2]);
         let groups: Vec<usize> = grouped.iter().map(PackedQuad::terrain_group).collect();

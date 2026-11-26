@@ -100,6 +100,8 @@ pub struct SubchunkMeshSnapshot {
     /// Light transport medium of every cell in the padded light region
     /// (see [`crate::world::skylight`]).
     pub light_media: Box<[u8]>,
+    /// Emission level of every cell in the padded light region.
+    pub light_emission: Box<[u8]>,
     /// Highest opaque block (world Y) of every light-region column.
     pub light_sky_height: Box<[i16]>,
 }
@@ -664,6 +666,7 @@ impl World {
 
         let mut block_cache = [BlockType::Air; MESH_CACHE_LEN];
         let mut light_media = vec![skylight::MEDIUM_AIR; skylight::LIGHT_LEN].into_boxed_slice();
+        let mut light_emission = vec![0u8; skylight::LIGHT_LEN].into_boxed_slice();
         let mut light_sky_height =
             vec![-1i16; skylight::LIGHT_SIZE * skylight::LIGHT_SIZE].into_boxed_slice();
         let mut has_blocks = false;
@@ -706,7 +709,9 @@ impl World {
                     } else {
                         BlockType::Air
                     };
-                    light_media[skylight::light_index(rx, ry, rz)] = skylight::medium(block);
+                    let light_index = skylight::light_index(rx, ry, rz);
+                    light_media[light_index] = skylight::medium(block);
+                    light_emission[light_index] = block.light_emission();
                     if !(inner.contains(&x) && inner_y.contains(&y) && inner.contains(&z)) {
                         continue;
                     }
@@ -743,6 +748,7 @@ impl World {
             tint_cache,
             block_cache,
             light_media,
+            light_emission,
             light_sky_height,
         })
     }
@@ -825,15 +831,32 @@ impl World {
             &snapshot.light_sky_height,
             base_y - skylight::LIGHT_PAD,
         );
+        let block_light = skylight::solve_block(&snapshot.light_media, &snapshot.light_emission);
         let light_at = |wx: i32, wy: i32, wz: i32| -> Option<u8> {
             let rx = (wx - base_x + skylight::LIGHT_PAD) as usize;
             let ry = (wy - base_y + skylight::LIGHT_PAD) as usize;
             let rz = (wz - base_z + skylight::LIGHT_PAD) as usize;
-            if rx >= skylight::LIGHT_SIZE || ry >= skylight::LIGHT_HEIGHT || rz >= skylight::LIGHT_SIZE {
+            if rx >= skylight::LIGHT_SIZE
+                || ry >= skylight::LIGHT_HEIGHT
+                || rz >= skylight::LIGHT_SIZE
+            {
                 return Some(skylight::MAX_SKY_LIGHT);
             }
             let i = skylight::light_index(rx, ry, rz);
             (snapshot.light_media[i] != skylight::MEDIUM_OPAQUE).then_some(light[i])
+        };
+        let block_light_at = |wx: i32, wy: i32, wz: i32| -> Option<u8> {
+            let rx = (wx - base_x + skylight::LIGHT_PAD) as usize;
+            let ry = (wy - base_y + skylight::LIGHT_PAD) as usize;
+            let rz = (wz - base_z + skylight::LIGHT_PAD) as usize;
+            if rx >= skylight::LIGHT_SIZE
+                || ry >= skylight::LIGHT_HEIGHT
+                || rz >= skylight::LIGHT_SIZE
+            {
+                return Some(0);
+            }
+            let i = skylight::light_index(rx, ry, rz);
+            (snapshot.light_media[i] != skylight::MEDIUM_OPAQUE).then_some(block_light[i])
         };
         // Water depth (blocks, capped at 15) below a water surface cell:
         // counted down through the light region, which reaches LIGHT_PAD
@@ -862,15 +885,19 @@ impl World {
         // among the four in front of the face that touch the corner. The
         // diagonal cell is ignored when both side cells are opaque, so light
         // does not leak around solid corners.
-        let corner_light = |front: (i32, i32, i32), a: (i32, i32, i32), b: (i32, i32, i32)| -> u8 {
+        let corner_light = |sample_light: &dyn Fn(i32, i32, i32) -> Option<u8>,
+                            front: (i32, i32, i32),
+                            a: (i32, i32, i32),
+                            b: (i32, i32, i32)|
+         -> u8 {
             let (fx, fy, fz) = front;
-            let centre = light_at(fx, fy, fz).unwrap_or(0);
-            let side_a = light_at(fx + a.0, fy + a.1, fz + a.2);
-            let side_b = light_at(fx + b.0, fy + b.1, fz + b.2);
+            let centre = sample_light(fx, fy, fz).unwrap_or(0);
+            let side_a = sample_light(fx + a.0, fy + a.1, fz + a.2);
+            let side_b = sample_light(fx + b.0, fy + b.1, fz + b.2);
             let diagonal = if side_a.is_none() && side_b.is_none() {
                 None
             } else {
-                light_at(fx + a.0 + b.0, fy + a.1 + b.1, fz + a.2 + b.2)
+                sample_light(fx + a.0 + b.0, fy + a.1 + b.1, fz + a.2 + b.2)
             };
             let (mut sum, mut count) = (u32::from(centre), 1u32);
             for value in [side_a, side_b, diagonal].into_iter().flatten() {
@@ -880,19 +907,59 @@ impl World {
             ((sum + count / 2) / count) as u8
         };
         // Corner order matches `face_corner_ao` (and therefore the shader).
-        let face_corner_light = |face_dir: i32, wx: i32, wy: i32, wz: i32| -> [u8; 4] {
-            let (front, axis_a, axis_b, signs): ((i32, i32, i32), (i32, i32, i32), (i32, i32, i32), [(i32, i32); 4]) =
-                match face_dir {
-                    0 => ((wx - 1, wy, wz), (0, 1, 0), (0, 0, 1), [(-1, -1), (-1, 1), (1, 1), (1, -1)]),
-                    1 => ((wx + 1, wy, wz), (0, 1, 0), (0, 0, 1), [(-1, 1), (-1, -1), (1, -1), (1, 1)]),
-                    2 => ((wx, wy - 1, wz), (1, 0, 0), (0, 0, 1), [(-1, 1), (-1, -1), (1, -1), (1, 1)]),
-                    3 => ((wx, wy + 1, wz), (1, 0, 0), (0, 0, 1), [(-1, -1), (-1, 1), (1, 1), (1, -1)]),
-                    4 => ((wx, wy, wz - 1), (1, 0, 0), (0, 1, 0), [(1, -1), (-1, -1), (-1, 1), (1, 1)]),
-                    5 => ((wx, wy, wz + 1), (1, 0, 0), (0, 1, 0), [(-1, -1), (1, -1), (1, 1), (-1, 1)]),
-                    _ => unreachable!(),
-                };
+        let face_corner_light = |sample_light: &dyn Fn(i32, i32, i32) -> Option<u8>,
+                                 face_dir: i32,
+                                 wx: i32,
+                                 wy: i32,
+                                 wz: i32|
+         -> [u8; 4] {
+            let (front, axis_a, axis_b, signs): (
+                (i32, i32, i32),
+                (i32, i32, i32),
+                (i32, i32, i32),
+                [(i32, i32); 4],
+            ) = match face_dir {
+                0 => (
+                    (wx - 1, wy, wz),
+                    (0, 1, 0),
+                    (0, 0, 1),
+                    [(-1, -1), (-1, 1), (1, 1), (1, -1)],
+                ),
+                1 => (
+                    (wx + 1, wy, wz),
+                    (0, 1, 0),
+                    (0, 0, 1),
+                    [(-1, 1), (-1, -1), (1, -1), (1, 1)],
+                ),
+                2 => (
+                    (wx, wy - 1, wz),
+                    (1, 0, 0),
+                    (0, 0, 1),
+                    [(-1, 1), (-1, -1), (1, -1), (1, 1)],
+                ),
+                3 => (
+                    (wx, wy + 1, wz),
+                    (1, 0, 0),
+                    (0, 0, 1),
+                    [(-1, -1), (-1, 1), (1, 1), (1, -1)],
+                ),
+                4 => (
+                    (wx, wy, wz - 1),
+                    (1, 0, 0),
+                    (0, 1, 0),
+                    [(1, -1), (-1, -1), (-1, 1), (1, 1)],
+                ),
+                5 => (
+                    (wx, wy, wz + 1),
+                    (1, 0, 0),
+                    (0, 1, 0),
+                    [(-1, -1), (1, -1), (1, 1), (-1, 1)],
+                ),
+                _ => unreachable!(),
+            };
             signs.map(|(sa, sb)| {
                 corner_light(
+                    sample_light,
                     front,
                     (axis_a.0 * sa, axis_a.1 * sa, axis_a.2 * sa),
                     (axis_b.0 * sb, axis_b.1 * sb, axis_b.2 * sb),
@@ -992,6 +1059,7 @@ impl World {
             color: [u8; 3],
             ao: [u8; 4],
             light: [u8; 4],
+            block_light: [u8; 4],
             tex_index: u8,
             tint: u8,
             is_active: bool,
@@ -1004,6 +1072,7 @@ impl World {
                     color: [0, 0, 0],
                     ao: [3; 4],
                     light: [skylight::MAX_SKY_LIGHT; 4],
+                    block_light: [0; 4],
                     tex_index: 0,
                     tint: 0,
                     is_active: false,
@@ -1036,6 +1105,17 @@ impl World {
             } else {
                 5
             };
+            let centre = [
+                (v0[0] + v1[0] + v2[0]) / 3.0 + normal[0] * 0.01,
+                (v0[1] + v1[1] + v2[1]) / 3.0 + normal[1] * 0.01,
+                (v0[2] + v1[2] + v2[2]) / 3.0 + normal[2] * 0.01,
+            ];
+            let block_light = block_light_at(
+                centre[0].floor() as i32,
+                centre[1].floor() as i32,
+                centre[2].floor() as i32,
+            )
+            .unwrap_or(0);
             let edge_len = |a: [f32; 3], b: [f32; 3]| {
                 ((a[0] - b[0])
                     .abs()
@@ -1055,6 +1135,7 @@ impl World {
                 [7, 7, 7],
                 [3; 4],
                 [light; 4],
+                [block_light; 4],
                 0,
             );
         };
@@ -1085,8 +1166,9 @@ impl World {
                         // Stairs are lit uniformly per face from the open
                         // cell in front of it (or the stair cell itself).
                         let own = light_at(world_x, y, world_z).unwrap_or(skylight::MAX_SKY_LIGHT);
-                        let face_light =
-                            |dx: i32, dy: i32, dz: i32| light_at(world_x + dx, y + dy, world_z + dz).unwrap_or(own);
+                        let face_light = |dx: i32, dy: i32, dz: i32| {
+                            light_at(world_x + dx, y + dy, world_z + dz).unwrap_or(own)
+                        };
                         let light_neg_x = face_light(-1, 0, 0);
                         let light_pos_x = face_light(1, 0, 0);
                         let light_neg_y = face_light(0, -1, 0);
@@ -1331,6 +1413,7 @@ impl World {
                                     [7, 7, 7],
                                     [3; 4],
                                     depths,
+                                    [0; 4],
                                     0,
                                 );
                                 // Y slices: d1 = x, d2 = z.
@@ -1365,7 +1448,9 @@ impl World {
                             continue;
                         }
 
-                        let light = face_corner_light(face_dir, world_x, y, world_z);
+                        let light = face_corner_light(&light_at, face_dir, world_x, y, world_z);
+                        let block_light =
+                            face_corner_light(&block_light_at, face_dir, world_x, y, world_z);
                         let ao = if block == BlockType::Water {
                             [3; 4]
                         } else {
@@ -1385,6 +1470,7 @@ impl World {
                             block,
                             color: [7, 7, 7],
                             light,
+                            block_light,
                             ao,
                             tex_index: tex_index as u8,
                             tint,
@@ -1415,7 +1501,8 @@ impl World {
                         // gradients. Only fully open faces are safe to merge;
                         // the same holds for the per-corner sky light.
                         let can_merge = face.ao == [3; 4]
-                            && face.light.iter().all(|&l| l == face.light[0]);
+                            && face.light.iter().all(|&l| l == face.light[0])
+                            && face.block_light.iter().all(|&l| l == face.block_light[0]);
 
                         // Extend width along d2 while faces match.
                         let mut width = 1i32;
@@ -1500,6 +1587,7 @@ impl World {
                             face.color,
                             face.ao,
                             face.light,
+                            face.block_light,
                             face.tint,
                         );
 
@@ -1522,9 +1610,18 @@ impl World {
                             d2 += 1;
                             continue;
                         }
-                        let key = (face.block, face.tex_index, face.tint, band(&face));
+                        let block_band =
+                            |f: &FaceAttrs| f.block_light.iter().copied().min().unwrap_or(0) / 3;
+                        let key = (
+                            face.block,
+                            face.tex_index,
+                            face.tint,
+                            band(&face),
+                            block_band(&face),
+                        );
                         let same = |f: &FaceAttrs| {
-                            f.is_active && (f.block, f.tex_index, f.tint, band(f)) == key
+                            f.is_active
+                                && (f.block, f.tex_index, f.tint, band(f), block_band(f)) == key
                         };
                         let mut width = 1i32;
                         while d2 + width < dim2_size
@@ -1543,29 +1640,75 @@ impl World {
                         }
                         for h in 0..height {
                             for w in 0..width {
-                                far_mask[((d1 + h) * dim2_size + d2 + w) as usize].is_active = false;
+                                far_mask[((d1 + h) * dim2_size + d2 + w) as usize].is_active =
+                                    false;
                             }
                         }
                         // Same corner conventions as the near merge above.
                         let (origin, quad_width, quad_height) = match face_dir {
-                            0 => ([base_x + slice, base_y + d1, base_z + d2], width * 2, height * 2),
-                            1 => ([base_x + slice + 1, base_y + d1, base_z + d2 + width], width * 2, height * 2),
-                            2 => ([base_x + d1, base_y + slice, base_z + d2 + width], width * 2, height * 2),
-                            3 => ([base_x + d1, base_y + slice + 1, base_z + d2], width * 2, height * 2),
-                            4 => ([base_x + d1 + height, base_y + d2, base_z + slice], height * 2, width * 2),
-                            _ => ([base_x + d1, base_y + d2, base_z + slice + 1], height * 2, width * 2),
+                            0 => (
+                                [base_x + slice, base_y + d1, base_z + d2],
+                                width * 2,
+                                height * 2,
+                            ),
+                            1 => (
+                                [base_x + slice + 1, base_y + d1, base_z + d2 + width],
+                                width * 2,
+                                height * 2,
+                            ),
+                            2 => (
+                                [base_x + d1, base_y + slice, base_z + d2 + width],
+                                width * 2,
+                                height * 2,
+                            ),
+                            3 => (
+                                [base_x + d1, base_y + slice + 1, base_z + d2],
+                                width * 2,
+                                height * 2,
+                            ),
+                            4 => (
+                                [base_x + d1 + height, base_y + d2, base_z + slice],
+                                height * 2,
+                                width * 2,
+                            ),
+                            _ => (
+                                [base_x + d1, base_y + d2, base_z + slice + 1],
+                                height * 2,
+                                width * 2,
+                            ),
                         };
                         // Preserve the actual AO and light at the rectangle's
                         // four outer corners instead of flattening them. Each
                         // entry is (d1 edge, d2 edge, source face corner).
                         let corner_map = match face_dir {
-                            0 | 3 => [(false, false, 0), (false, true, 1), (true, true, 2), (true, false, 3)],
-                            1 | 2 => [(false, true, 0), (false, false, 1), (true, false, 2), (true, true, 3)],
-                            4 => [(true, false, 0), (false, false, 1), (false, true, 2), (true, true, 3)],
-                            _ => [(false, true, 0), (true, true, 1), (true, false, 2), (false, false, 3)],
+                            0 | 3 => [
+                                (false, false, 0),
+                                (false, true, 1),
+                                (true, true, 2),
+                                (true, false, 3),
+                            ],
+                            1 | 2 => [
+                                (false, true, 0),
+                                (false, false, 1),
+                                (true, false, 2),
+                                (true, true, 3),
+                            ],
+                            4 => [
+                                (true, false, 0),
+                                (false, false, 1),
+                                (false, true, 2),
+                                (true, true, 3),
+                            ],
+                            _ => [
+                                (false, true, 0),
+                                (true, true, 1),
+                                (true, false, 2),
+                                (false, false, 3),
+                            ],
                         };
                         let mut far_ao = [3; 4];
                         let mut far_light = [skylight::MAX_SKY_LIGHT; 4];
+                        let mut far_block_light = [0; 4];
                         for (corner, (high_d1, high_d2, source_corner)) in
                             corner_map.into_iter().enumerate()
                         {
@@ -1574,6 +1717,7 @@ impl World {
                             let source = far_mask[(corner_d1 * dim2_size + corner_d2) as usize];
                             far_ao[corner] = source.ao[source_corner];
                             far_light[corner] = source.light[source_corner];
+                            far_block_light[corner] = source.block_light[source_corner];
                         }
                         emit_packed_quad(
                             &mut terrain_far_quads,
@@ -1586,6 +1730,7 @@ impl World {
                             face.color,
                             far_ao,
                             far_light,
+                            far_block_light,
                             face.tint,
                         );
                         d2 += width;
@@ -1614,7 +1759,8 @@ impl World {
         if terrain_far_quads.len() * 10 > terrain_quads.len() * 9 {
             terrain_far_quads.clear();
         }
-        let mut terrain_lod_quads = build_lod_terrain_quads(snapshot, subchunk_origin, &light_at);
+        let mut terrain_lod_quads =
+            build_lod_terrain_quads(snapshot, subchunk_origin, &light_at, &block_light_at);
         let terrain_far_count = if terrain_far_quads.is_empty() {
             terrain_quads.len()
         } else {
@@ -1684,6 +1830,7 @@ impl World {
                     [7, 7, 7],
                     [3; 4],
                     [value - 1; 4],
+                    [0; 4],
                     0,
                 );
                 z += width;
@@ -1692,10 +1839,12 @@ impl World {
     }
 }
 
+/// Builds a 2×2×2 terrain mesh.
 fn build_lod_terrain_quads(
     snapshot: &SubchunkMeshSnapshot,
     subchunk_origin: [i32; 3],
     light_at: &impl Fn(i32, i32, i32) -> Option<u8>,
+    block_light_at: &impl Fn(i32, i32, i32) -> Option<u8>,
 ) -> Vec<PackedQuad> {
     const SCALE: i32 = 2;
     const SIZE: i32 = CHUNK_SIZE / SCALE;
@@ -1714,6 +1863,7 @@ fn build_lod_terrain_quads(
         tex_index: u8,
         tint: u8,
         light: u8,
+        block_light: u8,
         active: bool,
     }
 
@@ -1818,7 +1968,7 @@ fn build_lod_terrain_quads(
                     if !cell.block.should_render_face_against(neighbor.block) {
                         continue;
                     }
-                    let tex_index = cell.block.tex_for_face(face_dir) as u8;
+                    let tex_index = cell.block.tex_for_face(face_dir as i32) as u8;
                     let tint = if crate::core::biome::tint_applies(tex_index) {
                         cell.tint
                     } else {
@@ -1827,22 +1977,42 @@ fn build_lod_terrain_quads(
                     let front = [
                         subchunk_origin[0]
                             + x * SCALE
-                            + if dx < 0 { -1 } else if dx > 0 { SCALE } else { 1 },
+                            + if dx < 0 {
+                                -1
+                            } else if dx > 0 {
+                                SCALE
+                            } else {
+                                1
+                            },
                         subchunk_origin[1]
                             + y * SCALE
-                            + if dy < 0 { -1 } else if dy > 0 { SCALE } else { 1 },
+                            + if dy < 0 {
+                                -1
+                            } else if dy > 0 {
+                                SCALE
+                            } else {
+                                1
+                            },
                         subchunk_origin[2]
                             + z * SCALE
-                            + if dz < 0 { -1 } else if dz > 0 { SCALE } else { 1 },
+                            + if dz < 0 {
+                                -1
+                            } else if dz > 0 {
+                                SCALE
+                            } else {
+                                1
+                            },
                     ];
                     let light =
                         light_at(front[0], front[1], front[2]).unwrap_or(skylight::MAX_SKY_LIGHT);
+                    let block_light = block_light_at(front[0], front[1], front[2]).unwrap_or(0);
                     let index = (d1 * SIZE + d2) as usize;
                     mask[index] = LodFace {
                         block: cell.block,
                         tex_index,
                         tint,
                         light: light / 3,
+                        block_light,
                         active: true,
                     };
                 }
@@ -1863,6 +2033,7 @@ fn build_lod_terrain_quads(
                             && other.tex_index == face.tex_index
                             && other.tint == face.tint
                             && other.light == face.light
+                            && other.block_light == face.block_light
                     };
                     let mut width = 1;
                     while d2 + width < SIZE && same(mask[(d1 * SIZE + d2 + width) as usize]) {
@@ -1950,6 +2121,7 @@ fn build_lod_terrain_quads(
                         [7; 3],
                         [3; 4],
                         [light; 4],
+                        [face.block_light; 4],
                         face.tint,
                     );
                     d2 += width;
@@ -2008,13 +2180,16 @@ mod tests {
             }
             let key = (wx.div_euclid(CHUNK_SIZE), wz.div_euclid(CHUNK_SIZE));
             match world.chunks.get(&key) {
-                Some(chunk) => chunk.get_block(wx.rem_euclid(CHUNK_SIZE), wy, wz.rem_euclid(CHUNK_SIZE)),
+                Some(chunk) => {
+                    chunk.get_block(wx.rem_euclid(CHUNK_SIZE), wy, wz.rem_euclid(CHUNK_SIZE))
+                }
                 None if wy < SEA_LEVEL => BlockType::Water,
                 None => BlockType::Air,
             }
         };
         let pad = skylight::LIGHT_PAD;
         let mut light_media = vec![0u8; skylight::LIGHT_LEN];
+        let mut light_emission = vec![0u8; skylight::LIGHT_LEN];
         let mut light_sky_height = vec![-1i16; skylight::LIGHT_SIZE * skylight::LIGHT_SIZE];
         for rx in 0..skylight::LIGHT_SIZE {
             for rz in 0..skylight::LIGHT_SIZE {
@@ -2022,10 +2197,14 @@ mod tests {
                 light_sky_height[rx * skylight::LIGHT_SIZE + rz] = world
                     .chunks
                     .get(&(wx.div_euclid(CHUNK_SIZE), wz.div_euclid(CHUNK_SIZE)))
-                    .map_or(-1, |c| c.highest_opaque_y(wx.rem_euclid(CHUNK_SIZE), wz.rem_euclid(CHUNK_SIZE)));
+                    .map_or(-1, |c| {
+                        c.highest_opaque_y(wx.rem_euclid(CHUNK_SIZE), wz.rem_euclid(CHUNK_SIZE))
+                    });
                 for ry in 0..skylight::LIGHT_HEIGHT {
-                    light_media[skylight::light_index(rx, ry, rz)] =
-                        skylight::medium(block_at(wx, base_y + ry as i32 - pad, wz));
+                    let block = block_at(wx, base_y + ry as i32 - pad, wz);
+                    let index = skylight::light_index(rx, ry, rz);
+                    light_media[index] = skylight::medium(block);
+                    light_emission[index] = block.light_emission();
                 }
             }
         }
@@ -2080,18 +2259,21 @@ mod tests {
             tint_cache: [0; (CHUNK_SIZE * CHUNK_SIZE) as usize],
             block_cache,
             light_media: light_media.into_boxed_slice(),
+            light_emission: light_emission.into_boxed_slice(),
             light_sky_height: light_sky_height.into_boxed_slice(),
         })
     }
 
     fn quad_ao(quad: &PackedQuad) -> [u8; 4] {
-        std::array::from_fn(|corner| {
-            ((quad.size_material_ao >> (20 + corner * 2)) & 0x3) as u8
-        })
+        std::array::from_fn(|corner| ((quad.size_material_ao >> (20 + corner * 2)) & 0x3) as u8)
     }
 
     fn quad_light(quad: &PackedQuad) -> [u8; 4] {
         std::array::from_fn(|corner| ((quad.light >> (corner * 4)) & 0xf) as u8)
+    }
+
+    fn quad_block_light(quad: &PackedQuad) -> [u8; 4] {
+        std::array::from_fn(|corner| ((quad.light >> (16 + corner * 4)) & 0xf) as u8)
     }
 
     fn quad_corner_positions(quad: &PackedQuad) -> [[i32; 3]; 4] {
@@ -2125,9 +2307,7 @@ mod tests {
         let offsets = [(0, 0), (width, 0), (width, height), (0, height)];
         std::array::from_fn(|corner| {
             let (along_u, along_v) = offsets[corner];
-            std::array::from_fn(|axis| {
-                origin[axis] + u[axis] * along_u + v[axis] * along_v
-            })
+            std::array::from_fn(|axis| origin[axis] + u[axis] * along_u + v[axis] * along_v)
         })
     }
 
@@ -2135,6 +2315,7 @@ mod tests {
         let positions = quad_corner_positions(far);
         let ao = quad_ao(far);
         let light = quad_light(far);
+        let block_light = quad_block_light(far);
         positions.iter().enumerate().all(|(corner, position)| {
             near.iter().any(|quad| {
                 if quad.face() != far.face() || quad.material() != far.material() {
@@ -2143,11 +2324,16 @@ mod tests {
                 let near_positions = quad_corner_positions(quad);
                 let near_ao = quad_ao(quad);
                 let near_light = quad_light(quad);
-                near_positions.iter().enumerate().any(|(near_corner, near_position)| {
-                    near_position == position
-                        && near_ao[near_corner] == ao[corner]
-                        && near_light[near_corner] == light[corner]
-                })
+                let near_block_light = quad_block_light(quad);
+                near_positions
+                    .iter()
+                    .enumerate()
+                    .any(|(near_corner, near_position)| {
+                        near_position == position
+                            && near_ao[near_corner] == ao[corner]
+                            && near_light[near_corner] == light[corner]
+                            && near_block_light[near_corner] == block_light[corner]
+                    })
             })
         })
     }
@@ -2163,6 +2349,7 @@ mod tests {
             &snapshot.light_sky_height,
             origin[1] - skylight::LIGHT_PAD,
         );
+        let block_solved = skylight::solve_block(&snapshot.light_media, &snapshot.light_emission);
         let light_at = |wx: i32, wy: i32, wz: i32| {
             let rx = wx - origin[0] + skylight::LIGHT_PAD;
             let ry = wy - origin[1] + skylight::LIGHT_PAD;
@@ -2179,7 +2366,23 @@ mod tests {
             let index = skylight::light_index(rx as usize, ry as usize, rz as usize);
             (snapshot.light_media[index] != skylight::MEDIUM_OPAQUE).then_some(solved[index])
         };
-        build_lod_terrain_quads(snapshot, origin, &light_at)
+        let block_light_at = |wx: i32, wy: i32, wz: i32| {
+            let rx = wx - origin[0] + skylight::LIGHT_PAD;
+            let ry = wy - origin[1] + skylight::LIGHT_PAD;
+            let rz = wz - origin[2] + skylight::LIGHT_PAD;
+            if rx < 0
+                || rx >= skylight::LIGHT_SIZE as i32
+                || ry < 0
+                || ry >= skylight::LIGHT_HEIGHT as i32
+                || rz < 0
+                || rz >= skylight::LIGHT_SIZE as i32
+            {
+                return Some(0);
+            }
+            let index = skylight::light_index(rx as usize, ry as usize, rz as usize);
+            (snapshot.light_media[index] != skylight::MEDIUM_OPAQUE).then_some(block_solved[index])
+        };
+        build_lod_terrain_quads(snapshot, origin, &light_at, &block_light_at)
     }
 
     #[test]
@@ -2192,7 +2395,11 @@ mod tests {
                 for x in 0..CHUNK_SIZE {
                     for z in 0..CHUNK_SIZE {
                         for y in 0..SEA_LEVEL {
-                            let block = if y < 40 { BlockType::Stone } else { BlockType::Water };
+                            let block = if y < 40 {
+                                BlockType::Stone
+                            } else {
+                                BlockType::Water
+                            };
                             chunk.set_block_raw(x, y, z, block);
                         }
                     }
@@ -2203,7 +2410,11 @@ mod tests {
         }
         let meshes = world.build_subchunk_mesh(0, 0, (SEA_LEVEL - 1) / SUBCHUNK_HEIGHT);
         assert_eq!(meshes.water.len(), 256, "near water keeps 1×1 wave tiles");
-        assert_eq!(meshes.water_far.len(), 1, "open water merges into one sheet");
+        assert_eq!(
+            meshes.water_far.len(),
+            1,
+            "open water merges into one sheet"
+        );
         let sheet = meshes.water_far[0];
         assert_eq!(sheet.face(), 3);
         // Covers the whole 16×16 subchunk (sizes are in half blocks).
@@ -2214,12 +2425,36 @@ mod tests {
     }
 
     #[test]
+    fn lamp_faces_carry_emitted_block_light() {
+        let mut world = World::new_empty_with_seed(1);
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_raw(8, 8, 8, BlockType::Lamp);
+        chunk.rebuild_metadata();
+        world.chunks.insert((0, 0), chunk);
+
+        let mesh = world.build_subchunk_mesh(0, 0, 0);
+        let lamp_quads: Vec<_> = mesh
+            .terrain
+            .iter()
+            .filter(|quad| quad.material() == TEX_LAMP as u8)
+            .collect();
+        assert_eq!(lamp_quads.len(), 6);
+        assert!(
+            lamp_quads
+                .iter()
+                .all(|quad| { quad_block_light(quad).iter().all(|&level| level > 0) })
+        );
+    }
+
+    #[test]
     fn far_terrain_variant_needs_fewer_quads() {
         let generator = crate::world::ChunkGenerator::new(2026);
         let mut world = World::new_empty_with_seed(2026);
         for cx in -3..=3 {
             for cz in -3..=3 {
-                world.chunks.insert((cx, cz), generator.generate_chunk(cx, cz));
+                world
+                    .chunks
+                    .insert((cx, cz), generator.generate_chunk(cx, cz));
             }
         }
         let (mut near, mut far, mut lod) = (0usize, 0usize, 0usize);
@@ -2267,9 +2502,18 @@ mod tests {
         println!("terrain quads: near {near}, far {far}, 2×2×2 {lod}");
         assert!(far * 4 < near * 3, "near {near}, far {far}");
         assert!(lod < far, "far {far}, 2×2×2 {lod}");
-        assert!(near_corner_variation, "near mesh should retain varied corner shading");
-        assert!(far_corner_variation, "far merges should retain varied outer-corner AO/light");
-        assert!(matched_far_corners, "far outer-corner AO/light must match the near mesh");
+        assert!(
+            near_corner_variation,
+            "near mesh should retain varied corner shading"
+        );
+        assert!(
+            far_corner_variation,
+            "far merges should retain varied outer-corner AO/light"
+        );
+        assert!(
+            matched_far_corners,
+            "far outer-corner AO/light must match the near mesh"
+        );
     }
 
     #[test]
@@ -2299,9 +2543,8 @@ mod tests {
         for x in 2..12 {
             for y in 2..12 {
                 for z in 2..12 {
-                    let inside_cave = (4..10).contains(&x)
-                        && (4..10).contains(&y)
-                        && (4..10).contains(&z);
+                    let inside_cave =
+                        (4..10).contains(&x) && (4..10).contains(&y) && (4..10).contains(&z);
                     if !inside_cave {
                         cave_chunk.set_block_raw(x, y, z, BlockType::Stone);
                     }
@@ -2354,6 +2597,7 @@ mod tests {
             );
         }
     }
+
 
     #[test]
     fn terrain_lod_uses_neighboring_supercells_at_chunk_boundaries() {

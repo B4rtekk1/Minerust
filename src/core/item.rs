@@ -25,7 +25,11 @@ pub struct ItemStack {
 
 impl ItemStack {
     pub fn new(item: ItemId, count: u16) -> Self {
-        Self { item, count, state: ItemState::default() }
+        Self {
+            item,
+            count,
+            state: ItemState::default(),
+        }
     }
 
     pub fn can_stack_with(&self, other: &Self) -> bool {
@@ -43,7 +47,11 @@ pub enum ItemKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolType { Pickaxe, Axe, Shovel }
+pub enum ToolType {
+    Pickaxe,
+    Axe,
+    Shovel,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToolItem {
@@ -55,13 +63,23 @@ pub struct ToolItem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FoodItem { pub hunger: f32, pub saturation: f32 }
+pub struct FoodItem {
+    pub hunger: f32,
+    pub saturation: f32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LootEntry { pub item: ItemId, pub min: u16, pub max: u16, pub chance_percent: u8 }
+pub struct LootEntry {
+    pub item: ItemId,
+    pub min: u16,
+    pub max: u16,
+    pub chance_percent: u8,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LootTable { pub entries: Vec<LootEntry> }
+pub struct LootTable {
+    pub entries: Vec<LootEntry>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ItemDefinition {
@@ -74,11 +92,17 @@ pub struct ItemDefinition {
 
 impl ItemDefinition {
     pub fn placeable_block(&self) -> Option<BlockType> {
-        match self.kind { ItemKind::Block { block } => Some(block), _ => None }
+        match self.kind {
+            ItemKind::Block { block } => Some(block),
+            _ => None,
+        }
     }
 
     pub fn max_durability(&self) -> Option<u16> {
-        match self.kind { ItemKind::Tool(tool) => Some(tool.max_durability), _ => None }
+        match self.kind {
+            ItemKind::Tool(tool) => Some(tool.max_durability),
+            _ => None,
+        }
     }
 }
 
@@ -97,15 +121,38 @@ impl ItemRegistry {
         let mut by_block = HashMap::with_capacity(entries.len());
         for &(key, display_name, max_stack, kind) in entries {
             let id = ItemId(definitions.len() as u32);
-            definitions.push(ItemDefinition { id, key, display_name, max_stack, kind });
+            definitions.push(ItemDefinition {
+                id,
+                key,
+                display_name,
+                max_stack,
+                kind,
+            });
             by_key.insert(key, id);
-            if let ItemKind::Block { block } = kind { by_block.insert(block, id); }
+            if let ItemKind::Block { block } = kind {
+                by_block.insert(block, id);
+            }
         }
         let mut loot_by_block = HashMap::with_capacity(by_block.len());
         for (&block, &item) in &by_block {
-            loot_by_block.insert(block, LootTable { entries: vec![LootEntry { item, min: 1, max: 1, chance_percent: 100 }] });
+            loot_by_block.insert(
+                block,
+                LootTable {
+                    entries: vec![LootEntry {
+                        item,
+                        min: 1,
+                        max: 1,
+                        chance_percent: 100,
+                    }],
+                },
+            );
         }
-        Self { definitions, by_key, by_block, loot_by_block }
+        Self {
+            definitions,
+            by_key,
+            by_block,
+            loot_by_block,
+        }
     }
 
     pub fn get(&self, id: ItemId) -> &ItemDefinition {
@@ -116,67 +163,442 @@ impl ItemRegistry {
         self.by_key.get(key).copied()
     }
 
-    pub fn item_for_block(&self, block: BlockType) -> Option<ItemId> { self.by_block.get(&block).copied() }
+    pub fn item_for_block(&self, block: BlockType) -> Option<ItemId> {
+        self.by_block.get(&block).copied()
+    }
 
     pub fn new_stack(&self, item: ItemId, count: u16) -> ItemStack {
         let definition = self.get(item);
-        ItemStack { item, count: count.min(definition.max_stack), state: ItemState { durability: definition.max_durability() } }
+        ItemStack {
+            item,
+            count: count.min(definition.max_stack),
+            state: ItemState {
+                durability: definition.max_durability(),
+            },
+        }
     }
 
-    pub fn loot_for_block(&self, block: BlockType) -> Option<&LootTable> { self.loot_by_block.get(&block) }
+    pub fn loot_for_block(&self, block: BlockType) -> Option<&LootTable> {
+        self.loot_by_block.get(&block)
+    }
 
     pub fn roll_block_loot(&self, block: BlockType) -> Vec<ItemStack> {
-        self.loot_for_block(block).into_iter().flat_map(|table| &table.entries).filter_map(|entry| {
-            (rand::random::<u8>() % 100 < entry.chance_percent).then(|| self.new_stack(entry.item, entry.min))
-        }).collect()
+        self.loot_for_block(block)
+            .into_iter()
+            .flat_map(|table| &table.entries)
+            .filter_map(|entry| {
+                (rand::random::<u8>() % 100 < entry.chance_percent)
+                    .then(|| self.new_stack(entry.item, entry.min))
+            })
+            .collect()
     }
 }
 
 const BLOCK_ITEMS: &[(&str, &str, u16, ItemKind)] = &[
-    ("minerust:grass", "Grass", 64, ItemKind::Block { block: BlockType::Grass }),
-    ("minerust:dirt", "Dirt", 64, ItemKind::Block { block: BlockType::Dirt }),
-    ("minerust:stone", "Stone", 64, ItemKind::Block { block: BlockType::Stone }),
-    ("minerust:sand", "Sand", 64, ItemKind::Block { block: BlockType::Sand }),
-    ("minerust:water", "Water", 1, ItemKind::Block { block: BlockType::Water }),
-    ("minerust:wood", "Wood", 64, ItemKind::Block { block: BlockType::Wood }),
-    ("minerust:leaves", "Leaves", 64, ItemKind::Block { block: BlockType::Leaves }),
-    ("minerust:snow", "Snow", 64, ItemKind::Block { block: BlockType::Snow }),
-    ("minerust:gravel", "Gravel", 64, ItemKind::Block { block: BlockType::Gravel }),
-    ("minecraft:clay", "Clay", 64, ItemKind::Block { block: BlockType::Clay }),
-    ("minecraft:ice", "Ice", 64, ItemKind::Block { block: BlockType::Ice }),
-    ("minerust:cactus", "Cactus", 64, ItemKind::Block { block: BlockType::Cactus }),
-    ("minerust:wood_stairs", "Wood Stairs", 64, ItemKind::Block { block: BlockType::WoodStairs }),
-    ("minerust:coal_ore", "Coal Ore", 64, ItemKind::Block { block: BlockType::CoalOre }),
-    ("minerust:iron_ore", "Iron Ore", 64, ItemKind::Block { block: BlockType::IronOre }),
-    ("minerust:gold_ore", "Gold Ore", 64, ItemKind::Block { block: BlockType::GoldOre }),
-    ("minerust:diamond_ore", "Diamond Ore", 64, ItemKind::Block { block: BlockType::DiamondOre }),
-    ("minerust:deepslate", "Deepslate", 64, ItemKind::Block { block: BlockType::Deepslate }),
-    ("minerust:red_sand", "Red Sand", 64, ItemKind::Block { block: BlockType::RedSand }),
-    ("minerust:terracotta", "Terracotta", 64, ItemKind::Block { block: BlockType::Terracotta }),
-    ("minerust:red_terracotta", "Red Terracotta", 64, ItemKind::Block { block: BlockType::RedTerracotta }),
-    ("minerust:white_terracotta", "White Terracotta", 64, ItemKind::Block { block: BlockType::WhiteTerracotta }),
-    ("minerust:podzol", "Podzol", 64, ItemKind::Block { block: BlockType::Podzol }),
-    ("minerust:moss", "Moss", 64, ItemKind::Block { block: BlockType::Moss }),
-    ("minerust:mossy_stone", "Mossy Stone", 64, ItemKind::Block { block: BlockType::MossyStone }),
-    ("minerust:mycelium", "Mycelium", 64, ItemKind::Block { block: BlockType::Mycelium }),
-    ("minerust:mushroom_stem", "Mushroom Stem", 64, ItemKind::Block { block: BlockType::MushroomStem }),
-    ("minerust:red_mushroom_block", "Red Mushroom Block", 64, ItemKind::Block { block: BlockType::RedMushroomBlock }),
-    ("minerust:brown_mushroom_block", "Brown Mushroom Block", 64, ItemKind::Block { block: BlockType::BrownMushroomBlock }),
-    ("minerust:sandstone", "Sandstone", 64, ItemKind::Block { block: BlockType::Sandstone }),
-    ("minerust:birch_log", "Birch Log", 64, ItemKind::Block { block: BlockType::BirchLog }),
-    ("minerust:cherry_leaves", "Cherry Leaves", 64, ItemKind::Block { block: BlockType::CherryLeaves }),
-    ("minerust:magma", "Magma", 64, ItemKind::Block { block: BlockType::Magma }),
-    ("minerust:dripstone", "Dripstone", 64, ItemKind::Block { block: BlockType::Dripstone }),
-    ("minerust:amethyst", "Amethyst", 64, ItemKind::Block { block: BlockType::Amethyst }),
-    ("minerust:calcite", "Calcite", 64, ItemKind::Block { block: BlockType::Calcite }),
-    ("minerust:cherry_log", "Cherry Log", 64, ItemKind::Block { block: BlockType::CherryLog }),
-    ("minerust:iron_pickaxe", "Iron Pickaxe", 1, ItemKind::Tool(ToolItem { tool_type: ToolType::Pickaxe, mining_speed: 6.0, harvest_level: 2, attack_damage: 4.0, max_durability: 250 })),
-    ("minerust:apple", "Apple", 16, ItemKind::Food(FoodItem { hunger: 4.0, saturation: 2.4 })),
+    (
+        "minerust:grass",
+        "Grass",
+        64,
+        ItemKind::Block {
+            block: BlockType::Grass,
+        },
+    ),
+    (
+        "minerust:dirt",
+        "Dirt",
+        64,
+        ItemKind::Block {
+            block: BlockType::Dirt,
+        },
+    ),
+    (
+        "minerust:stone",
+        "Stone",
+        64,
+        ItemKind::Block {
+            block: BlockType::Stone,
+        },
+    ),
+    (
+        "minerust:sand",
+        "Sand",
+        64,
+        ItemKind::Block {
+            block: BlockType::Sand,
+        },
+    ),
+    (
+        "minerust:water",
+        "Water",
+        1,
+        ItemKind::Block {
+            block: BlockType::Water,
+        },
+    ),
+    (
+        "minerust:wood",
+        "Wood",
+        64,
+        ItemKind::Block {
+            block: BlockType::Wood,
+        },
+    ),
+    (
+        "minerust:leaves",
+        "Leaves",
+        64,
+        ItemKind::Block {
+            block: BlockType::Leaves,
+        },
+    ),
+    (
+        "minerust:snow",
+        "Snow",
+        64,
+        ItemKind::Block {
+            block: BlockType::Snow,
+        },
+    ),
+    (
+        "minerust:gravel",
+        "Gravel",
+        64,
+        ItemKind::Block {
+            block: BlockType::Gravel,
+        },
+    ),
+    (
+        "minecraft:clay",
+        "Clay",
+        64,
+        ItemKind::Block {
+            block: BlockType::Clay,
+        },
+    ),
+    (
+        "minecraft:ice",
+        "Ice",
+        64,
+        ItemKind::Block {
+            block: BlockType::Ice,
+        },
+    ),
+    (
+        "minerust:cactus",
+        "Cactus",
+        64,
+        ItemKind::Block {
+            block: BlockType::Cactus,
+        },
+    ),
+    (
+        "minerust:wood_stairs",
+        "Wood Stairs",
+        64,
+        ItemKind::Block {
+            block: BlockType::WoodStairs,
+        },
+    ),
+    (
+        "minerust:coal_ore",
+        "Coal Ore",
+        64,
+        ItemKind::Block {
+            block: BlockType::CoalOre,
+        },
+    ),
+    (
+        "minerust:iron_ore",
+        "Iron Ore",
+        64,
+        ItemKind::Block {
+            block: BlockType::IronOre,
+        },
+    ),
+    (
+        "minerust:gold_ore",
+        "Gold Ore",
+        64,
+        ItemKind::Block {
+            block: BlockType::GoldOre,
+        },
+    ),
+    (
+        "minerust:diamond_ore",
+        "Diamond Ore",
+        64,
+        ItemKind::Block {
+            block: BlockType::DiamondOre,
+        },
+    ),
+    (
+        "minerust:deepslate",
+        "Deepslate",
+        64,
+        ItemKind::Block {
+            block: BlockType::Deepslate,
+        },
+    ),
+    (
+        "minerust:red_sand",
+        "Red Sand",
+        64,
+        ItemKind::Block {
+            block: BlockType::RedSand,
+        },
+    ),
+    (
+        "minerust:terracotta",
+        "Terracotta",
+        64,
+        ItemKind::Block {
+            block: BlockType::Terracotta,
+        },
+    ),
+    (
+        "minerust:red_terracotta",
+        "Red Terracotta",
+        64,
+        ItemKind::Block {
+            block: BlockType::RedTerracotta,
+        },
+    ),
+    (
+        "minerust:white_terracotta",
+        "White Terracotta",
+        64,
+        ItemKind::Block {
+            block: BlockType::WhiteTerracotta,
+        },
+    ),
+    (
+        "minerust:podzol",
+        "Podzol",
+        64,
+        ItemKind::Block {
+            block: BlockType::Podzol,
+        },
+    ),
+    (
+        "minerust:moss",
+        "Moss",
+        64,
+        ItemKind::Block {
+            block: BlockType::Moss,
+        },
+    ),
+    (
+        "minerust:mossy_stone",
+        "Mossy Stone",
+        64,
+        ItemKind::Block {
+            block: BlockType::MossyStone,
+        },
+    ),
+    (
+        "minerust:mycelium",
+        "Mycelium",
+        64,
+        ItemKind::Block {
+            block: BlockType::Mycelium,
+        },
+    ),
+    (
+        "minerust:mushroom_stem",
+        "Mushroom Stem",
+        64,
+        ItemKind::Block {
+            block: BlockType::MushroomStem,
+        },
+    ),
+    (
+        "minerust:red_mushroom_block",
+        "Red Mushroom Block",
+        64,
+        ItemKind::Block {
+            block: BlockType::RedMushroomBlock,
+        },
+    ),
+    (
+        "minerust:brown_mushroom_block",
+        "Brown Mushroom Block",
+        64,
+        ItemKind::Block {
+            block: BlockType::BrownMushroomBlock,
+        },
+    ),
+    (
+        "minerust:sandstone",
+        "Sandstone",
+        64,
+        ItemKind::Block {
+            block: BlockType::Sandstone,
+        },
+    ),
+    (
+        "minerust:birch_log",
+        "Birch Log",
+        64,
+        ItemKind::Block {
+            block: BlockType::BirchLog,
+        },
+    ),
+    (
+        "minerust:cherry_leaves",
+        "Cherry Leaves",
+        64,
+        ItemKind::Block {
+            block: BlockType::CherryLeaves,
+        },
+    ),
+    (
+        "minerust:magma",
+        "Magma",
+        64,
+        ItemKind::Block {
+            block: BlockType::Magma,
+        },
+    ),
+    (
+        "minerust:dripstone",
+        "Dripstone",
+        64,
+        ItemKind::Block {
+            block: BlockType::Dripstone,
+        },
+    ),
+    (
+        "minerust:amethyst",
+        "Amethyst",
+        64,
+        ItemKind::Block {
+            block: BlockType::Amethyst,
+        },
+    ),
+    (
+        "minerust:calcite",
+        "Calcite",
+        64,
+        ItemKind::Block {
+            block: BlockType::Calcite,
+        },
+    ),
+    (
+        "minerust:cherry_log",
+        "Cherry Log",
+        64,
+        ItemKind::Block {
+            block: BlockType::CherryLog,
+        },
+    ),
+    (
+        "minerust:lamp",
+        "Lamp",
+        64,
+        ItemKind::Block {
+            block: BlockType::Lamp,
+        },
+    ),
+    (
+        "minerust:glowstone",
+        "Glowstone",
+        64,
+        ItemKind::Block {
+            block: BlockType::Glowstone,
+        },
+    ),
+    (
+        "minerust:shroomlight",
+        "Shroomlight",
+        64,
+        ItemKind::Block {
+            block: BlockType::Shroomlight,
+        },
+    ),
+    (
+        "minerust:glow_crystal",
+        "Glow Crystal",
+        64,
+        ItemKind::Block {
+            block: BlockType::GlowCrystal,
+        },
+    ),
+    (
+        "minerust:cobblestone",
+        "Cobblestone",
+        64,
+        ItemKind::Block {
+            block: BlockType::Cobblestone,
+        },
+    ),
+    (
+        "minerust:planks",
+        "Planks",
+        64,
+        ItemKind::Block {
+            block: BlockType::Planks,
+        },
+    ),
+    (
+        "minerust:bricks",
+        "Bricks",
+        64,
+        ItemKind::Block {
+            block: BlockType::Bricks,
+        },
+    ),
+    (
+        "minerust:tuff",
+        "Tuff",
+        64,
+        ItemKind::Block {
+            block: BlockType::Tuff,
+        },
+    ),
+    (
+        "minerust:basalt",
+        "Basalt",
+        64,
+        ItemKind::Block {
+            block: BlockType::Basalt,
+        },
+    ),
+    (
+        "minerust:obsidian",
+        "Obsidian",
+        64,
+        ItemKind::Block {
+            block: BlockType::Obsidian,
+        },
+    ),
+    (
+        "minerust:iron_pickaxe",
+        "Iron Pickaxe",
+        1,
+        ItemKind::Tool(ToolItem {
+            tool_type: ToolType::Pickaxe,
+            mining_speed: 6.0,
+            harvest_level: 2,
+            attack_damage: 4.0,
+            max_durability: 250,
+        }),
+    ),
+    (
+        "minerust:apple",
+        "Apple",
+        16,
+        ItemKind::Food(FoodItem {
+            hunger: 4.0,
+            saturation: 2.4,
+        }),
+    ),
 ];
 
 static REGISTRY: Lazy<ItemRegistry> = Lazy::new(|| ItemRegistry::new(BLOCK_ITEMS));
 
-pub fn item_registry() -> &'static ItemRegistry { &REGISTRY }
+pub fn item_registry() -> &'static ItemRegistry {
+    &REGISTRY
+}
 
 #[cfg(test)]
 mod tests {

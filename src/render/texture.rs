@@ -375,6 +375,7 @@ fn fallback_layer_color(layer: u32) -> [u8; 3] {
         39 => [130, 96, 190],  // amethyst
         40 => [214, 216, 212], // calcite
         41 => [60, 38, 48],    // cherry log
+        42 => [246, 164, 54],  // lamp
         _ => [128, 128, 128],
     }
 }

@@ -229,7 +229,11 @@ impl SubchunkAlloc {
             .lod_range
             .map(|range| range.with_base(self.quad_offset))
             .unwrap_or(far);
-        TerrainVariantRanges { near, far, lod }
+        TerrainVariantRanges {
+            near,
+            far,
+            lod,
+        }
     }
 }
 
@@ -311,7 +315,13 @@ impl FreeList {
     }
 
     /// Adds a free run, merging it with directly adjacent runs.
-    fn insert(&mut self, FreeBlock { mut offset, mut count }: FreeBlock) {
+    fn insert(
+        &mut self,
+        FreeBlock {
+            mut offset,
+            mut count,
+        }: FreeBlock,
+    ) {
         if count == 0 {
             return;
         }
@@ -1099,7 +1109,9 @@ impl IndirectManager {
             return;
         };
         let result = if wait {
-            receiver.recv().map_err(|_| std::sync::mpsc::TryRecvError::Disconnected)
+            receiver
+                .recv()
+                .map_err(|_| std::sync::mpsc::TryRecvError::Disconnected)
         } else {
             receiver.try_recv()
         };
@@ -1261,7 +1273,14 @@ impl IndirectManager {
         let water_draw = water
             .allocations
             .get(&key)
-            .map(|alloc| [alloc.detail_count * 6, alloc.quad_offset * 6, (alloc.quad_count - alloc.detail_count) * 6, 1])
+            .map(|alloc| {
+                [
+                    alloc.detail_count * 6,
+                    alloc.quad_offset * 6,
+                    (alloc.quad_count - alloc.detail_count) * 6,
+                    1,
+                ]
+            })
             .unwrap_or([0; 4]);
 
         let has_geometry = terrain_draw[3] != 0
@@ -1351,7 +1370,14 @@ impl IndirectManager {
             let water_draw = water
                 .allocations
                 .get(key)
-                .map(|alloc| [alloc.detail_count * 6, alloc.quad_offset * 6, (alloc.quad_count - alloc.detail_count) * 6, 1])
+                .map(|alloc| {
+                    [
+                        alloc.detail_count * 6,
+                        alloc.quad_offset * 6,
+                        (alloc.quad_count - alloc.detail_count) * 6,
+                        1,
+                    ]
+                })
                 .unwrap_or([0; 4]);
             let meta = SubchunkGpuMeta {
                 aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z, 0.0],
@@ -1695,7 +1721,7 @@ mod tests {
     use super::*;
 
     fn terrain_quad(face: u8) -> PackedQuad {
-        PackedQuad::terrain([0; 3], face, 2, 2, 3, [7; 3], [3; 4], [15; 4], 0)
+        PackedQuad::terrain([0; 3], face, 2, 2, 3, [7; 3], [3; 4], [15; 4], [0; 4], 0)
     }
 
     #[test]
@@ -1731,12 +1757,24 @@ mod tests {
     #[test]
     fn free_list_merges_neighbours_and_finds_best_fit() {
         let mut list = FreeList::default();
-        list.insert(FreeBlock { offset: 0, count: 4 });
-        list.insert(FreeBlock { offset: 10, count: 2 });
-        list.insert(FreeBlock { offset: 4, count: 6 }); // bridges both runs
+        list.insert(FreeBlock {
+            offset: 0,
+            count: 4,
+        });
+        list.insert(FreeBlock {
+            offset: 10,
+            count: 2,
+        });
+        list.insert(FreeBlock {
+            offset: 4,
+            count: 6,
+        }); // bridges both runs
         assert_eq!(list.by_offset.len(), 1);
         assert_eq!(list.total, 12);
-        list.insert(FreeBlock { offset: 20, count: 3 });
+        list.insert(FreeBlock {
+            offset: 20,
+            count: 3,
+        });
         // Best fit picks the smallest run that is large enough.
         let fit = list.take_best_fit(3).unwrap();
         assert_eq!((fit.offset, fit.count), (20, 3));

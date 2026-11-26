@@ -12,13 +12,22 @@ const BLOCK_PLACE_REPEAT_INTERVAL: f32 = 0.4;
 
 impl State {
     fn resolve_inventory_cursor(&mut self) {
-        let Some(stack) = self.inventory_ui.cursor_stack.take() else { return; };
+        let Some(stack) = self.inventory_ui.cursor_stack.take() else {
+            return;
+        };
         let remainder = match self.inventory_ui.cursor_origin.take() {
-            Some(origin) => self.inventory.return_to_slot(origin, stack, minerust::item_registry()),
+            Some(origin) => self
+                .inventory
+                .return_to_slot(origin, stack, minerust::item_registry()),
             None => Some(stack),
         };
-        if let Some(remainder) = remainder.and_then(|stack| self.inventory.insert(stack, minerust::item_registry())) {
-            self.spawn_item_stack(remainder, self.camera.position + glam::Vec3::new(0.0, -0.4, 0.0));
+        if let Some(remainder) =
+            remainder.and_then(|stack| self.inventory.insert(stack, minerust::item_registry()))
+        {
+            self.spawn_item_stack(
+                remainder,
+                self.camera.position + glam::Vec3::new(0.0, -0.4, 0.0),
+            );
         }
         self.hotbar_dirty = true;
     }
@@ -36,16 +45,23 @@ impl State {
             let _ = self.window.set_cursor_grab(CursorGrabMode::None);
             self.window.set_cursor_visible(true);
         } else {
-            let _ = self.window.set_cursor_grab(CursorGrabMode::Confined)
+            let _ = self
+                .window
+                .set_cursor_grab(CursorGrabMode::Confined)
                 .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked));
             self.window.set_cursor_visible(false);
         }
     }
 
     pub fn handle_inventory_click(&mut self, x: f32, y: f32, right_click: bool) {
-        let layout = crate::ui::inventory::InventoryLayout::new(self.config.width, self.config.height);
-        let Some(slot) = layout.slot_at(x, y) else { return; };
-        let Some(slot) = minerust::PlayerSlot::from_flat(slot) else { return; };
+        let layout =
+            crate::ui::inventory::InventoryLayout::new(self.config.width, self.config.height);
+        let Some(slot) = layout.slot_at(x, y) else {
+            return;
+        };
+        let Some(slot) = minerust::PlayerSlot::from_flat(slot) else {
+            return;
+        };
         let action = if self.modifiers.shift_key() && !right_click {
             minerust::InventoryAction::QuickMove(slot)
         } else if right_click {
@@ -53,8 +69,12 @@ impl State {
         } else {
             minerust::InventoryAction::LeftClick(slot)
         };
-        let result = self.inventory.apply_action(&mut self.inventory_ui, action, minerust::item_registry());
-        if result.changed { self.hotbar_dirty = true; }
+        let result =
+            self.inventory
+                .apply_action(&mut self.inventory_ui, action, minerust::item_registry());
+        if result.changed {
+            self.hotbar_dirty = true;
+        }
     }
     /// Translates a raw mouse-click position into a menu action.
     ///
@@ -158,6 +178,8 @@ impl State {
         self.placement = Default::default();
         self.inventory_open = false;
         self.inventory = Default::default();
+        super::state::ensure_test_lamp(&mut self.inventory);
+        self.hotbar_dirty = true;
         self.inventory_ui = Default::default();
         self.item_entities.clear();
         self.next_entity_id = 1;
@@ -244,7 +266,9 @@ impl State {
         }
 
         let stack = self.inventory.selected_stack()?;
-        let block = minerust::item_registry().get(stack.item).placeable_block()?;
+        let block = minerust::item_registry()
+            .get(stack.item)
+            .placeable_block()?;
 
         self.record_line_placement(place_pos);
         self.placement.cooldown = BLOCK_PLACE_REPEAT_INTERVAL;

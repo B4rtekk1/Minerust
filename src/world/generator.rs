@@ -19,7 +19,7 @@
 //!    ravines, deep pillared caverns and flooded underground lakes.
 //! 5. **Underground**: ore veins, amethyst geodes and cave biomes — lush
 //!    (moss, hanging foliage), dripstone (stalactites and stalagmites) and
-//!    volcanic (magma floors).
+//!    volcanic (magma floors), with glowing cave blocks and tuff deposits.
 //! 6. **Features**: trees, huge mushrooms, cacti, boulders, logs and ice
 //!    spikes. Features are
 //!    anchored on a global jittered grid and evaluated for every anchor within
@@ -53,11 +53,12 @@ const DEEPSLATE_LEVEL: i32 = 18;
 /// Chunks around a chunk whose ore veins and geodes can reach into it.
 const ORE_SOURCE_RADIUS: i32 = 1;
 /// Ore veins per chunk: block, veins, lowest y, highest y, min/max size.
-const ORE_VEINS: [(BlockType, u32, i32, i32, u32, u32); 4] = [
+const ORE_VEINS: [(BlockType, u32, i32, i32, u32, u32); 5] = [
     (BlockType::CoalOre, 18, 8, 120, 5, 12),
     (BlockType::IronOre, 11, 4, 64, 4, 9),
     (BlockType::GoldOre, 4, 3, 34, 3, 8),
     (BlockType::DiamondOre, 2, 2, 16, 2, 6),
+    (BlockType::Tuff, 7, 4, 18, 8, 16),
 ];
 /// Horizontal lattice points of the cave field across one chunk.
 const CAVE_XZ: usize = (CHUNK_SIZE / CAVE_CELL_SIZE + 1) as usize;
@@ -1213,7 +1214,17 @@ impl ChunkGenerator {
                             let block = if d <= radius - 2.2 {
                                 BlockType::Air
                             } else if d <= radius - 1.1 {
-                                BlockType::Amethyst
+                                if self.hash3(
+                                    p[0] as i32,
+                                    p[1] as i32,
+                                    p[2] as i32,
+                                    0x6e0e,
+                                ) % 5 == 0
+                                {
+                                    BlockType::GlowCrystal
+                                } else {
+                                    BlockType::Amethyst
+                                }
                             } else if d <= radius {
                                 BlockType::Calcite
                             } else {
@@ -1230,11 +1241,12 @@ impl ChunkGenerator {
     /// Cave biomes. Every open cave cell is checked for a stone floor below
     /// or a stone ceiling above, and decorated by the local cave biome:
     ///
-    /// - **lush** (humid regions): moss floors, mossy ceilings and hanging
-    ///   foliage;
-    /// - **dripstone** (dry regions): dripstone floors, stalactites and
-    ///   stalagmites;
-    /// - **volcanic** (deep down): magma patches on cavern floors.
+    /// - **lush** (humid regions): moss floors, mossy ceilings, hanging
+    ///   foliage and shroomlights;
+    /// - **dripstone** (dry regions): dripstone floors, stalactites,
+    ///   stalagmites and glowing crystals;
+    /// - **volcanic** (deep down): magma and basalt on cavern floors.
+    /// - Every biome can have rare glowstone hanging from deep ceilings.
     ///
     /// Only blocks of the column itself are touched, so the result does not
     /// depend on neighbouring chunks.
@@ -1256,18 +1268,24 @@ impl ChunkGenerator {
                     let below = chunk.get_block(lx, y - 1, lz);
                     let above = chunk.get_block(lx, y + 1, lz);
                     let h = self.hash3(wx, y, wz, 0xcafe);
+                    let glow_h = self.hash3(wx, y, wz, 0x1a17);
                     let floor = below.is_stone_like() || matches!(below, BlockType::Gravel | BlockType::Dirt);
                     let ceiling = above.is_stone_like();
                     if floor {
                         if lush {
                             let moss = if h % 6 == 0 { BlockType::MossyStone } else { BlockType::Moss };
                             chunk.set_block_raw(lx, y - 1, lz, moss);
+                            if glow_h % 61 == 0 {
+                                chunk.set_block_raw(lx, y - 1, lz, BlockType::Shroomlight);
+                            }
                             if h % 23 == 0 && above == BlockType::Air {
                                 // Small azalea-like shrub.
                                 chunk.set_block_raw(lx, y, lz, BlockType::Leaves);
                             }
                         } else if dripstone {
-                            if h % 3 != 0 {
+                            if glow_h % 29 == 0 {
+                                chunk.set_block_raw(lx, y - 1, lz, BlockType::GlowCrystal);
+                            } else if h % 3 != 0 {
                                 chunk.set_block_raw(lx, y - 1, lz, BlockType::Dripstone);
                             }
                             if (h >> 8) % 9 == 0 {
@@ -1276,6 +1294,20 @@ impl ChunkGenerator {
                             }
                         } else if volcanic && y < 26 && h % 3 == 0 {
                             chunk.set_block_raw(lx, y - 1, lz, BlockType::Magma);
+                        }
+                        if volcanic && y < 26 {
+                            let floor_block = chunk.get_block(lx, y - 1, lz);
+                            if floor_block != BlockType::Magma {
+                                if glow_h % 223 == 0 {
+                                    chunk.set_block_raw(lx, y - 1, lz, BlockType::Obsidian);
+                                } else if glow_h % 13 == 0 {
+                                    chunk.set_block_raw(lx, y - 1, lz, BlockType::Basalt);
+                                }
+                            } else if glow_h % 7 == 0
+                                && chunk.get_block(lx, y - 2, lz).is_stone_like()
+                            {
+                                chunk.set_block_raw(lx, y - 2, lz, BlockType::Basalt);
+                            }
                         }
                     }
                     if ceiling {
@@ -1286,9 +1318,17 @@ impl ChunkGenerator {
                             if (h >> 4) % 8 == 0 {
                                 let length = 1 + ((h >> 12) % 4) as i32;
                                 grow(chunk, lx, y, lz, -1, length, BlockType::Leaves);
+                                let tip_y = y - length + 1;
+                                if glow_h % 5 == 0
+                                    && chunk.get_block(lx, tip_y, lz) == BlockType::Leaves
+                                {
+                                    chunk.set_block_raw(lx, tip_y, lz, BlockType::Shroomlight);
+                                }
                             }
                         } else if dripstone {
-                            if h % 3 == 1 {
+                            if glow_h % 31 == 0 {
+                                chunk.set_block_raw(lx, y + 1, lz, BlockType::GlowCrystal);
+                            } else if h % 3 == 1 {
                                 chunk.set_block_raw(lx, y + 1, lz, BlockType::Dripstone);
                             }
                             if (h >> 4) % 7 == 0 {
@@ -1296,6 +1336,9 @@ impl ChunkGenerator {
                                 grow(chunk, lx, y, lz, -1, length, BlockType::Dripstone);
                             }
                         }
+                    }
+                    if ceiling && y < 48 && glow_h % 97 == 0 {
+                        chunk.set_block_raw(lx, y + 1, lz, BlockType::Glowstone);
                     }
                 }
             }
@@ -2230,6 +2273,31 @@ mod tests {
             chunk_hash(&ChunkGenerator::new(1).generate_chunk(0, 0)),
             chunk_hash(&ChunkGenerator::new(2).generate_chunk(0, 0))
         );
+    }
+
+    #[test]
+    fn generated_caves_include_emissive_blocks_below_the_surface() {
+        let generator = ChunkGenerator::new(2026);
+        let mut found = false;
+        'chunks: for cx in -2..=2 {
+            for cz in -2..=2 {
+                let chunk = generator.generate_chunk(cx, cz);
+                for lx in 0..CHUNK_SIZE {
+                    for lz in 0..CHUNK_SIZE {
+                        let wx = cx * CHUNK_SIZE + lx;
+                        let wz = cz * CHUNK_SIZE + lz;
+                        let surface = generator.sample_column(wx, wz).surface();
+                        for y in 1..surface {
+                            if chunk.get_block(lx, y, lz).is_emissive() {
+                                found = true;
+                                break 'chunks;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "expected an emissive block in the generated caves");
     }
 
     #[test]

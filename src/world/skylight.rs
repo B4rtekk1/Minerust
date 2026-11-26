@@ -29,6 +29,8 @@ pub const LIGHT_LEN: usize = LIGHT_SIZE * LIGHT_HEIGHT * LIGHT_SIZE;
 pub const MAX_SKY_LIGHT: u8 = 15;
 /// Light lost per block when spreading through air.
 pub const SPREAD_COST: u8 = 2;
+/// Light lost per block when block light spreads through the world.
+pub const BLOCK_SPREAD_COST: u8 = 2;
 
 /// How a cell transports light.
 pub const MEDIUM_OPAQUE: u8 = 0;
@@ -104,9 +106,8 @@ pub fn solve(media: &[u8], sky_height: &[i16], region_bottom: i32) -> Vec<u8> {
                 if level <= SPREAD_COST {
                     continue;
                 }
-                let can_spread = neighbours(x, y, z).any(|n| {
-                    media[n] != MEDIUM_OPAQUE && light[n] + cost(media[n]) < level
-                });
+                let can_spread = neighbours(x, y, z)
+                    .any(|n| media[n] != MEDIUM_OPAQUE && light[n] + cost(media[n]) < level);
                 if can_spread {
                     queue.push(i as u32);
                 }
@@ -130,6 +131,45 @@ pub fn solve(media: &[u8], sky_height: &[i16], region_bottom: i32) -> Vec<u8> {
                 if next > SPREAD_COST {
                     queue.push(n as u32);
                 }
+            }
+        }
+    }
+    light
+}
+
+/// Solves block light from emitted levels over one padded region.
+///
+/// Opaque source cells are allowed to emit into neighbouring open cells, but
+/// light cannot enter or pass through other opaque cells.
+pub fn solve_block(media: &[u8], sources: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(media.len(), LIGHT_LEN);
+    debug_assert_eq!(sources.len(), LIGHT_LEN);
+    let mut light = vec![0u8; LIGHT_LEN];
+    let mut queue = Vec::new();
+    for (index, &source) in sources.iter().enumerate() {
+        if source > 0 {
+            light[index] = source.min(MAX_SKY_LIGHT);
+            queue.push(index as u32);
+        }
+    }
+
+    let mut head = 0;
+    while head < queue.len() {
+        let index = queue[head] as usize;
+        head += 1;
+        let level = light[index];
+        if level <= BLOCK_SPREAD_COST {
+            continue;
+        }
+        let (x, y, z) = position(index);
+        for neighbour in neighbours(x, y, z) {
+            if media[neighbour] == MEDIUM_OPAQUE {
+                continue;
+            }
+            let next = level.saturating_sub(BLOCK_SPREAD_COST);
+            if next > light[neighbour] {
+                light[neighbour] = next;
+                queue.push(neighbour as u32);
             }
         }
     }
@@ -241,5 +281,26 @@ mod tests {
         let light = solve(&media, &sky_heights(&media, 0), 0);
         assert_eq!(light[light_index(16, 24, 16)], MAX_SKY_LIGHT - 2);
         assert!(light[light_index(16, 6, 16)] < light[light_index(16, 13, 16)]);
+    }
+
+    #[test]
+    fn block_light_spreads_from_opaque_sources_and_stops_at_walls() {
+        let source = light_index(16, 8, 16);
+        let mut media = vec![MEDIUM_AIR; LIGHT_LEN];
+        let mut sources = vec![0u8; LIGHT_LEN];
+        media[source] = MEDIUM_OPAQUE;
+        sources[source] = MAX_SKY_LIGHT;
+        for z in 0..LIGHT_SIZE {
+            for y in 0..LIGHT_HEIGHT {
+                media[light_index(20, y, z)] = MEDIUM_OPAQUE;
+            }
+        }
+
+        let light = solve_block(&media, &sources);
+        assert_eq!(light[source], 15);
+        assert_eq!(light[light_index(15, 8, 16)], 13);
+        assert_eq!(light[light_index(9, 8, 16)], 1);
+        assert_eq!(light[light_index(8, 8, 16)], 0);
+        assert_eq!(light[light_index(21, 8, 16)], 0);
     }
 }

@@ -71,7 +71,7 @@ and multiplayer foundations are already present.
 - Separate **opaque terrain** and **transparent water** rendering paths.
 - Water shading with **screen-space reflection data, refraction, Fresnel blending, and foam/edge logic**.
 - **4× MSAA** in the current renderer.
-- Procedural sky/sun rendering.
+- Procedural sky/sun rendering with a ten-minute automatic day/night cycle.
 - Full-screen composite stage with effects such as **underwater fog/color grading and vignette**.
 - GPU timestamp profiling and an in-game performance/debug overlay.
 
