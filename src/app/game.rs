@@ -700,7 +700,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                 // chunks that contain player-modified blocks, so
                                 // procedurally-generated terrain can be
                                 // regenerated from the seed on the next load.
-                                let saved = SavedWorld::from_world(
+                                let saved = SavedWorld::from_world_with_generator_version(
                                     &world.chunks,
                                     world.seed,
                                     (
@@ -710,6 +710,7 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     ),
                                     (state.camera.yaw, state.camera.pitch),
                                     &state.inventory,
+                                    world.generator_version,
                                 );
                                 if let Err(e) = save_world(DEFAULT_WORLD_FILE, &saved) {
                                     log(LogLevel::Error, &format!("Failed to save world: {}", e));
@@ -735,7 +736,10 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     // with the serialized player edits below.
                                     {
                                         let mut world = state.world.write();
-                                        *world = World::new_with_seed(saved.seed);
+                                        *world = World::new_with_seed_and_version(
+                                            saved.seed,
+                                            saved.generator_version,
+                                        );
                                     }
 
                                     // Clear the indirect draw managers so they
@@ -810,7 +814,10 @@ pub fn run_game() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     // Discard previous-world jobs and recreate generators
                                     // with the restored seed before streaming resumes.
-                                    state.chunk_loader = minerust::ChunkLoader::new(saved.seed);
+                                    state.chunk_loader = minerust::ChunkLoader::new_with_version(
+                                        saved.seed,
+                                        saved.generator_version,
+                                    );
                                     state.mesh_loader = minerust::MeshLoader::new(
                                         state.world.clone(),
                                         minerust::get_mesh_worker_count(),

@@ -9,9 +9,15 @@ The `player/` module manages the player character, including camera control, inp
 ```
 player/
 ├── mod.rs              ← Module declaration and public API
-├── camera.rs           ← Camera system and projection matrices
-└── input.rs            ← Player input and movement handling
+├── camera.rs           ← Camera and movement state
+├── input.rs            ← Input and digging state
+├── inventory/          ← Inventory storage, transactions and UI state
+└── player_stats.rs     ← Player statistics
 ```
+
+The current public player API centers on `Camera`, `InputState`, `DiggingState`, and
+inventory types. This module does not expose the generic `Player`/physics API described
+in some sections below; treat those examples and numeric defaults as historical notes.
 
 ## File Documentation
 

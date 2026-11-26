@@ -69,4 +69,4 @@ pub use render::{
 pub use save::{DEFAULT_WORLD_FILE, SavedInventory, SavedItemStack, SavedWorld, load_world, save_world};
 pub use vertex::OutlineVertex;
 pub use world::{block_for_item, drop_for_block, EntityId, ItemEntity};
-pub use world::{ChunkGenResult, ChunkGenerator, ChunkLoader, World};
+pub use world::{ChunkGenResult, ChunkGenerator, ChunkLoader, GeneratorVersion, World};

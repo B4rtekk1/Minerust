@@ -10,7 +10,7 @@ The `src/` directory contains all Rust source code for the Minerust project, org
 Entry point of the application. Initializes logging and delegates to the `app` module to start the game loop.
 
 ```rust
-// Initializes tracing for logging
+// Initializes the application logger
 // Calls app::run_game() to start the main loop
 ```
 
@@ -36,13 +36,13 @@ src/
 ├── core/          ← World data structures (blocks, chunks)
 ├── player/        ← Player character & camera
 ├── render/        ← Rendering pipeline & mesh management
-├── render_core/   ← Advanced rendering utilities
 ├── multiplayer/   ← Networking & multiplayer
 ├── ui/            ← User interface & menus
 ├── world/         ← World generation & terrain
-├── utils/         ← Configuration & utilities
-├── settings/      ← Settings files
-└── shaders/       ← Shader module
+├── commands/      ← Command definitions
+├── logger/        ← Timestamped file logging
+├── minerust_data/ ← Platform-specific app data paths
+└── shaders/       ← WGSL sources (cull, terrain, water)
 ```
 
 ## Key Patterns
@@ -60,8 +60,8 @@ Each folder has a `mod.rs` file that:
 
 ### Async/Threading
 - World generation happens on background threads
-- GPU operations happen on async task executor
-- No blocking calls in main game loop
+- GPU work is submitted through `wgpu`; it is not run on a project-wide async executor
+- Chunk generation and mesh building use worker threads; rendering is coordinated by the app loop
 
 ## Building & Compilation
 
@@ -77,10 +77,12 @@ cargo build --release
 cargo run --release
 ```
 
-### Build with Specific Profile
+### Run the mesh benchmark
 ```bash
-cargo build --profile release
+cargo run --release --example mesh_bench -- 12345
 ```
+
+This compares CPU mesh output and quad counts; it does not measure GPU frame time.
 
 ## Code Organization Best Practices
 
@@ -100,9 +102,9 @@ use crate::core::*;       // Core types
 
 ## Testing
 
-Tests can be added using Rust's built-in testing framework:
+Run the library unit tests and shader validation with:
 ```bash
-cargo test
+cargo test --lib
 ```
 
 ## Documentation

@@ -12,9 +12,17 @@ core/
 ├── block.rs       ← Block type definitions and properties
 ├── chunk.rs       ← Chunk and SubChunk data structures
 ├── biome.rs       ← Biome definitions and generation parameters
+├── item.rs        ← Items, tools, food and loot tables
+├── quad.rs        ← Packed terrain quad data
+├── mobs/          ← Mob types and behavior
 ├── vertex.rs      ← Vertex data structures for GPU
 └── uniforms.rs    ← GPU uniform buffer structures
 ```
+
+Current core types include block/chunk storage, item and loot definitions, and the packed
+quad format consumed by the renderer. The detailed snippets below are historical examples;
+they do not consistently match current enum variants or public method signatures. Consult
+the Rust definitions before relying on an API description.
 
 ## File Documentation
 

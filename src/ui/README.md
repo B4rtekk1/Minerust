@@ -9,9 +9,16 @@ The `ui/` module handles all user interface elements including menus, HUD (heads
 ```
 ui/
 ├── mod.rs              ← Module declaration and public API
-├── ui.rs               ← Core UI rendering system
-└── menu.rs             ← Menu systems (main, pause, settings)
+├── font.rs             ← Font handling
+├── inventory.rs        ← Inventory UI
+├── menu.rs             ← Menus
+├── toolbar.rs          ← Hotbar/toolbar
+└── ui.rs               ← UI rendering and interaction
 ```
+
+Current UI code is split across menu, inventory, font, toolbar, and shared UI modules.
+The generic `UIManager`, layout/button system, and example HUD values in the sections
+below are design sketches, not guaranteed current types or behavior.
 
 ## File Documentation
 
@@ -61,7 +68,7 @@ Screen Output
 **HUD Elements:**
 ```
 ┌────────────────────────────────────┐
-│ Minerust v0.1.0        FPS: 120    │  Top-left/right
+│ Minerust (example)       FPS: --   │  Top-left/right
 ├────────────────────────────────────┤
 │                                    │
 │  O───────┤                         │  Crosshair (center)

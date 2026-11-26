@@ -12,6 +12,10 @@
 GPU-driven terrain submission, asynchronous world streaming, procedural generation,
 inventory/gameplay systems, save files, and early-stage TCP multiplayer.
 
+Current rendering keeps detailed near terrain and an AO/light-tolerant merged far mesh
+in GPU memory; culling switches to the far mesh at 160 blocks. A generated 2×2×2 LOD
+mesh is retained for experimentation but is not currently selected for drawing.
+
 [Features](#-features) •
 [Quick Start](#-quick-start) •
 [Architecture](#-architecture) •
@@ -61,6 +65,8 @@ and multiplayer foundations are already present.
 - **Growable shared quad arenas** for terrain and water geometry.
 - **Free-list allocation and arena compaction** for long-running chunk streaming.
 - **Greedy meshing** on the CPU mesh path to merge compatible voxel faces.
+- A separate merged far-terrain mesh is generated alongside the detailed mesh and selected by GPU culling at 160 blocks; it keeps the same block resolution and preserves outer-corner AO/light.
+- A 2×2×2 terrain LOD mesh is also generated and stored, but is currently not selected by culling because LOD boundary stitching is not enabled.
 - **Asynchronous mesh workers** with versioned mesh results so stale work can be rejected safely.
 - Separate **opaque terrain** and **transparent water** rendering paths.
 - Water shading with **screen-space reflection data, refraction, Fresnel blending, and foam/edge logic**.
@@ -156,6 +162,12 @@ The save system stores:
 Procedural terrain that was not modified by the player can be regenerated from the seed,
 which keeps save files smaller than serializing the entire loaded world.
 
+New worlds use rounded, multi-scale mountain ranges, and river carving fades gradually
+at high elevations to avoid abrupt mountain-side cliffs. Save files store the terrain
+generator version; older files without a version continue using the original terrain
+shape, while unsupported future versions are rejected instead of silently changing the
+world.
+
 Default save file:
 
 ```text
@@ -192,8 +204,7 @@ packets between clients. It is **not yet a complete authoritative world-simulati
 
 - **Rust stable with Rust 2024 edition support** — Rust 1.85+ is recommended.
 - A GPU and driver supported by **wgpu**.
-- Windows is the primary development/release target at the moment.
-- Linux/macOS may work through wgpu/winit, but are not guaranteed to be tested on every revision.
+- Window-system and graphics-driver support is required for the game client; the dedicated server runs headlessly.
 
 ### Clone and run
 
@@ -528,14 +539,31 @@ The current architecture is specifically intended to reduce:
 Actual FPS, RAM use, and VRAM use depend heavily on render distance, resolution,
 GPU, world complexity, and current development state.
 
+### Terrain mesh benchmark
+
+`examples/mesh_bench.rs` compares CPU mesh generation and quad counts for a generated
+region; it does not measure GPU frame time:
+
+```bash
+cargo run --release --example mesh_bench -- 12345
+```
+
+One recorded run produced 122,507 far-terrain quads (45.6% fewer than near) and a
+32,141-quad LOD selection estimate (85.7% fewer, using far/near fallback where no LOD
+mesh was available). Storing both variants added 154,363 quads (+68.6% versus near).
+Meshing took 0.614 ms per non-empty subchunk in that run. These are seed- and
+machine-specific CPU results, not a GPU performance guarantee; the 2×2×2 result is not
+currently drawn.
+
 ---
 
 ## 🧪 Experimental / work in progress
 
 Several parts of the repository are intentionally incomplete or experimental:
 
-- `gpu_mesher.rs` contains an experimental compute-based face extraction implementation,
-  but it is not currently wired into the public `render` module/main rendering path.
+- The 2×2×2 terrain mesh is generated and uploaded, but not selected by culling until
+  compatible LOD boundaries can be guaranteed. The current far mesh keeps the original
+  block resolution and uses the same terrain lighting path as the near mesh.
 - Mob classes and passive AI scaffolding exist, but there is no complete mob gameplay loop yet.
 - Furnace/container slot rules exist, but furnace processing is not implemented yet.
 - Multiplayer is functional as a transport/synchronization foundation, but server-authoritative
@@ -572,6 +600,7 @@ Additional documentation is available in:
 - [`DEVELOPMENT.md`](DEVELOPMENT.md)
 - [`DOCUMENTATION_MAP.md`](DOCUMENTATION_MAP.md)
 - [`FOLDER_STRUCTURE.md`](FOLDER_STRUCTURE.md)
+- [`src/README.md`](src/README.md)
 - [`src/app/README.md`](src/app/README.md)
 - [`src/core/README.md`](src/core/README.md)
 - [`src/render/README.md`](src/render/README.md)
@@ -579,9 +608,11 @@ Additional documentation is available in:
 - [`src/multiplayer/README.md`](src/multiplayer/README.md)
 - [`src/player/README.md`](src/player/README.md)
 - [`src/ui/README.md`](src/ui/README.md)
+- [`src/utils/README.md`](src/utils/README.md)
+- [`assets/README.md`](assets/README.md)
 
-Because the project changes quickly, some detailed module documentation can become stale.
-When documentation and implementation disagree, prefer the current source code.
+Module guides now summarize current behavior and mark unverified older design sections
+as historical. For exact APIs and behavior, the implementation remains authoritative.
 
 ---
 

@@ -4,6 +4,16 @@
 
 This project includes comprehensive documentation across multiple files. Here's your guide to navigate them:
 
+## Current implementation snapshot
+
+- The renderer stores detailed near and merged far terrain geometry; GPU culling selects
+  far geometry from 160 blocks. The generated 2×2×2 terrain mesh is stored but not drawn
+  until subchunk LOD boundaries are stitched.
+- Multiplayer currently supports TCP only. The dedicated server is an early relay/state
+  foundation, not a fully authoritative world simulation.
+- `src/utils/` contains settings/GPU-memory prototypes, but its module root is empty, so
+  these files are not wired into the runtime. Some module guides label older sketches.
+
 ## 🎯 Start Here
 
 1. **[README.md](README.md)** ⭐ *Main Project Overview*
@@ -26,7 +36,7 @@ This project includes comprehensive documentation across multiple files. Here's 
 
 ## 📁 Module Documentation
 
-Each major module has its own detailed README:
+Selected modules have README guides; consult the Rust source for exact current APIs.
 
 ### Core Modules
 
@@ -41,7 +51,7 @@ Each major module has its own detailed README:
 ### Supporting Modules
 
 - **[src/ui/README.md](src/ui/README.md)** - User interface system
-- **[src/utils/README.md](src/utils/README.md)** - Configuration & utilities
+- **[src/utils/README.md](src/utils/README.md)** - Placeholder module status
 - **[assets/README.md](assets/README.md)** - Game assets guide
 
 ## 🗂️ Documentation Map
@@ -91,7 +101,7 @@ minerust/
 **How UI and menus work:**
 → Read [src/ui/README.md](src/ui/README.md)
 
-**Configuration and settings:**
+**Current utility-module status:**
 → Read [src/utils/README.md](src/utils/README.md)
 
 **All assets and resources:**
@@ -142,9 +152,8 @@ minerust/
 │  └──────────────────────────────────────────┘   │
 │                                                  │
 │  ┌──────────────────────────────────────────┐   │
-│  │     UI & Utils (ui/, utils/)             │   │
+│  │     UI (ui/)                              │   │
 │  │  • Menus & HUD                           │   │
-│  │  • Settings & configuration              │   │
 │  └──────────────────────────────────────────┘   │
 │                                                  │
 └─────────────────────────────────────────────────┘
@@ -153,8 +162,8 @@ minerust/
 ┌─────────────────────────────────────────────────────┐
 │            External Dependencies                   │
 ├─────────────────────────────────────────────────────┤
-│  wgpu (GPU) │ tokio (async) │ quinn (networking) │ │
-│  cgmath     │ glyphon       │ fastnoise-lite    │ │
+│  wgpu (GPU) │ winit (window) │ tokio (networking) │ │
+│  glam       │ glyphon        │ fastnoise-lite     │ │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -198,9 +207,9 @@ minerust/
 ### Technical Concepts
 - **GPU-Driven Rendering** - GPU handles culling and draw commands
 - **Frustum Culling** - Skip rendering chunks outside view
-- **Mesh Pooling** - Unified buffers for all chunk meshes
+- **Mesh Arenas** - Growable packed-quad buffers with indirect draw metadata
 - **Async Generation** - Chunks generated on background threads
-- **QUIC Protocol** - Modern networking with low latency
+- **TCP Protocol** - The only currently supported multiplayer transport
 
 ### Architecture Patterns
 - **Module Separation** - Clear responsibility boundaries
@@ -224,8 +233,8 @@ minerust/
 **Add new UI elements**
 → [src/ui/README.md](src/ui/README.md)
 
-**Change game settings**
-→ [src/utils/README.md](src/utils/README.md)
+**Inspect graphics/UI options**
+→ [src/app/README.md](src/app/README.md) and [src/ui/README.md](src/ui/README.md)
 
 **Debug a problem**
 → [DEVELOPMENT.md](DEVELOPMENT.md)
@@ -251,18 +260,14 @@ minerust/
 - [Game Engine Architecture](https://gameenginebook.com/)
 
 **Networking:**
-- [QUIC Explained](https://quicwg.org/)
+- [Tokio TCP stream](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html)
 - [Game Network Programming](https://gafferongames.com/)
 
 ## 📞 Support
 
-For questions about specific modules, refer to their README files first. They contain:
-- Module purpose and responsibilities
-- Key types and functions
-- Data flow diagrams
-- Integration points with other modules
-- Performance characteristics
-- Common patterns and examples
+For module overviews, see the linked README files. Some detailed sections are historical
+design notes rather than verified API references; consult the Rust source for exact types,
+data flow, and behavior.
 
 ## 📝 Documentation Maintenance
 
@@ -275,8 +280,7 @@ All documentation files in this project follow these principles:
 
 ---
 
-**Documentation Last Updated:** 2026-03-05  
-**Project Version:** 0.1.0  
+**Documentation Last Updated:** 2026-11-26
 **Status:** Active Development
 
 For the latest updates, check the main [README.md](README.md).

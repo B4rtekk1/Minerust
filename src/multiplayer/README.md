@@ -2,22 +2,33 @@
 
 ## Overview
 
-The `multiplayer/` module implements a client-server architecture for multiplayer gaming. It handles network communication using QUIC (primary) and TCP (fallback), player synchronization, chunk streaming to clients, and authoritative server validation.
+The `multiplayer/` module contains early TCP multiplayer foundations: a client, a dedicated server, a packet protocol, remote-player state, and a transport abstraction. TCP is the only implemented transport; the server is not a complete authoritative simulation.
 
 ## Module Structure
 
 ```
 multiplayer/
 ├── mod.rs              ← Module declaration and public API
-├── client.rs           ← Client-side networking logic
-├── server.rs           ← Server-side game logic
+├── client.rs           ← TCP client
+├── server.rs           ← Dedicated TCP server
 ├── network.rs          ← Shared networking utilities
 ├── protocol.rs         ← Message protocol definitions
 ├── transport.rs        ← Transport layer abstraction
-├── quic.rs             ← QUIC protocol implementation
-├── tcp.rs              ← TCP fallback implementation
+├── tcp.rs              ← TCP transport implementation
 └── player.rs           ← Remote player state management
 ```
+
+## Current implementation status
+
+- The wire format uses length-prefixed binary packets serialized with `postcard`.
+- Connection setup exchanges a client hello, server-assigned player ID, and world seed.
+- Position, rotation, block changes, chat, ping/pong, and disconnects are represented in
+  the protocol; remote players can be rendered by the client.
+- The server primarily relays and handles connection/player state. It does not own and
+  simulate the world authoritatively, and this multiplayer path should be treated as
+  experimental rather than as an anti-cheat boundary.
+- The sections below are retained design notes and may describe planned types or behavior
+  that are not present in the current source. For actual APIs, consult the Rust files.
 
 ## File Documentation
 

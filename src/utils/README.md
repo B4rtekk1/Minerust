@@ -2,20 +2,24 @@
 
 ## Overview
 
-The `utils/` module contains utility functions and helper systems used throughout the project, including configuration management, GPU diagnostics, and server properties.
+`src/utils/mod.rs` is empty, so the adjacent `settings.rs` and `gpu_memory_info.rs` files
+are not declared or wired into the application. They are source prototypes, not active
+settings or GPU-diagnostics APIs; `settings_deafult.yaml` is not loaded by the current app.
 
 ## Module Structure
 
 ```
 utils/
-├── mod.rs                      ← Module declaration and public API
-├── settings.rs                 ← Settings management system
-├── gpu_memory_info.rs          ← GPU memory tracking and diagnostics
-├── server_properties.rs        ← Server configuration
-├── settings/                   ← Settings configuration files
-│   └── (default settings)
-└── settings_deafult.yaml       ← Default settings template
+├── mod.rs                      ← Empty module root; no submodules exported
+├── settings.rs                 ← Unwired settings prototype
+├── gpu_memory_info.rs          ← Unwired GPU memory diagnostic prototype
+├── settings_deafult.yaml       ← Unused defaults draft
+└── README.md                   ← This note
 ```
+
+No shared configuration API is currently exposed from this directory. The following
+sections describe proposed utility/settings designs and do not describe active runtime
+behavior.
 
 ## File Documentation
 
@@ -152,21 +156,7 @@ pub struct MemoryBreakdown {
 }
 ```
 
-**Memory Usage Example (8GB GPU):**
-```
-Total Available: 8192 MB
-
-Usage Breakdown:
-├── Vertex Buffers:     560 MB (6.8%)  ← Main geometry
-├── Index Buffers:      256 MB (3.1%)  ← Indices
-├── Textures:         2048 MB (25.0%)  ← Atlas & block textures
-├── Render Targets:     256 MB (3.1%)  ← HDR, GBuffer, etc.
-├── Uniform Buffers:     32 MB (0.4%)  ← Camera, lighting
-└── Driver/Other:       512 MB (6.3%)
-
-Used: 3664 MB (44.7%)
-Free: 4528 MB (55.3%)
-```
+There is no current GPU-memory report or measured memory breakdown exposed by the app.
 
 **Performance Analysis:**
 
@@ -184,28 +174,8 @@ pub fn analyze_pressure(&self) -> MemoryPressure {
 }
 ```
 
-**Diagnostic Output:**
-```
-GPU Memory Report:
-═══════════════════════════════════════════════════════════
-Device: NVIDIA GeForce RTX 3080
-Total Memory: 10.00 GB (10240 MB)
-Used Memory:  4.60 GB (4710 MB) - 46.0%
-Free Memory:  5.40 GB (5530 MB) - 54.0%
-
-Memory Pressure: MEDIUM (OK)
-
-Breakdown:
-  Vertex Buffers:  560.0 MB (54.2% of used)
-  Index Buffers:   256.0 MB (24.8% of used)
-  Textures:      2000.0 MB (19.4% of used)
-  Other:           166.0 MB (1.6% of used)
-
-Recommendations:
-  ✓ Plenty of VRAM available
-  ✓ Can increase texture quality
-═══════════════════════════════════════════════════════════
-```
+The examples in the historical diagnostics design below are illustrative only; they are
+not output from Minerust and should not be used as measurements.
 
 **Memory Optimization Suggestions:**
 

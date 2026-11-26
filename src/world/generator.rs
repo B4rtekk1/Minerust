@@ -62,6 +62,27 @@ const ORE_VEINS: [(BlockType, u32, i32, i32, u32, u32); 4] = [
 /// Horizontal lattice points of the cave field across one chunk.
 const CAVE_XZ: usize = (CHUNK_SIZE / CAVE_CELL_SIZE + 1) as usize;
 
+/// Selects the deterministic terrain-shaping rules used for a world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GeneratorVersion {
+    /// Original terrain shape, used by saves created before generator versioning.
+    Legacy = 1,
+    /// Rounded, multi-scale mountains with rivers faded at high elevation.
+    #[default]
+    Current = 2,
+}
+
+impl GeneratorVersion {
+    pub const fn from_u8(version: u8) -> Option<Self> {
+        match version {
+            1 => Some(Self::Legacy),
+            2 => Some(Self::Current),
+            _ => None,
+        }
+    }
+}
+
 /// Smooth Hermite step from `e0` to `e1` (either order).
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -214,16 +235,21 @@ pub struct ChunkGenerator {
     cave_biome: FastNoiseLite,
     pillars: FastNoiseLite,
     pub seed: u32,
+    pub version: GeneratorVersion,
 }
 
 impl Clone for ChunkGenerator {
     fn clone(&self) -> Self {
-        Self::new(self.seed)
+        Self::new_with_version(self.seed, self.version)
     }
 }
 
 impl ChunkGenerator {
     pub fn new(seed: u32) -> Self {
+        Self::new_with_version(seed, GeneratorVersion::Current)
+    }
+
+    pub fn new_with_version(seed: u32, version: GeneratorVersion) -> Self {
         let s = |i: u32| seed.wrapping_mul(0x9e37_79b9).wrapping_add(i.wrapping_mul(0x85eb_ca6b));
         ChunkGenerator {
             warp_x: fbm(s(1), 0.0026, 3),
@@ -254,6 +280,7 @@ impl ChunkGenerator {
             cave_biome: fbm(s(29), 0.0065, 2),
             pillars: simplex(s(30), 0.085),
             seed,
+            version,
         }
     }
 
@@ -278,7 +305,20 @@ impl ChunkGenerator {
         let mountain = inland * rugged;
         let ridge = self.ridges.get_noise_2d(wx, wz).clamp(-1.0, 1.0) * 0.5 + 0.5;
         let peak_jitter = self.peaks.get_noise_2d(fx, fz) * 0.5 + 0.5;
-        let mountains = mountain * (ridge.powf(1.6) * 0.82 + peak_jitter * 0.18) * 118.0;
+        let mountains = match self.version {
+            GeneratorVersion::Legacy => {
+                mountain * (ridge.powf(1.6) * 0.82 + peak_jitter * 0.18) * 118.0
+            }
+            GeneratorVersion::Current => {
+                // Combine broad upland variation with the original ridge and a
+                // small amount of fine detail rather than letting one sharp
+                // ridge field dominate every mountain range.
+                let broad_peaks = self.peaks.get_noise_2d(fx * 0.46, fz * 0.46) * 0.5 + 0.5;
+                mountain
+                    * (ridge.powf(1.05) * 0.75 + broad_peaks * 0.17 + peak_jitter * 0.08)
+                    * 104.0
+            }
+        };
 
         // Rolling hills on land, flatter where erosion is high.
         let land = smoothstep(-0.08, 0.06, continental);
@@ -338,8 +378,20 @@ impl ChunkGenerator {
             .abs();
         let width = 0.016 + 0.012 * (self.river_width.get_noise_2d(fx, fz) * 0.5 + 0.5);
         let on_land = smoothstep(-0.05, 0.08, continental);
-        let valley = (1.0 - smoothstep(width, width * 5.0, river_n)) * on_land;
-        let river = (1.0 - smoothstep(width * 0.45, width, river_n)) * on_land;
+        let river_elevation_fade = match self.version {
+            GeneratorVersion::Legacy => 1.0,
+            GeneratorVersion::Current => {
+                let high_elevation = smoothstep(sea + 26.0, sea + 72.0, height);
+                let mountain_factor = smoothstep(0.12, 0.45, mountain);
+                1.0 - high_elevation * mountain_factor
+            }
+        };
+        let valley = (1.0 - smoothstep(width, width * 5.0, river_n))
+            * on_land
+            * river_elevation_fade;
+        let river = (1.0 - smoothstep(width * 0.45, width, river_n))
+            * on_land
+            * river_elevation_fade;
         if valley > 0.0 {
             let valley_floor = sea + 1.5 + (height - sea).max(0.0) * 0.22;
             height = lerp(height, valley_floor.min(height), valley * 0.9);
@@ -2178,6 +2230,80 @@ mod tests {
             chunk_hash(&ChunkGenerator::new(1).generate_chunk(0, 0)),
             chunk_hash(&ChunkGenerator::new(2).generate_chunk(0, 0))
         );
+    }
+
+    #[test]
+    fn legacy_generator_keeps_its_original_height_samples() {
+        let generator = ChunkGenerator::new_with_version(2026, GeneratorVersion::Legacy);
+        let samples: Vec<_> = [
+            (0, 0),
+            (317, -928),
+            (1840, 2711),
+            (-4096, 1777),
+            (7712, -5203),
+        ]
+        .map(|(x, z)| generator.get_terrain_height_pub(x, z))
+        .into();
+        assert_eq!(samples, [70, 64, 98, 44, 65]);
+    }
+
+    #[test]
+    fn current_mountains_retain_upland_height_and_reduce_steep_edges() {
+        let mut totals = [(0u32, 0u32, 0u32); 2];
+        for seed in [42, 2026, 12345] {
+            let generators = [
+                ChunkGenerator::new_with_version(seed, GeneratorVersion::Legacy),
+                ChunkGenerator::new_with_version(seed, GeneratorVersion::Current),
+            ];
+            for index in 0..8192i32 {
+                let x = (generators[0].hash2(index, index * 13, 0x31) % 8192) as i32 - 4096;
+                let z = (generators[0].hash2(index * 7, index, 0x73) % 8192) as i32 - 4096;
+                for (version, generator) in generators.iter().enumerate() {
+                    let center = generator.get_terrain_height_pub(x, z);
+                    if center > SEA_LEVEL + 70 {
+                        totals[version].0 += 1;
+                    }
+                    for (dx, dz) in [(1, 0), (0, 1)] {
+                        let neighbor = generator.get_terrain_height_pub(x + dx, z + dz);
+                        if center.max(neighbor) > SEA_LEVEL + 40 {
+                            totals[version].1 += 1;
+                            if (center - neighbor).abs() >= 12 {
+                                totals[version].2 += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            totals[1].0 * 10 >= totals[0].0 * 8,
+            "new generator flattened the mountain ranges: {totals:?}"
+        );
+        assert!(
+            totals[1].2 < totals[0].2,
+            "new generator did not reduce steep upland edges: {totals:?}"
+        );
+    }
+
+    #[test]
+    fn new_generator_preserves_lowland_rivers() {
+        let legacy = ChunkGenerator::new_with_version(2026, GeneratorVersion::Legacy);
+        let current = ChunkGenerator::new_with_version(2026, GeneratorVersion::Current);
+        let mut river_columns = 0;
+        for index in 0..50_000i32 {
+            let x = (legacy.hash2(index, index * 13, 0x51) % 8192) as i32 - 4096;
+            let z = (legacy.hash2(index * 17, index, 0x97) % 8192) as i32 - 4096;
+            let old = legacy.sample_column(x, z);
+            if old.height <= SEA_LEVEL as f32 + 24.0 && old.mountain == 0.0 {
+                let new = current.sample_column(x, z);
+                assert_eq!(new.height, old.height, "lowland height changed at ({x}, {z})");
+                assert_eq!(new.river, old.river, "lowland river changed at ({x}, {z})");
+                if old.river > 0.4 {
+                    river_columns += 1;
+                }
+            }
+        }
+        assert!(river_columns > 0, "test sample did not include lowland rivers");
     }
 
     #[test]

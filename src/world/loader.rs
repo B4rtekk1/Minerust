@@ -7,7 +7,7 @@ use std::thread;
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 
 use crate::core::chunk::Chunk;
-use crate::world::generator::ChunkGenerator;
+use crate::world::generator::{ChunkGenerator, GeneratorVersion};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request / result types
@@ -143,21 +143,37 @@ impl ChunkLoader {
     /// Generation and meshing share a bounded CPU budget so foreground
     /// rendering retains CPU time.
     pub fn new(seed: u32) -> Self {
-        Self::with_worker_count(crate::constants::get_chunk_worker_count(), seed)
+        Self::new_with_version(seed, GeneratorVersion::Current)
+    }
+
+    pub fn new_with_version(seed: u32, generator_version: GeneratorVersion) -> Self {
+        Self::with_worker_count_and_version(
+            crate::constants::get_chunk_worker_count(),
+            seed,
+            generator_version,
+        )
     }
 
     /// Creates a loader with exactly `num_workers` background threads.
     ///
     /// Each worker thread:
     /// 1. Waits on the shared priority queue and pops its closest request.
-    /// 2. Constructs an independent [`ChunkGenerator`] from `seed` so no
-    ///    generator state is shared between threads.
+    /// 2. Constructs an independent [`ChunkGenerator`] from `seed` and the
+    ///    selected generator version so no state is shared between threads.
     /// 3. Generates chunks on demand and sends results back via `result_tx`.
     /// 4. Exits when `ChunkLoader` signals shutdown.
     ///
     /// # Panics
     /// Panics if any worker thread cannot be spawned.
     pub fn with_worker_count(num_workers: usize, seed: u32) -> Self {
+        Self::with_worker_count_and_version(num_workers, seed, GeneratorVersion::Current)
+    }
+
+    pub fn with_worker_count_and_version(
+        num_workers: usize,
+        seed: u32,
+        generator_version: GeneratorVersion,
+    ) -> Self {
         let (result_tx, result_rx) = bounded::<ChunkGenResult>(MAX_PENDING_CHUNKS);
         let request_queue = Arc::new((
             Mutex::new(RequestQueue {
@@ -171,7 +187,7 @@ impl ChunkLoader {
             let request_queue = Arc::clone(&request_queue);
             let tx = result_tx.clone();
             // Each worker owns its own generator — no mutex needed.
-            let generator = ChunkGenerator::new(seed);
+            let generator = ChunkGenerator::new_with_version(seed, generator_version);
 
             thread::Builder::new()
                 .name(format!("chunk-gen-{}", worker_id))
@@ -435,6 +451,23 @@ impl Drop for ChunkLoader {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    use crate::constants::{CHUNK_SIZE, WORLD_HEIGHT};
+
+    fn chunk_hash(chunk: &Chunk) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for y in 0..WORLD_HEIGHT {
+                    hash = (hash ^ chunk.get_block(x, y, z) as u64)
+                        .wrapping_mul(0x100_0000_01b3);
+                }
+                hash = (hash ^ chunk.column_tint(x, z) as u64).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        hash
+    }
 
     fn queued(loader: &ChunkLoader) -> Vec<(i32, i32, i32)> {
         let (lock, _) = &*loader.request_queue;
@@ -593,6 +626,26 @@ mod tests {
         );
         assert_eq!(loader.pending_count(), 3);
         assert!(!loader.is_pending(10 - GENERATION_DISTANCE - 1, 0));
+    }
+
+    #[test]
+    fn workers_generate_the_same_versioned_chunks_as_the_sync_path() {
+        let seed = 2026;
+        for version in [GeneratorVersion::Legacy, GeneratorVersion::Current] {
+            let mut loader = ChunkLoader::with_worker_count_and_version(1, seed, version);
+            loader.request_chunk(-2, 3, 0);
+            let start = Instant::now();
+            let result = loop {
+                if let Some(result) = loader.poll_results(1).into_iter().next() {
+                    break result;
+                }
+                assert!(start.elapsed() < Duration::from_secs(10), "worker timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            };
+
+            let expected = ChunkGenerator::new_with_version(seed, version).generate_chunk(-2, 3);
+            assert_eq!(chunk_hash(&result.chunk), chunk_hash(&expected), "{version:?}");
+        }
     }
 
     #[test]

@@ -2,64 +2,44 @@
 
 ## Overview
 
-The `assets/` directory contains all non-code resources for the Minerust engine: textures, fonts, and configuration files. These resources are loaded at runtime to customize the visual appearance of the game.
+The `assets/` directory contains the runtime texture image, atlas metadata, menu background, and UI font. The current directory does not contain a separate Minecraft-style texture pack or per-block PNG directory.
 
 ## Directory Structure
 
 ```
 assets/
-├── textures.png                    # Texture atlas (combined textures)
-├── atlas_map_structure.json        # Atlas UV mapping metadata
-├── fonts/                          # Typography resources
-│   ├── GoogleSans_17pt-Regular.ttf
-│   ├── OFL.txt                     # Font license (Open Font License)
-│   └── README.txt
-└── textures/                       # Minecraft-compatible texture pack
-    ├── pack.mcmeta                 # Pack metadata (Minecraft format)
-    ├── pack.png                    # Pack thumbnail
-    ├── LICENSE.txt                 # Texture license
-    └── block/                      # 100+ block textures (16×16 PNG)
-        ├── acacia_*.png
-        ├── amethyst_*.png
-        ├── ancient_debris_*.png
-        ├── andesite.png
-        ├── anvil_*.png
-        ├── azure_bluet.png
-        ├── ... (many more)
-        └── structure_void.png
+├── textures.png                    # Runtime texture image (2048×1536 RGBA)
+├── atlas_map_structure.json        # Texture mapping metadata
+├── menu.png                        # Main-menu background (1918×1078 RGBA)
+└── fonts/
+    ├── GoogleSans_17pt-Regular.ttf
+    ├── OFL.txt                     # Font license
+    └── README.txt
 ```
+
+The texture image and menu dimensions were checked from the files in the repository.
+There is no `assets/textures/`, `pack.mcmeta`, `pack.png`, or `assets/shaders/` directory;
+WGSL sources are in `src/shaders/`.
 
 ## Key Files
 
 ### `textures.png` - Texture Atlas
-**Purpose:** Combined image containing all block textures arranged in a grid.
+**Purpose:** Source image split into equal-sized layers for a GPU `Texture2DArray`.
 
-> **Current layout:** 8 columns × 6 rows of 256×256 tiles (16×16 pixel art
-> scaled up), 48 texture-array layers. Tile `i` is layer `i` and matches the
-> `TEX_*` constants in `src/constants.rs`. Layers 0–15 are the original
-> hand-made tiles; layers 16–41 (ores, deepslate, badlands terracotta,
-> podzol, moss, mycelium, mushroom blocks, sandstone, birch/cherry wood,
-> cherry leaves, magma, dripstone, amethyst, calcite) are generated from
-> them by `python3 tools/generate_block_textures.py`, which can be re-run
-> safely. Layers 42–47 are spare.
+> **Current layout:** 2048×1536 RGBA, arranged as 8 columns × 6 rows of 256×256 tiles.
+> `src/render/texture.rs` extracts the 48 tiles in row-major order; `src/app/texture_cache.rs`
+> uploads them as array layers with mipmaps. The defined block texture indices occupy
+> layers 0–41; layers 42–47 are spare.
 
 **Format & Size:**
 - Format: PNG (RGBA 8-bit)
-- Size: Typically 2048×2048 or 4096×4096 pixels
-- Contains: ~60 block texture types + variants
+- Size: 2048×1536 pixels
+- Tiles: 48 square RGBA8 layers, each 256×256 pixels
 
 **Texture Arrangement:**
 ```
-Atlas Layout (schematic):
-┌────────┬────────┬────────┐
-│ Grass  │ Dirt   │ Stone  │  Row 0
-├────────┼────────┼────────┤
-│ Sand   │ Water  │ Wood   │  Row 1
-├────────┼────────┼────────┤
-│ Leaves │ Snow   │ Gravel │  Row 2
-└────────┴────────┴────────┘
-
-Each 16×16 cell is one block texture
+The image is read as 8 × 6 square tiles. Tile index `i` maps to column `i % 8`
+and row `i / 8`; the tile index becomes the texture-array layer.
 ```
 
 **Advantages:**
@@ -69,70 +49,26 @@ Each 16×16 cell is one block texture
 - Better GPU cache performance
 
 **Creation Process:**
-1. Individual textures created (textures/block/*.png)
-2. Combined using texture packer (TexturePacker, AssetForge, etc.)
-3. Saved as `textures.png`
-4. Mapping exported to `atlas_map_structure.json`
+The repository script `tools/generate_block_textures.py` generates the block tiles and
+the packed image. The running renderer uses the numeric layer mapping in `src/constants.rs`
+and block material code; `atlas_map_structure.json` is descriptive metadata, not a UV atlas
+loaded by the shader.
 
 ### `atlas_map_structure.json` - Texture Mapping
-**Purpose:** Maps block names to UV coordinates in the texture atlas.
+**Purpose:** Human-readable block-to-texture-layer metadata, including per-face choices.
+
+The runtime renderer's layer IDs are defined in `src/constants.rs`; this JSON is not
+parsed as shader UV coordinates. Keep the two mappings consistent when adding textures.
 
 **File Format Example:**
 ```json
 {
-  "version": 1,
-  "texture_size": 16,
-  "atlas_size": 128,
-  "textures": {
-    "grass_top": {
-      "x": 0,
-      "y": 0,
-      "width": 16,
-      "height": 16
-    },
-    "grass_side": {
-      "x": 16,
-      "y": 0,
-      "width": 16,
-      "height": 16
-    },
-    "dirt": {
-      "x": 32,
-      "y": 0,
-      "width": 16,
-      "height": 16
-    },
-    "stone": {
-      "x": 48,
-      "y": 0,
-      "width": 16,
-      "height": 16
-    },
-    // ... more textures
+  "blocks": {
+    "Grass": { "top": 0, "side": 1, "bottom": 2 },
+    "Dirt": { "all": 2 },
+    "Stone": { "all": 3 }
   }
 }
-```
-
-**UV Coordinate Calculation:**
-```
-Block name: "grass_top"
-File entry: x=0, y=0, width=16, height=16
-
-Atlas dimensions: 2048×2048
-Texture dimensions: 16×16 (in atlas)
-
-UV coordinates (0.0-1.0 range):
-  min_u = 0 / 2048 = 0.0
-  min_v = 0 / 2048 = 0.0
-  max_u = 16 / 2048 = 0.0078125
-  max_v = 16 / 2048 = 0.0078125
-```
-
-**Loading in Code:**
-```rust
-let atlas_data = serde_json::from_str(json_str)?;
-let grass_top = &atlas_data.textures["grass_top"];
-let uv = (grass_top.x as f32 / 2048.0, grass_top.y as f32 / 2048.0);
 ```
 
 ### `fonts/` - Typography Resources
@@ -206,7 +142,11 @@ Installation:
 - Engine loads automatically at startup
 ```
 
-### `textures/` - Texture Pack Directory
+## Historical reference — texture-pack layout (not present or loaded)
+
+The following legacy notes describe a proposed Minecraft-style texture pack. The current
+repository has no such directory, metadata, or pack-selection runtime; these notes are
+retained only as history and must not be used as asset instructions.
 
 **Purpose:** Organized texture files compatible with Minecraft format (for compatibility and portability).
 
@@ -324,99 +264,64 @@ Cycles through frames for animated effect (water, lava).
 
 ## Asset Loading Pipeline
 
-### **Startup Sequence:**
+### Current startup texture path
 ```
-Engine Start
+Texture initialization
     ↓
-Load atlas_map_structure.json
-    ├─ Parse JSON
-    ├─ Build UV lookup table
-    └─ Validate all textures exist
+Check `assets/texture_atlas.cache`
+    ├─ Valid cache → use cached layers
+    ├─ Invalid cache → procedural fallback
+    └─ No cache
+        ↓
+        Decode `assets/textures.png` into 48 array layers
+            ├─ Success → cache and use the layers
+            └─ Missing/invalid image → procedural fallback
     ↓
-Load textures.png
-    ├─ Read PNG file
-    ├─ Create GPU texture
-    ├─ Set up mipmap chain
-    └─ Bind to rendering pipeline
+Generate mip levels and upload as a D2 array texture
     ↓
-Load fonts/
-    ├─ Load TrueType files
-    ├─ Create glyph atlas
-    └─ Ready for text rendering
-    ↓
-Asset Loading Complete ✓
-    ↓
-Game Ready
+Bind texture array to the renderer
 ```
 
-### **Runtime Texture Access:**
-```
-Rendering code needs grass block texture
-    ↓
-Look up "grass_top" in atlas_map_structure.json
-    ├─ Get: x=0, y=0, width=16, height=16
-    ├─ Calculate UV coordinates
-    └─ Return texture index
-    ↓
-Shader applies texture to mesh
-    ├─ Sample from textures.png at UV coords
-    └─ Display on screen
-```
+Layer indices are packed with terrain quads and sampled by the WGSL shader. The JSON file
+is not parsed by this runtime path. Font and menu resources are initialized separately by
+the UI/client code.
 
 ## Memory Management
 
 ### **GPU Memory Usage:**
 ```
-Texture Atlas (textures.png):
-  2048×2048 RGBA: ~16 MB
-  + Mipmaps: ~5 MB
-  Total: ~21 MB per texture atlas
+Texture array (48 × 256 × 256 × RGBA8):
+  Base level: 12 MiB
+  Full mip chain: about 16 MiB total, uncompressed
 
-Font Cache:
-  Glyph atlas: ~4-8 MB
-  Per loaded font
-
-Total Assets Memory: ~30-50 MB (modest)
+Font/UI allocations are managed separately and vary with the rendered glyph set.
 ```
 
 ### **Disk Space:**
-```
-Individual block textures: ~5-10 MB
-Packed atlas: ~2-4 MB
-Fonts: ~500 KB
-Total on Disk: ~8-15 MB
-```
+The current runtime image and font files are stored directly under `assets/`; use the
+filesystem for current file sizes rather than relying on estimates from the old texture-pack layout.
 
 ## Customization
 
 ### **Replacing Textures:**
-1. Create new textures (16×16 PNG files)
-2. Place in `assets/textures/block/`
-3. Update `atlas_map_structure.json` with new coordinates
-4. Repack into `textures.png`
-5. Restart game
+1. Update the source tiles and regenerate `assets/textures.png` with
+   `tools/generate_block_textures.py`.
+2. Keep the 8×6, 256×256-per-tile layout expected by `src/render/texture.rs`.
+3. Keep the layer IDs in `src/constants.rs`, block texture selection, and descriptive
+   `atlas_map_structure.json` consistent.
+4. Restart the client to reload the image and rebuild the texture cache.
 
 ### **Adding New Fonts:**
 1. Add TTF file to `assets/fonts/`
 2. Update code to load new font
 3. Use in UI rendering
 
-### **Creating Custom Texture Packs:**
-1. Follow Minecraft texture pack format
-2. Place in `assets/textures/`
-3. Update `pack.mcmeta` metadata
-4. Game automatically loads all textures
+There is no texture-pack discovery or runtime pack-selection API at present.
 
 ## Licensing
 
-**Texture Pack License:**
-Located in `assets/textures/LICENSE.txt`
-
-Typical licensing:
-- Free for use in this project
-- May require attribution
-- Check before redistributing
-- Creative Commons (CC-BY, CC-BY-SA)
+**Texture image:** No separate texture license file is present in `assets/`; verify the
+source and redistribution terms before reusing the image.
 
 **Font License:**
 Located in `assets/fonts/OFL.txt`
@@ -428,29 +333,23 @@ Google Sans:
 
 ## Performance Tips
 
-1. **Texture Atlasing** - Reduces state changes
-2. **Mipmaps** - Reduces aliasing for distant blocks
-3. **Compression** - Consider texture compression (BC7, ASTC)
-4. **LOD System** - Use lower quality for distant chunks
-5. **Streaming** - Load textures on-demand
+1. **Texture array** - Keeps block layers in one GPU resource.
+2. **Mipmaps** - Generated per layer during texture upload.
+3. **Far terrain** - Uses merged geometry at distance; it keeps the same texture resolution.
+4. **Texture compression** - Not currently enabled by this asset-loading path.
 
 ## Asset Validation
 
-At startup, engine checks:
+At startup, texture loading:
 ```
-✓ All referenced textures exist
-✓ Texture dimensions valid (power of 2)
-✓ Font files readable
-✓ JSON files valid syntax
-✓ Licenses present
-
-If invalid:
-✗ Refuse to start
-✗ Report which asset failed
-✗ Display helpful error message
+✓ Accepts a PNG whose dimensions form the configured 8×6 grid of square tiles
+✓ Builds a GPU texture array and mip levels
+✓ Falls back to procedural layers if the image cannot be loaded
 ```
 
 ---
 
-**Key Takeaway:** The `assets/` directory provides all visual resources in an organized, efficient format. Textures are packed into a single atlas for performance, while maintaining Minecraft-compatible structure for portability and user customization.
+**Current state:** `assets/` contains the texture-array source image, descriptive layer
+metadata, menu background and font resources. The renderer samples texture-array layers;
+there is no Minecraft-compatible pack loader.
 

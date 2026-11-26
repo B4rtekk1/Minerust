@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `world/` module handles procedural world generation, terrain features, and chunk management. It uses noise-based algorithms (Fractional Brownian Motion, Perlin noise) to create infinite, deterministic worlds with diverse biomes, caves, and structures.
+The `world/` module handles seeded generation, chunk streaming, world state, terrain meshing, sky light, structures, and dropped item entities. See `generator.rs`, `loader.rs`, `terrain.rs`, and `skylight.rs` for the current implementation.
 
 ## Module Structure
 
@@ -10,15 +10,27 @@ The `world/` module handles procedural world generation, terrain features, and c
 world/
 ├── mod.rs              ← Module declaration and public API
 ├── generator.rs        ← Noise-based procedural generation
-├── terrain.rs          ← Terrain features (caves, mountains)
+├── terrain.rs          ← World state, chunk access, terrain/water meshing
 ├── loader.rs           ← Chunk loading/unloading system
-├── spline.rs           ← Spline interpolation utilities
+├── skylight.rs         ← Sky-light propagation
+├── item_entity.rs      ← Dropped item entities
 └── structures/         ← Procedural structure generation
     ├── mod.rs
-    ├── trees.rs
-    ├── villages.rs
-    └── ... (other structures)
+    ├── structure.rs
+    └── house.rs
 ```
+
+## Current terrain mesh variants
+
+The mesher can produce a detailed near mesh, a merged far mesh, and a 2×2×2 LOD mesh.
+GPU culling selects the far mesh at 160 blocks; both use the same block resolution, and
+the far merge retains its outer-corner AO/light. The 2×2×2 mesh is generated and stored,
+but is not selected for drawing because subchunk boundaries are not stitched. It is not
+an active LOD tier.
+
+The remaining sections below contain older design sketches, including proposed APIs and
+generation settings that may not exist in the current implementation. Consult the Rust
+source for exact behavior.
 
 ## File Documentation
 
@@ -214,30 +226,28 @@ Load/Generate Missing Chunks
     ↓
 Async Generation Thread
     ├── Generate terrain
-    ├── Build mesh
-    └── Upload to GPU
+    └── Build mesh result
     ↓
-Next Frame
+Main thread accepts current result and uploads geometry
 ```
 
 **Key Constants:**
 ```rust
-RENDER_DISTANCE = 10        // Chunks to load (20×20 area)
-SIMULATION_DISTANCE = 5     // Chunks for physics/updates
-GENERATION_DISTANCE = 12    // Pre-generate beyond render
-CHUNK_UNLOAD_DISTANCE = 16  // Unload if too far
+RENDER_DISTANCE = 32        // Chunk radius used by the active app
+SIMULATION_DISTANCE = 16    // Derived from render distance
+GENERATION_DISTANCE = 34    // Two chunks beyond render distance
+CHUNK_UNLOAD_DISTANCE = 37  // Five chunks beyond render distance
 ```
+These are constants from `src/constants.rs`. `src/utils/settings.rs` contains an
+unwired prototype with different defaults; it does not override the active distances.
 
 **Load Distance Calculation:**
 ```
 Player at chunk (10, 10)
-RENDER_DISTANCE = 10
+RENDER_DISTANCE = 32
 
-Loaded chunks: 
-  x: [0..20], z: [0..20]   (20×20 = 400 chunks)
-
-With 16×256×16 = 65,536 blocks per chunk:
-Total: ~26 million blocks in memory
+The active app considers chunks within a circular radius, not a fixed 20×20 square.
+The number actually loaded varies with generated/available chunks and streaming state.
 ```
 
 **Key Types:**

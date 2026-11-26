@@ -25,7 +25,7 @@ Thank you for your interest in contributing! This document will help you get sta
   - Steps to reproduce
   - Your OS, GPU, and driver version
   - Whether you're running a debug or release build
-  - Relevant logs (`RUST_LOG=debug cargo run --release`)
+  - Relevant application logs from the platform-specific application data directory
 
 ---
 
@@ -85,11 +85,8 @@ cargo build --release
 # Run
 cargo run --release
 
-# Run with verbose logs
-RUST_LOG=debug cargo run --release
-
 # Run tests
-cargo test --release
+cargo test --lib
 ```
 
 > Vulkan is the recommended backend for best performance. Make sure your GPU supports Vulkan 1.2+, DirectX 12, or Metal.

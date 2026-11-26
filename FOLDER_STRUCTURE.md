@@ -10,15 +10,17 @@ This document provides a comprehensive guide to the folder structure and organiz
 
 ```
 minerust/
-├── src/                          # Source code (Rust modules)
-├── assets/                       # Game assets (textures, fonts, config)
-├── shaders/                      # WGSL shader files (currently empty)
-├── target/                       # Build artifacts (auto-generated)
-├── Cargo.toml                    # Rust project manifest
-├── Cargo.lock                    # Dependency lock file
-├── README.md                     # Main project documentation
-├── FOLDER_STRUCTURE.md           # This file
-└── world.minerust                # World save file
+├── assets/                       # Texture atlas, menu image, fonts
+├── assets_docs/                  # Asset documentation resources
+├── examples/                     # Runnable examples, including mesh_bench
+├── src/                          # Rust sources and WGSL shaders
+├── tests/                        # Integration tests
+├── tools/                        # Asset-generation scripts
+├── target/                       # Cargo build artifacts (generated)
+├── Cargo.toml / Cargo.lock       # Package manifest and lockfile
+├── README.md                     # Project overview and current status
+├── DEVELOPMENT.md                # Build and developer reference
+└── world.minerust                # Local world save (if present)
 ```
 
 ---
@@ -32,21 +34,18 @@ The main Rust source code directory containing all project modules.
 #### Structure:
 ```
 src/
-├── main.rs                       # Entry point (delegates to app module)
-├── lib.rs                        # Library root
-├── constants.rs                  # Global constants and configuration
-├── save.rs                       # World save/load functionality
-├── app/                          # Application logic
-├── core/                         # Core world systems
-├── player/                       # Player mechanics
-├── render/                       # Rendering pipeline
-├── render_core/                  # Rendering utilities
-├── multiplayer/                  # Networking and multiplayer
-├── ui/                           # User interface
-├── utils/                        # Utility functions and helpers
-├── world/                        # World generation and terrain
-├── settings/                     # Settings configuration
-└── shaders/                      # Shader definitions and management
+├── main.rs / lib.rs              # Binary and library roots
+├── constants.rs / save.rs        # Shared constants and world persistence
+├── app/                          # Client loop, initialization, input and rendering
+├── commands/                     # Command definitions
+├── core/                         # Blocks, chunks, items, quads and mobs
+├── logger/ / minerust_data/      # Logging and app-data paths
+├── multiplayer/                  # TCP client/server and packet protocol
+├── player/                       # Camera, input and inventories
+├── render/                       # Packed geometry, arenas and GPU helpers
+├── shaders/                      # WGSL shader sources
+├── ui/                           # Menus, inventory UI, fonts and toolbar
+└── world/                        # Generation, streaming, meshing and lighting
 ```
 
 ---
@@ -57,8 +56,11 @@ src/
 
 **Files:**
 - **`mod.rs`** - Module root and public API
+- **`bench.rs`** - Optional automated rendering benchmark path
+- **`graphics.rs`** - Graphics options/state
 - **`init.rs`** - Application initialization (window setup, GPU device initialization)
-- **`game.rs`** - Main game logic and core update loop
+- **`game.rs`** - Event loop entry, argument parsing, and client/server startup
+- **`performance.rs`** - Performance measurements
 - **`state.rs`** - Application state management
 - **`input.rs`** - Keyboard, mouse, and controller input handling
 - **`update.rs`** - Game state updates (player movement, chunk loading, etc.)
@@ -85,6 +87,9 @@ src/
 - **`block.rs`** - Block type definitions and properties (solid, opaque, liquid, etc.)
 - **`chunk.rs`** - Chunk and SubChunk data structures (16x16x16 voxel storage)
 - **`biome.rs`** - Biome definitions and characteristics
+- **`item.rs`** - Items, tools, food and loot definitions
+- **`quad.rs`** - Packed quad data shared with the renderer
+- **`mobs/`** - Early mob types and AI scaffolding
 - **`vertex.rs`** - Vertex data structures for rendering
 - **`uniforms.rs`** - GPU uniform buffer structures (matrices, lighting, etc.)
 
@@ -109,8 +114,10 @@ src/
 
 **Files:**
 - **`mod.rs`** - Module root
-- **`camera.rs`** - Camera system (projection matrices, frustum culling)
-- **`input.rs`** - Player input handling (movement, jumping, sprinting)
+- **`camera.rs`** - Camera and movement state
+- **`input.rs`** - Input and digging state
+- **`inventory/`** - Player inventory, transactions, and furnace slot rules
+- **`player_stats.rs`** - Player statistics
 
 **Key Responsibilities:**
 - First-person camera control and math
@@ -127,38 +134,35 @@ src/
 **Files:**
 - **`mod.rs`** - Module root
 - **`mesh.rs`** - Mesh data structures and vertex/index buffer management
-- **`mesh_loader.rs`** - Loads voxel chunk data into GPU buffers
-- **`atlas_map.rs`** - Texture atlas mapping and UV coordinate management
+- **`mesh_loader.rs`** - Background mesh workers and result delivery
+- **`atlas_map.rs`** - Atlas helper; runtime textures are sampled as array layers
 - **`texture.rs`** - Texture loading and GPU texture binding
 - **`frustum.rs`** - View frustum and AABB definitions for culling
-- **`indirect.rs`** - Indirect GPU drawing (indirect buffers for instancing)
-- **`passes/`** - Individual render passes (terrain, water, UI, etc.)
+- **`indirect.rs`** - Packed-quad GPU arenas, metadata and indirect draws
+- **`quad.rs`** - Packed quad representation and grouping
+- **`depth.rs`, `shadow_grid.rs`, `water_waves.rs`** - Rendering helpers
 
 **Key Responsibilities:**
-- GPU buffer management (vertex, index, indirect buffers)
-- Texture atlas coordination
-- Render passes orchestration (depth prepass, terrain pass, composite pass)
+- Growable packed-quad buffers and indirect draw management
+- Texture-array image/layer coordination
+- Culling and draw dispatch are coordinated by `app/render.rs` and WGSL shaders
 - Frustum culling and visibility determination
 - Mesh building from voxel data
 
 **Buffer Architecture:**
-- Unified large vertex buffer (~560MB capacity)
-- Unified large index buffer (~256MB capacity)
-- Chunks are sub-allocated regions within these buffers
-- Minimizes CPU draw call overhead through indirect drawing
+- Terrain and water use growable packed-quad GPU arenas with relative allocation ranges.
+- Culling emits indirect draw commands and handles buffer relocation through metadata.
 
 ---
 
-### 6. **src/render_core/** - Rendering Utilities
+### 6. **src/shaders/** - WGSL Shaders
 
-**Purpose:** Shared rendering helpers and utility types.
+**Purpose:** Shader programs compiled and used by the GPU renderer.
 
 **Files:**
-- **`mod.rs`** - Module root
-
-**Key Responsibilities:**
-- Common rendering math and helper types
-- Shared GPU utility code
+- **`cull.wgsl`** - Subchunk visibility and indirect draw generation
+- **`terrain.wgsl`** - Terrain vertex pulling, lighting, and shading
+- **`water.wgsl`** - Water rendering
 
 ---
 
@@ -172,23 +176,22 @@ src/
 - **`server.rs`** - Server-side networking and player management
 - **`network.rs`** - Shared network utilities
 - **`protocol.rs`** - Message protocol definitions
-- **`quic.rs`** - QUIC protocol implementation (reliable)
-- **`tcp.rs`** - TCP fallback implementation
+- **`tcp.rs`** - TCP transport implementation (only supported transport)
 - **`transport.rs`** - Transport layer abstraction
 - **`player.rs`** - Remote player state and synchronization
 
 **Key Responsibilities:**
-- Client-server communication (authoritative server)
-- QUIC and TCP protocol handling
-- Delta compression for chunk data
-- Entity state synchronization
-- Player movement prediction on client
+- TCP client/server communication with length-prefixed binary packets
+- Connection acknowledgement, player IDs and world seed exchange
+- Position, rotation, block-change and chat packet handling
+- Remote player display on clients
+
+This is an early-stage foundation: the server relays/handles network state and is not a
+complete authoritative world simulation. Do not treat it as an anti-cheat boundary.
 
 **Architecture:**
-- Authoritative server validates all gameplay
-- QUIC for reliable data transfers
-- UDP for high-frequency position updates
-- Efficient delta compression for chunk data
+- One TCP transport is currently implemented; `Transport` is an abstraction, not a
+  promise of multiple available protocols.
 
 ---
 
@@ -198,8 +201,11 @@ src/
 
 **Files:**
 - **`mod.rs`** - Module root
+- **`font.rs`** - Font loading and UI text resources
+- **`inventory.rs`** - Inventory interface
 - **`ui.rs`** - Core UI rendering and layout
 - **`menu.rs`** - Main menu, pause menu, and dialog systems
+- **`toolbar.rs`** - Hotbar rendering and interaction
 
 **Key Responsibilities:**
 - 2D UI rendering (text, buttons, HUD)
@@ -216,104 +222,46 @@ src/
 **Files:**
 - **`mod.rs`** - Module root
 - **`generator.rs`** - Noise-based world generation (FBM, Perlin noise)
-- **`terrain.rs`** - Terrain features (caves, mountains, water)
-- **`loader.rs`** - Chunk loading/unloading and streaming
-- **`spline.rs`** - Spline interpolation for smooth terrain transitions
-- **`structures/`** - Procedural structure generation (trees, buildings, etc.)
+- **`terrain.rs`** - World state, chunk access, terrain meshing and water geometry
+- **`loader.rs`** - Asynchronous chunk generation/loading
+- **`skylight.rs`** - Sky-light propagation
+- **`item_entity.rs`** - Dropped item entities
+- **`structures/`** - Structure and house generation
 
 **Key Responsibilities:**
-- Multi-threaded procedural generation using FastNoise
-- 11 distinct biomes with unique characteristics
-- Cave systems ("Cheese" and "Spaghetti" patterns)
-- Ore generation and placement
-- Chunk loading/unloading based on render distance
-- Structure generation (trees, villages, etc.)
+- Seed-based procedural terrain and biome generation
+- Chunk generation and streaming around the player
+- Near, merged far, and stored 2×2×2 terrain mesh variants
+- Sky-light sampling, structures, and dropped item entities
 
-**Generation Features:**
-- Fractional Brownian Motion (FBM) for terrain
-- Deterministic generation (same seed = same world)
-- Async generation to avoid frame drops
-- Cave systems with procedural placement
+The far mesh is drawn from 160 blocks; the stored 2×2×2 LOD is currently not selected by
+culling because transitions between independently meshed subchunks are not stitched.
 
 ---
 
-### 10. **src/utils/** - Utilities & Helpers
+### 10. **src/utils/** - Utility prototypes
 
-**Purpose:** Common utility functions and configuration systems.
+`mod.rs` is currently empty. `settings.rs` and `gpu_memory_info.rs` contain source
+prototypes, and `settings_deafult.yaml` is a draft; these are not declared by the module
+root or wired into the runtime. No shared settings API is currently exposed.
 
-**Files:**
-- **`mod.rs`** - Module root
-- **`settings.rs`** - Runtime settings management
-- **`gpu_memory_info.rs`** - GPU memory tracking and diagnostics
-- **`server_properties.rs`** - Server configuration properties
-- **`settings/`** - Settings definitions and schema
-
-**Key Responsibilities:**
-- Load/save game settings (YAML-based)
-- GPU memory diagnostics and reporting
-- Server configuration management
-- Game parameter management
 
 ---
 
-### 11. **src/settings/** - Settings Configuration
-
-**Purpose:** Configuration files for game settings.
-
-**Files:**
-- **`settings.yaml`** - Runtime configuration (graphics, gameplay, networking)
-
-**Contains:**
-- Graphics settings (render distance, texture quality, etc.)
-- Gameplay settings (difficulty, player speed, etc.)
-- Networking settings (server address, port, etc.)
-
----
-
-### 12. **src/shaders/** - Shader Definitions
-
-**Purpose:** Manages shader organization and loading.
-
-**Note:** Actual shader files (.wgsl) are stored in `assets/shaders/`
-
----
-
-### 13. **assets/** - Game Assets
+### 11. **assets/** - Game Assets
 
 **Purpose:** All non-code game resources (textures, fonts, configurations).
 
 **Structure:**
 ```
 assets/
-├── textures.png                  # Texture atlas (combined textures)
-├── atlas_map_structure.json      # Atlas metadata (UV mappings)
-├── fonts/                        # Font files
-│   ├── GoogleSans_17pt-Regular.ttf
-│   ├── OFL.txt                   # Font license
-│   └── README.txt
-└── textures/                     # Minecraft-compatible texture pack
-    ├── pack.png                  # Pack thumbnail
-    ├── pack.mcmeta               # Minecraft pack format metadata
-    ├── LICENSE.txt               # Texture license
-    └── block/                    # Individual block textures
-        ├── acacia_door_*.png
-        ├── acacia_log*.png
-        ├── acacia_leaves.png
-        ├── acacia_planks.png
-        ├── amethyst_*.png
-        ├── ancient_debris_*.png
-        ├── andesite.png
-        ├── anvil_*.png
-        └── ... (100+ block types)
+├── textures.png                  # Runtime texture array source
+├── atlas_map_structure.json      # Texture mapping metadata
+├── menu.png                      # Main-menu background
+└── fonts/                        # UI font and license/readme
 ```
 
 **Key Components:**
-
-#### **textures/block/** - Block Textures
-- Individual 16x16 PNG files for each block type
-- Compatible with Minecraft texture format
-- Supports texture variations (top, bottom, side, animated)
-- Includes all major block types: ores, plants, wood, stone variants, etc.
 
 #### **atlas_map_structure.json** - Texture Atlas Metadata
 - JSON mapping of texture names to atlas coordinates
@@ -327,7 +275,7 @@ assets/
 
 ---
 
-### 14. **target/** - Build Artifacts (Auto-Generated)
+### 12. **target/** - Build Artifacts (Auto-Generated)
 
 **Purpose:** Compiled binaries and intermediate build files.
 
@@ -351,22 +299,14 @@ target/
 
 ---
 
-### 15. **shaders/** - WGSL Shader Files
-
-**Purpose:** GPU shader programs for rendering.
-
-**Status:** Currently empty; shaders may be embedded in code or loaded from assets.
-
----
-
 ## 📊 Architecture Overview
 
 ### Rendering Pipeline
 ```
-Input → Update → Generate Chunks → Build Meshes → 
-  Upload to GPU → Culling Pass → Depth Prepass →
-  Terrain Pass → Water Pass → Composite Pass → UI Pass → Present
+Input/update → background chunk and mesh workers → GPU upload
+  → compute culling/indirect commands → terrain and water rendering → UI → present
 ```
+For exact pass ordering, see `src/app/render.rs` and the files under `src/shaders/`.
 
 ### World Structure
 ```
@@ -380,41 +320,21 @@ World
 
 ### GPU Memory Layout
 ```
-Unified Vertex Buffer (560MB)
-  ├── Chunk 0 (sub-allocated)
-  ├── Chunk 1 (sub-allocated)
-  └── ...
-
-Unified Index Buffer (256MB)
-  ├── Chunk 0 indices
-  ├── Chunk 1 indices
-  └── ...
-
-Indirect Buffer
-  ├── Draw commands
-  └── Culling results
+Growable packed-quad arenas
+  ├── Terrain near/far/2×2×2 variant ranges
+  └── Water ranges
+Compute culling → visible draw lists and indirect commands
 ```
+Arena capacity grows with uploaded geometry; there is no fixed 560 MB vertex or 256 MB
+index allocation. The 2×2×2 mesh is stored but currently not selected by culling.
 
 ---
 
 ## 🔧 Key Dependencies
 
-From `Cargo.toml`:
-
-```toml
-wgpu = "28.0.0"              # Graphics API abstraction
-winit = "0.29"               # Window and event handling
-glam = { version = "0.29", features = ["bytemuck", "serde"] } # Linear algebra
-serde = "1.0"                # Serialization
-serde_yaml = "0.9"           # YAML configuration
-postcard = "1.1"             # Compact binary serialization
-tokio = "1.40"               # Async runtime
-quinn = "0.11"               # QUIC protocol
-rustls = "0.23"              # TLS/cryptography
-image = "0.25"               # Image loading
-glyphon = "0.10"             # Text rendering
-fastnoise-lite = "1.1"       # Procedural noise
-```
+`Cargo.toml` is the authoritative dependency list and version source. The current
+renderer uses `wgpu`; the windowed client uses `winit`; multiplayer uses TCP and has no
+QUIC dependency. Avoid copying version constraints into this structural guide.
 
 ---
 
@@ -443,8 +363,10 @@ cargo run --release
 
 ### Run Server
 ```bash
-cargo run --features "server"
+cargo run -- --server --port 25565
 ```
+The server is an experimental TCP connection/player-state foundation, not a fully
+authoritative simulation.
 
 ---
 
@@ -468,7 +390,7 @@ Each module should follow these patterns:
 
 ---
 
-**Last Updated:** 2026-03-05
+**Last Updated:** 2026-11-26
 **Project:** Minerust - Voxel Rendering Engine
 **Language:** Rust
 **License:** See LICENSE file

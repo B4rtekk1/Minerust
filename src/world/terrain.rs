@@ -3,7 +3,7 @@ use crate::core::biome::Biome;
 use crate::core::block::BlockType;
 use crate::core::chunk::Chunk;
 use crate::render::quad::{PackedQuad, emit_packed_quad};
-use crate::world::generator::ChunkGenerator;
+use crate::world::generator::{ChunkGenerator, GeneratorVersion};
 use crate::world::skylight;
 use parking_lot::RwLock;
 use rand::random;
@@ -59,6 +59,9 @@ pub struct World {
     /// can be serialized (F5 save) and later restored with identical terrain.
     pub seed: u32,
 
+    /// Terrain-shaping rules used by synchronous and background generation.
+    pub generator_version: GeneratorVersion,
+
     /// Terrain generator used for synchronous chunk generation.  Worker threads
     /// in `ChunkLoader` each hold their own clone of this generator.
     generator: ChunkGenerator,
@@ -110,12 +113,17 @@ impl World {
 
     /// Creates a new empty world with the given `seed`.
     pub fn new_empty_with_seed(seed: u32) -> Self {
+        Self::new_empty_with_seed_and_version(seed, GeneratorVersion::Current)
+    }
+
+    pub fn new_empty_with_seed_and_version(seed: u32, generator_version: GeneratorVersion) -> Self {
         World {
             chunks: FxHashMap::default(),
             last_cleanup_cx: i32::MIN,
             last_cleanup_cz: i32::MIN,
             seed,
-            generator: ChunkGenerator::new(seed),
+            generator_version,
+            generator: ChunkGenerator::new_with_version(seed, generator_version),
             instance_id: {
                 static NEXT_WORLD_ID: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(1);
@@ -131,7 +139,11 @@ impl World {
     /// chunk X and Z, giving the player visible terrain immediately on spawn
     /// without waiting for the background `ChunkLoader`.
     pub fn new_with_seed(seed: u32) -> Self {
-        let mut world = Self::new_empty_with_seed(seed);
+        Self::new_with_seed_and_version(seed, GeneratorVersion::Current)
+    }
+
+    pub fn new_with_seed_and_version(seed: u32, generator_version: GeneratorVersion) -> Self {
+        let mut world = Self::new_empty_with_seed_and_version(seed, generator_version);
         world.generate_chunks_in_radius(0, 0, RENDER_DISTANCE);
         world
     }
@@ -163,8 +175,11 @@ impl World {
         outer_radius: i32,
     ) {
         thread::spawn(move || {
-            let seed = world.read().seed;
-            let generator = ChunkGenerator::new(seed);
+            let (seed, generator_version) = {
+                let world = world.read();
+                (world.seed, world.generator_version)
+            };
+            let generator = ChunkGenerator::new_with_version(seed, generator_version);
 
             for cx in (center_cx - outer_radius)..=(center_cx + outer_radius) {
                 for cz in (center_cz - outer_radius)..=(center_cz + outer_radius) {

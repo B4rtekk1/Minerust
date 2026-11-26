@@ -1184,11 +1184,14 @@ impl State {
             "World generation deferred until New World is clicked.",
         );
 
-        let seed = world.read().seed;
+        let (seed, generator_version) = {
+            let world = world.read();
+            (world.seed, world.generator_version)
+        };
         // `ChunkLoader` generates chunk data (terrain noise, biomes, structures)
         // on background threads.  It is seeded from the world so that chunk
         // generation is deterministic and seamlessly continuous across sessions.
-        let chunk_loader = ChunkLoader::new(seed);
+        let chunk_loader = ChunkLoader::new_with_version(seed, generator_version);
 
         // `MeshLoader` converts raw chunk block data into GPU vertex/index
         // buffers.  It runs on a pool of worker threads whose count is chosen

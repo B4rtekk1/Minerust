@@ -2,16 +2,19 @@
 
 ## Overview
 
-The `app/` module is the heart of the Minerust application. It manages the main game loop, window initialization, GPU device management, input handling, and overall application state. This module orchestrates all other systems (rendering, world generation, networking, UI).
+The binary's `app/` module coordinates the window event loop, graphics setup, input, updates, rendering, and the optional dedicated server. The library exposes the game/domain modules; `app` is private to the binary.
 
 ## Module Structure
 
 ```
 app/
-├── mod.rs              ← Module declaration and public API
+├── mod.rs              ← Private module declarations; exports run_game
+├── bench.rs            ← Rendering benchmark mode
+├── graphics.rs         ← Graphics state and setup
 ├── init.rs             ← Initialization (window, GPU device)
-├── game.rs             ← Main game instance
-├── state.rs            ← Application state management
+├── game.rs             ← Event loop, CLI args, and client/server startup
+├── performance.rs      ← Performance measurement helpers
+├── state.rs            ← Application state
 ├── input.rs            ← Input event handling
 ├── update.rs           ← Game state updates
 ├── render.rs           ← Rendering pipeline dispatch
@@ -19,6 +22,13 @@ app/
 ├── server.rs           ← Server functionality
 └── texture_cache.rs    ← Texture loading and caching
 ```
+
+## Current implementation note
+
+`cargo run` starts the windowed client. `cargo run -- --server` starts the headless TCP
+server, and `--port` changes its port (default `25565`). The detailed sections below
+include older design sketches and should not be treated as an exact list of current app
+types or key bindings; use `game.rs`, `input.rs`, and `state.rs` as the source of truth.
 
 ## File Documentation
 
